@@ -46,6 +46,8 @@ export type TransferOutcome =
   | { kind: "matched"; transfer: TransferRow; request: PaymentRequestRow; via: "amount" | "claim" };
 
 const isUniqueError = (err: unknown) => err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
+/** A tag identifies a short payment only when it is at least 0.01 of a token and at least half of what is still due. */
+export const MIN_TAG_MATCH_UNITS = 10_000;
 export const TAG_QUARANTINE_DAYS = 30;
 const randomTag = () => 1 + Math.floor(Math.random() * MAX_TAG);
 
@@ -113,7 +115,7 @@ export async function addClaim(db: D1Database, requestId: number, txHash: string
   }
 }
 
-/** The request a transfer pays: the exact amount still due, then a tag on a short payment, and only then a claimed hash. */
+/** The request a transfer pays: the exact amount still due, then a tag on a short payment (see MIN_TAG_MATCH_UNITS), and only then a claimed hash. */
 export async function matchTransfer(
   db: D1Database,
   t: { txHash: string; token: Token; amountUnits: number },
@@ -124,9 +126,9 @@ export async function matchTransfer(
     .all<PaymentRequestRow>()).results;
   if (exact.length === 1) return { request: exact[0], via: "amount" };
   if (exact.length > 1) return null;
-  const tagged = (await db
-    .prepare("SELECT * FROM payment_requests WHERE status = 'open' AND token = ? AND tag = ? AND amount_units - paid_units >= ?")
-    .bind(t.token, tagOf(t.amountUnits), t.amountUnits)
+  const tagged = t.amountUnits < MIN_TAG_MATCH_UNITS ? [] : (await db
+    .prepare("SELECT * FROM payment_requests WHERE status = 'open' AND token = ? AND tag = ? AND amount_units - paid_units >= ? AND amount_units - paid_units <= ? * 2")
+    .bind(t.token, tagOf(t.amountUnits), t.amountUnits, t.amountUnits)
     .all<PaymentRequestRow>()).results;
   if (tagged.length === 1) return { request: tagged[0], via: "amount" };
   if (tagged.length > 1) return null;

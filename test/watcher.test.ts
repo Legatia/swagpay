@@ -187,7 +187,7 @@ describe("runWatcher", () => {
   it("reports each credit from its own point in time", async () => {
     const { order, stub, req } = await pendingDeposit(6262);
     await setLastBlock(900);
-    const a = usdcLog(905, req.amount_units - 157_500_000, 9);
+    const a = usdcLog(905, req.amount_units - 57_500_000, 9);
     const b = usdcLog(906, 300_000_000, 10);
     await addClaim(env.DB, req.id, b.transactionHash);
     await runWatcher(env, { rpc: fakeRpc(940, [a, b]).rpc, telegram: silent });
@@ -197,7 +197,7 @@ describe("runWatcher", () => {
     });
     const over = (await listEscalations(env.DB, { status: "open" })).filter((x) => x.order_id === order.id && x.summary.includes("overpaid"));
     expect(over).toHaveLength(1);
-    expect(over[0].summary).toContain("overpaid by 142.500000");
+    expect(over[0].summary).toContain("overpaid by 242.500000");
   });
 
   it("notifies already-recorded transfers even when the RPC is down", async () => {

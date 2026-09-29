@@ -72,6 +72,15 @@ describe("recordTransfer", () => {
     if (rest.kind === "matched") expect(rest.request).toMatchObject({ id: req.id, status: "paid", paid_units: req.amount_units });
   });
 
+  it("matches a tag only for a payment of at least 0.01 and half of what is due", async () => {
+    const { req } = await depositRequest(25750, [4242]);
+    expect(req.amount_units).toBe(257_504_242);
+    expect((await recordTransfer(env.DB, transfer({ amountUnits: 4242 }))).kind).toBe("unmatched");
+    expect((await recordTransfer(env.DB, transfer({ amountUnits: 25_754_242 }))).kind).toBe("unmatched"); // about 10% of the amount due
+    const half = await recordTransfer(env.DB, transfer({ amountUnits: 128_754_242 }));
+    expect(half.kind === "matched" && half.request.id).toBe(req.id);
+  });
+
   it("leaves a transfer that matches nothing unmatched", async () => {
     await depositRequest(25750, [303]);
     const odd = await recordTransfer(env.DB, transfer({ amountUnits: 123_450_000 }));
