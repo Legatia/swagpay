@@ -1,9 +1,11 @@
 import { Agent } from "agents";
-import { insertDecision, saveOrderSpec } from "../db";
+import { getOrderById, insertDecision, saveOrderSpec } from "../db";
 import { createEscalation, type EscalationKind } from "../escalations";
+import { ratesFor } from "../fx";
 import type { Intake } from "../intake";
 import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
+import { priceBand } from "../quote-text";
 import { SqlR2ConversationStore } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
 import { runTurn, type ConversationStore, type TurnResult } from "./loop";
@@ -72,6 +74,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.sql`CREATE TABLE IF NOT EXISTS spec (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS escalated (key TEXT PRIMARY KEY, escalation_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open')`;
+    this.sql`CREATE TABLE IF NOT EXISTS printer_costs (spec_key TEXT PRIMARY KEY, cost_grosze INTEGER NOT NULL, escalation_id INTEGER NOT NULL, note TEXT, at TEXT NOT NULL)`;
     this.tablesReady = true;
   }
 
@@ -98,10 +101,39 @@ export class OrderAgent extends Agent<Env, OrderState> {
     }
   }
 
+  /** The owner answered a cost request; store the cost for the items it was asked for and wake the agent. */
+  async setPrinterCost(escalationId: number, costPln: number, note: string | null): Promise<void> {
+    this.ensureTables();
+    this.orderId();
+    const row = this.sql<{ key: string }>`SELECT key FROM escalated WHERE escalation_id = ${escalationId}`[0];
+    if (!row || !row.key.startsWith("cost:")) throw new Error(`#${escalationId} is not a cost request for this order`);
+    const grosze = Math.round(costPln * 100);
+    this.sql`INSERT OR REPLACE INTO printer_costs (spec_key, cost_grosze, escalation_id, note, at) VALUES (${row.key.slice(5)}, ${grosze}, ${escalationId}, ${note}, ${new Date().toISOString()})`;
+    this.sql`UPDATE escalated SET status = 'approved' WHERE escalation_id = ${escalationId}`;
+    let band = "";
+    try {
+      const policy = this.loadTurnPolicy();
+      const parts: string[] = [];
+      for (const c of ["USD", "EUR"] as const) {
+        const r = await ratesFor(this.env.DB, c);
+        if (r) {
+          const { lo, hi } = priceBand(grosze / 100, r.plnPerUnit, policy);
+          parts.push(`${lo.toFixed(2)}–${hi.toFixed(2)} ${c}`);
+        }
+      }
+      if (parts.length) band = ` At today's rates the allowed price is ${parts.join(" or ")}.`;
+    } catch (err) {
+      console.error("price band unavailable", err);
+    }
+    const notePart = note ? ` Owner's note: ${JSON.stringify(note)}.` : "";
+    this.addInbox({ kind: "event", text: `Printer cost from the owner (escalation #${escalationId}): ${(grosze / 100).toFixed(2)} PLN gross, delivery included.${notePart}${band} You can now send the quote with send_quote.` });
+    await this.trigger();
+  }
+
   async ownerDecision(e: { id: number; kind: EscalationKind; summary: string }, decision: "approved" | "rejected", note: string | null): Promise<void> {
     this.ensureTables();
     this.orderId();
-    if (e.kind === "system") {
+    if (e.kind === "system" || e.kind === "payment") {
       // An acknowledgement only re-arms the notice; it costs no model call.
       this.sql`DELETE FROM escalated WHERE escalation_id = ${e.id}`;
       return;
@@ -267,6 +299,15 @@ export class OrderAgent extends Agent<Env, OrderState> {
         wasPreviewed: async (fileId) => this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM previews WHERE file_id = ${fileId}`[0].n > 0,
         logDecision: (d) => log({ orderId, ...d }),
         escalateOnce: (key, kind, summary, payload) => this.escalateOnce(orderId, key, kind, summary, payload),
+        orderSummary: async () => {
+          const row = await getOrderById(this.env.DB, orderId);
+          if (!row) throw new Error("order row missing");
+          return { number: row.id, status: row.status, deliverBy: new Date(row.deliver_by), deliveryPlace: row.delivery_place };
+        },
+        printerCost: async (key) => {
+          const row = this.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs WHERE spec_key = ${key}`[0];
+          return row ? row.cost_grosze / 100 : null;
+        },
       });
     } catch (err) {
       this.addThread("system", "Something went wrong on our side. Your message is saved and the agent will pick it up.");

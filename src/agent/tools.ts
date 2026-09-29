@@ -2,9 +2,10 @@ import { z } from "zod";
 import type { BetaTool } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import type { NewDecision } from "../db";
 import { toBase64 } from "../ids";
-import { OrderSpecSchema, missingInfo, specErrors, type OrderSpec } from "../order-spec";
+import { OrderSpecSchema, itemsKey, missingInfo, specErrors, type OrderSpec } from "../order-spec";
 import { checkItem, type Policy, type Verdict } from "../policy";
 import { countPdfPages, imageSize, sniffMediaType } from "../sniff";
+import { costRequestText } from "../quote-text";
 import { sanitize } from "./inbox";
 import type { ToolHandler, ToolOutcome } from "./loop";
 
@@ -34,7 +35,10 @@ export interface ToolContext {
   previewedBytes(): Promise<number>;
   wasPreviewed(fileId: string): Promise<boolean>;
   logDecision(d: Omit<NewDecision, "orderId">): Promise<void>;
-  escalateOnce(key: string, kind: "approval" | "agent", summary: string, payload: unknown): Promise<{ id: number; status: "open" | "approved" | "rejected"; created: boolean }>;
+  orderSummary(): Promise<{ number: number; status: string; deliverBy: Date; deliveryPlace: string }>;
+  /** PLN gross (delivery included) the owner gave for these items, or null. */
+  printerCost(specKey: string): Promise<number | null>;
+  escalateOnce(key: string, kind: "approval" | "agent" | "cost", summary: string, payload: unknown): Promise<{ id: number; status: "open" | "approved" | "rejected"; created: boolean }>;
 }
 
 const reason = z.string().trim().min(3).max(500).describe("One sentence on why, for the public decision log");
@@ -43,6 +47,7 @@ const AskHostInput = z.object({ message: z.string().trim().min(1).max(2000).desc
 const UpdateOrderInput = z.object({ spec: OrderSpecSchema.describe("The whole order as it now stands"), reason });
 const CheckArtworkInput = z.object({ fileId: z.string().min(1).max(64), reason });
 const EscalateInput = z.object({ summary: z.string().trim().min(3).max(500).describe("What the owner needs to decide or know"), reason });
+const RequestCostInput = z.object({ note: z.string().trim().max(500).optional().describe("Anything the printer needs to know, e.g. ink colours"), reason });
 
 function inputSchema(schema: z.ZodType): BetaTool.InputSchema {
   const json = z.toJSONSchema(schema) as Record<string, unknown>;
@@ -70,6 +75,11 @@ export const TOOL_DEFINITIONS: BetaTool[] = [
     name: "escalate",
     description: "Ask the owner to decide something you may not decide yourself, or tell them about a problem you can't solve. Their decision arrives later as an event.",
     input_schema: inputSchema(EscalateInput),
+  },
+  {
+    name: "request_printer_cost",
+    description: "Ask the owner for the printer's cost of the complete order. The cost arrives later as an event.",
+    input_schema: inputSchema(RequestCostInput),
   },
 ];
 
@@ -184,6 +194,28 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
       return waiting
         ? { verdict: "escalate", outcome: "escalated", detail: decided.map((d) => d.r).join("; "), result: { content: lines.join(" ") } }
         : { verdict: "allow", outcome: "done", result: { content: lines.join(" ") } };
+    }),
+
+    request_printer_cost: logged(ctx, "request_printer_cost", RequestCostInput, async ({ note }) => {
+      const spec = await ctx.getSpec();
+      const missing = missingInfo(spec);
+      if (missing.length) {
+        const detail = `the order is not complete: ${missing.join("; ")}`;
+        return { verdict: "block", outcome: "blocked", detail, result: { content: `Not asked. ${detail}`, isError: true } };
+      }
+      const key = await itemsKey(spec);
+      const known = await ctx.printerCost(key);
+      if (known !== null) {
+        return { verdict: "none", outcome: "done", result: { content: `The owner already gave the printer cost for this order: ${known.toFixed(2)} PLN gross, delivery included. Use send_quote.` } };
+      }
+      const order = await ctx.orderSummary();
+      const e = await ctx.escalateOnce(`cost:${key}`, "cost", costRequestText(order.number, spec, order.deliverBy, order.deliveryPlace, note), { specKey: key });
+      const content = e.status === "rejected"
+        ? `The owner declined to price this order (#${e.id}). Tell the host a person will contact them.`
+        : e.created
+          ? `Asked the owner for the printer cost (#${e.id}). It arrives as an event; tell the host you are getting the price.`
+          : `Still waiting for the owner's printer cost (#${e.id}).`;
+      return { verdict: "escalate", outcome: "escalated", detail: `#${e.id}`, result: { content } };
     }),
 
     escalate: logged(ctx, "escalate", EscalateInput, async ({ summary: raw }) => {

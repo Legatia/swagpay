@@ -29,7 +29,7 @@ export function createTelegram(token: string | undefined, fetchImpl: typeof fetc
       const result = (await call("sendMessage", {
         chat_id: chatId,
         text: text.slice(0, 4000),
-        ...(buttons ? { reply_markup: { inline_keyboard: buttons.map((r) => r.map((b) => ({ text: b.text, callback_data: b.data }))) } } : {}),
+        ...(buttons?.length ? { reply_markup: { inline_keyboard: buttons.map((r) => r.map((b) => ({ text: b.text, callback_data: b.data }))) } } : {}),
       })) as { message_id?: number } | null;
       return result?.message_id ?? null;
     },
@@ -44,7 +44,8 @@ export function escalationText(e: EscalationRow): string {
 }
 
 export function escalationButtons(e: EscalationRow): InlineButton[][] {
-  if (e.kind === "system") return [[{ text: "Acknowledge", data: `esc:${e.id}:approve` }]];
+  if (e.kind === "system" || e.kind === "payment") return [[{ text: "Acknowledge", data: `esc:${e.id}:approve` }]];
+  if (e.kind === "cost") return [[{ text: "Reject", data: `esc:${e.id}:reject` }]];
   return [[{ text: "Approve", data: `esc:${e.id}:approve` }, { text: "Reject", data: `esc:${e.id}:reject` }]];
 }
 

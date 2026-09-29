@@ -3,10 +3,12 @@ import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
 import { createOrder } from "../src/db";
-import { createEscalation, getEscalation } from "../src/escalations";
+import { createEscalation, getEscalation, listEscalations } from "../src/escalations";
 import { IntakeSchema } from "../src/intake";
 import { handleTelegram } from "../src/telegram-webhook";
 import type { TelegramClient } from "../src/telegram";
+import { completeSpec } from "./fixtures";
+import { msg, scriptedModel, toolUse } from "./helpers";
 
 const intake = IntakeSchema.parse({
   eventName: "Builders meetup", eventDate: "2099-10-08", deliverBy: "2099-10-08T17:00",
@@ -189,5 +191,49 @@ describe("Telegram webhook", () => {
     const res = await SELF.fetch(update(fromOwner("/help")));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
+  });
+
+  async function orderWithCostRequest() {
+    const { order } = await createOrder(env.DB, intake, new Date("2099-01-01T10:00:00Z"));
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.telegramOverride = { async send() { return 1; }, async answerCallback() {} };
+      await agent.init(order.id, intake);
+      agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(completeSpec)})`;
+      agent.modelOverride = scriptedModel([msg([toolUse("request_printer_cost", { reason: "order complete" })], "tool_use"), msg([], "end_turn")]);
+      await agent.processTurn();
+    });
+    const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.order_id === order.id && x.kind === "cost")!;
+    return { order, stub, e };
+  }
+
+  it("records a cost with /cost and tells the agent", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1200,50 Drukarnia X`)), env, t);
+    expect(t.sent[0]).toBe(`#${e.id}: 1200.50 PLN recorded for order ${order.id}.`);
+    expect(await getEscalation(env.DB, e.id)).toMatchObject({ status: "approved", decision_note: "1200.50 PLN; Drukarnia X" });
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(120050);
+    });
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 900`)), env, t);
+    expect(t.sent[1]).toBe(`#${e.id} is already approved.`);
+  });
+
+  it("refuses bad amounts, other kinds and a plain approve on a cost request", async () => {
+    const { e } = await orderWithCostRequest();
+    const other = await orderWithEscalation();
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 12x`)), env, t);
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 0`)), env, t);
+    await handleTelegram(update(fromOwner(`/cost ${other.e.id} 100`)), env, t);
+    await handleTelegram(update(fromOwner(`/approve ${e.id}`)), env, t);
+    expect(t.sent).toEqual([
+      "Usage: /cost <id> <PLN gross, delivery included> [note]",
+      "Usage: /cost <id> <PLN gross, delivery included> [note]",
+      `#${other.e.id} is not a cost request.`,
+      `#${e.id} needs a price: /cost ${e.id} <PLN gross, delivery included> [note]`,
+    ]);
+    expect((await getEscalation(env.DB, e.id))?.status).toBe("open");
   });
 });

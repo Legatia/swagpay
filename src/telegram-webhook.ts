@@ -14,6 +14,7 @@ export const HELP = [
   "/approve <id> [note]",
   "/reject <id> [note]",
   "/resend <id> — re-send a decision the agent missed",
+  "/cost <id> <PLN> [note] — printer cost for a cost request",
   "/order <number> — order status",
 ].join("\n");
 
@@ -31,7 +32,9 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
       const order = await getOrderById(env.DB, row.order_id);
       if (order) {
         const agent = await getAgentByName(env.OrderAgent, order.instance);
-        await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, row.status as "approved" | "rejected", row.decision_note);
+        const cost = row.kind === "cost" && row.status === "approved" ? /^(\d+\.\d{2}) PLN(?:; ([\s\S]*))?$/.exec(row.decision_note ?? "") : null;
+        if (cost) await agent.setPrinterCost(row.id, Number(cost[1]), cost[2] ?? null);
+        else await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, row.status as "approved" | "rejected", row.decision_note);
       }
     }
     await markDelivered(env.DB, row.id);
@@ -44,6 +47,10 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
 
 /** Decides an escalation in D1, then tells the order's agent. Returns the reply for the owner (short: button toasts stop at 200 characters). */
 export async function decide(env: Env, id: number, status: "approved" | "rejected", note: string | null): Promise<string> {
+  if (status === "approved") {
+    const pending = await getEscalation(env.DB, id);
+    if (pending?.kind === "cost" && pending.status === "open") return `#${id} needs a price: /cost ${id} <PLN gross, delivery included> [note]`;
+  }
   const row = await decideEscalation(env.DB, id, status, note);
   if (!row) {
     const existing = await getEscalation(env.DB, id);
@@ -53,6 +60,23 @@ export async function decide(env: Env, id: number, status: "approved" | "rejecte
   }
   const w = word(row.kind, row.status);
   return (await deliver(env, row)) ? `#${id} ${w}.` : `#${id} ${w}, but the agent could not be told. Send /resend ${id} to retry.`;
+}
+
+/** "1200,50" or "1200.50" → 1200.5; null for anything else or zero. */
+export function parsePln(s: string | undefined): number | null {
+  if (!s || !/^\d{1,7}([.,]\d{1,2})?$/.test(s)) return null;
+  const n = Number(s.replace(",", "."));
+  return n > 0 ? n : null;
+}
+
+export async function giveCost(env: Env, id: number, amount: number, note: string | null): Promise<string> {
+  const e = await getEscalation(env.DB, id);
+  if (!e) return `#${id} doesn't exist.`;
+  if (e.kind !== "cost") return `#${id} is not a cost request.`;
+  const row = await decideEscalation(env.DB, id, "approved", `${amount.toFixed(2)} PLN${note ? `; ${note}` : ""}`);
+  if (!row) return `#${id} is already ${e.status}.`;
+  if (!(await deliver(env, row))) return `#${id} approved, but the agent could not be told. Send /resend ${id} to retry.`;
+  return `#${id}: ${amount.toFixed(2)} PLN recorded for order ${row.order_id}.`;
 }
 
 /** Re-sends a decided escalation the agent has not been told about. */
@@ -158,6 +182,13 @@ export async function handleTelegram(request: Request, env: Env, deps: { telegra
       case "/resend": {
         const id = parseId(arg);
         await reply(id !== null && id > 0 ? await resend(env, id) : "Usage: /resend <id>");
+        break;
+      }
+      case "/cost": {
+        const id = parseId(arg);
+        const amount = parsePln(words[2]);
+        const costNote = words.slice(3).join(" ").trim().slice(0, 500) || null;
+        await reply(id !== null && id > 0 && amount !== null ? await giveCost(env, id, amount, costNote) : "Usage: /cost <id> <PLN gross, delivery included> [note]");
         break;
       }
       case "/order": {

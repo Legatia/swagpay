@@ -6,6 +6,7 @@ import { createOrder, listDecisions } from "../src/db";
 import { getEscalation, listEscalations } from "../src/escalations";
 import { IntakeSchema } from "../src/intake";
 import type { TelegramClient } from "../src/telegram";
+import { completeSpec } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
 const intake = IntakeSchema.parse({
@@ -321,6 +322,27 @@ describe("OrderAgent", () => {
       await agent.processTurn();
       expect(agent.sql<{ file_id: string }>`SELECT file_id FROM previews`.map((r) => r.file_id)).toEqual([fileId]);
       expect(JSON.stringify(model.requests[1].messages.at(-1))).toContain(`File ${fileId} (name from the host:`);
+    });
+  });
+
+  it("records the owner's printer cost for the items it was asked for and wakes the agent", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.telegramOverride = { async send() { return 1; }, async answerCallback() {} };
+      await agent.init(order.id, intake);
+      agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(completeSpec)})`;
+      agent.modelOverride = scriptedModel([
+        msg([toolUse("request_printer_cost", { reason: "order complete" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      await agent.processTurn();
+      const escalationId = agent.sql<{ escalation_id: number }>`SELECT escalation_id FROM escalated WHERE key LIKE 'cost:%'`[0].escalation_id;
+      await agent.setPrinterCost(escalationId, 1200.5, "Drukarnia X");
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
+      expect(inbox).toContain(`Printer cost from the owner (escalation #${escalationId}): 1200.50 PLN gross, delivery included.`);
+      expect(inbox).toContain('Owner\'s note: "Drukarnia X"');
+      expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(120050);
+      await expect(agent.setPrinterCost(999_999, 10, null)).rejects.toThrow("not a cost request");
     });
   });
 });

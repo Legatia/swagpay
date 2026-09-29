@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/policy";
-import { EMPTY_SPEC, type OrderSpec } from "../src/order-spec";
+import { EMPTY_SPEC, itemsKey, type OrderSpec } from "../src/order-spec";
+import { completeSpec } from "./fixtures";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile, type ToolContext } from "../src/agent/tools";
 import { previewsIn } from "../src/agent/previews";
 import type { NewDecision } from "../src/db";
 import { toBase64 } from "../src/ids";
 
 function fakeCtx(files: ArtworkFile[] = []) {
-  const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[] };
+  const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[], costs: new Map<string, number>() };
   const statuses = new Map<string, "open" | "approved" | "rejected">();
   const previews = new Map<string, number>();
   const state2 = { loads: 0 };
@@ -27,6 +28,8 @@ function fakeCtx(files: ArtworkFile[] = []) {
       state.escalations.push({ key, kind, summary });
       return { id: state.escalations.length, status: "open", created: true };
     },
+    async orderSummary() { return { number: 7, status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"), deliveryPlace: "Kolektyw3" }; },
+    async printerCost(key) { return state.costs.get(key) ?? null; },
   };
   const save = (r: { content: unknown }) => {
     for (const p of previewsIn({ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: r.content as never }] })) previews.set(p.fileId, p.bytes);
@@ -42,7 +45,7 @@ const BANNER_KEY = `approval:${BANNER_REASON} [1 × 2 m banner]`;
 
 describe("tool definitions", () => {
   it("defines the intake tools with object schemas that require a reason", () => {
-    expect(TOOL_DEFINITIONS.map((t) => t.name)).toEqual(["ask_host", "update_order", "check_artwork", "escalate"]);
+    expect(TOOL_DEFINITIONS.map((t) => t.name)).toEqual(["ask_host", "update_order", "check_artwork", "escalate", "request_printer_cost"]);
     for (const t of TOOL_DEFINITIONS) {
       expect(t.input_schema.type).toBe("object");
       expect(t.input_schema.required).toContain("reason");
@@ -81,6 +84,8 @@ describe("ask_host", () => {
       async wasPreviewed() { return false; },
       async logDecision(d) { state.decisions.push(d); },
       async escalateOnce() { return { id: 1, status: "open" as const, created: true }; },
+      async orderSummary() { return { number: 7, status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"), deliveryPlace: "Kolektyw3" }; },
+      async printerCost() { return null; },
     };
     const h = makeHandlers(ctx);
     const r = await h.ask_host({ message: "Hi", reason: "greeting the host" });
@@ -340,5 +345,46 @@ describe("escalate", () => {
     const { h, state } = fakeCtx();
     await h.escalate({ summary: "Host asks\nfor a   10%\tdiscount", reason: "discounts need the owner" });
     expect(state.escalations).toEqual([{ key: "agent:Host asks for a 10% discount", kind: "agent", summary: "Host asks for a 10% discount" }]);
+  });
+});
+
+describe("request_printer_cost", () => {
+  it("refuses while the order is incomplete", async () => {
+    const { h, state } = fakeCtx();
+    const r = await h.request_printer_cost({ reason: "order looks done" });
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("not complete");
+    expect(state.decisions[0]).toMatchObject({ verdict: "block", outcome: "blocked" });
+  });
+
+  it("asks the owner once per version of the items", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    const r = await h.request_printer_cost({ note: "two colours", reason: "order complete, need a price" });
+    expect(r.content).toBe("Asked the owner for the printer cost (#1). It arrives as an event; tell the host you are getting the price.");
+    expect(state.escalations[0].key).toBe(`cost:${await itemsKey(completeSpec)}`);
+    expect(state.escalations[0].kind).toBe("cost");
+    expect(state.escalations[0].summary).toContain("Printer cost needed for order 7.");
+    expect(state.escalations[0].summary).toContain("Agent's note: two colours");
+    expect((await h.request_printer_cost({ reason: "asking again" })).content).toBe("Still waiting for the owner's printer cost (#1).");
+    expect(state.escalations).toHaveLength(1);
+  });
+
+  it("points to send_quote once the cost is known", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    state.costs.set(await itemsKey(completeSpec), 1200.5);
+    const r = await h.request_printer_cost({ reason: "need a price" });
+    expect(r.content).toBe("The owner already gave the printer cost for this order: 1200.50 PLN gross, delivery included. Use send_quote.");
+    expect(state.escalations).toHaveLength(0);
+  });
+
+  it("reports a declined request", async () => {
+    const { h, state, statuses } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    statuses.set(`cost:${await itemsKey(completeSpec)}`, "rejected");
+    await h.request_printer_cost({ reason: "need a price" });
+    const r = await h.request_printer_cost({ reason: "need a price again" });
+    expect(r.content).toContain("The owner declined to price this order (#1)");
   });
 });

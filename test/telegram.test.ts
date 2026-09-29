@@ -55,6 +55,14 @@ describe("escalation messages", () => {
     expect(escalationButtons(row({ kind: "system" }))).toEqual([[{ text: "Acknowledge", data: "esc:7:approve" }]]);
   });
 
+  it("offers only Reject on a cost request and sends no keyboard for none", async () => {
+    expect(escalationButtons(row({ kind: "cost" }))).toEqual([[{ text: "Reject", data: "esc:7:reject" }]]);
+    expect(escalationButtons(row({ kind: "payment" }))).toEqual([[{ text: "Acknowledge", data: "esc:7:approve" }]]);
+    const { calls, fetchImpl } = recorder();
+    await createTelegram("T", fetchImpl).send("42", "plain", []);
+    expect(calls[0].body).toEqual({ chat_id: "42", text: "plain" });
+  });
+
   it("notifies the owner and stores the message id, and never throws", async () => {
     const { order } = await createOrder(env.DB, IntakeSchema.parse({
       eventName: "Builders meetup", eventDate: "2099-10-08", deliverBy: "2099-10-08T17:00",

@@ -1,4 +1,4 @@
-export type EscalationKind = "approval" | "agent" | "system";
+export type EscalationKind = "approval" | "agent" | "system" | "cost" | "payment";
 export type EscalationStatus = "open" | "approved" | "rejected";
 
 export interface EscalationRow {
