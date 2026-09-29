@@ -195,9 +195,13 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     const rates = await ratesFor(env.DB, quote.currency, now);
     if (!rates) return fail(503, "Exchange rates are updating. Please try again in a few minutes.");
     const policy = loadPolicy(env as unknown as Record<string, unknown>);
-    if (!quoteStillValid({ issuedAt: new Date(quote.issued_at), plnPerUnit: quote.pln_per_unit }, now, rates.plnPerUnit, policy)) {
+    if (Date.parse(quote.valid_until) <= now.getTime() || !quoteStillValid({ issuedAt: new Date(quote.issued_at), plnPerUnit: quote.pln_per_unit }, now, rates.plnPerUnit, policy)) {
       await expireQuote(env.DB, quote.id);
-      await agent.pushEvent(`Quote #${quote.id} expired before the host accepted it: it is older than ${policy.quoteValidityHours} hours or the złoty moved more than the FX buffer. Send a new quote with send_quote.`);
+      try {
+        await agent.pushEvent(`Quote #${quote.id} expired before the host accepted it: it is older than ${policy.quoteValidityHours} hours or the złoty moved more than the FX buffer. Send a new quote with send_quote.`);
+      } catch (err) {
+        console.error("could not tell the agent about the expired quote", err);
+      }
       return fail(409, "This quote has expired. The agent will send a new one shortly.");
     }
     const accepted = await acceptQuote(env.DB, quote.id, now);
@@ -209,12 +213,16 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
       await reopenQuote(env.DB, quote.id);
       throw err;
     }
-    await setOrderStatus(env.DB, order.id, ["quoted"], "deposit_pending");
-    const amount = `${formatUnits(payment.amount_units)} ${payment.token}`;
-    await agent.pushEvent(
-      `The host accepted quote #${quote.id}. Deposit request #${payment.id}: ${amount} on Arc. Payments arrive as events.`,
-      `Quote #${quote.id} accepted. Deposit due: ${amount}.`,
-    );
+    try {
+      await setOrderStatus(env.DB, order.id, ["quoted"], "deposit_pending");
+      const amount = `${formatUnits(payment.amount_units)} ${payment.token}`;
+      await agent.pushEvent(
+        `The host accepted quote #${quote.id}. Deposit request #${payment.id}: ${amount} on Arc. Payments arrive as events.`,
+        `Quote #${quote.id} accepted. Deposit due: ${amount}.`,
+      );
+    } catch (err) {
+      console.error("acceptance committed but follow-up failed", err);
+    }
     return json(201, { requestId: payment.id }, NO_STORE);
   }
 
@@ -224,6 +232,9 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     if (!/^0x[0-9a-f]{64}$/.test(txHash)) return fail(400, "paste the transaction hash: 0x followed by 64 characters");
     const payment = await getPaymentRequest(env.DB, Number(m[3]));
     if (!payment || payment.order_id !== order.id) return fail(404, "payment request not found");
+    if (payment.status !== "open") return fail(409, "This payment is already complete.");
+    const claims = (await env.DB.prepare("SELECT COUNT(*) AS n FROM payment_claims WHERE request_id = ?").bind(payment.id).first<{ n: number }>())?.n ?? 0;
+    if (claims >= 5) return fail(429, "Too many transaction hashes for this payment. The owner will check it.");
     if ((await addClaim(env.DB, payment.id, txHash)) === "taken") return fail(409, "That transaction is already linked to another payment.");
     return json(201, { ok: true });
   }

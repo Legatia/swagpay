@@ -2,7 +2,7 @@ import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { OrderAgent } from "../src/agent/order-agent";
-import { getOrderByToken } from "../src/db";
+import { getOrderByToken, setOrderStatus } from "../src/db";
 import { createQuote, getQuote } from "../src/quotes";
 import { handleApi } from "../src/api";
 
@@ -203,6 +203,55 @@ describe("API", () => {
     const { requestId: otherId } = await (await accept(second.token, second.quote.id)).json<{ requestId: number }>();
     const taken = await SELF.fetch(`${base}/api/o/${second.token}/payments/${otherId}/claim`, { method: "POST", body: JSON.stringify({ txHash: h }) });
     expect(taken.status).toBe(409);
+  });
+
+  it("reopens the quote when the deposit request can't be created", async () => {
+    const token = await newOrder();
+    const order = (await getOrderByToken(env.DB, token))!;
+    await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?)").bind(new Date().toISOString()).run();
+    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 0, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757 }, new Date(), 48);
+    expect((await accept(token, quote.id)).status).toBe(500);
+    expect((await getQuote(env.DB, quote.id))?.status).toBe("open");
+  });
+
+  it("refuses to accept when the order is no longer quoted", async () => {
+    const { token, order, quote } = await quotedOrder();
+    await setOrderStatus(env.DB, order.id, ["quoted"], "deposit_pending");
+    const res = await accept(token, quote.id);
+    expect(res.status).toBe(409);
+    expect((await res.json<{ error: string }>()).error).toContain("already has an accepted quote");
+  });
+
+  it("expires a quote when the złoty moved past the buffer", async () => {
+    const { token, quote } = await quotedOrder();
+    await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 3.7, '2099-09-30', ?)").bind(new Date().toISOString()).run();
+    expect((await accept(token, quote.id)).status).toBe(409);
+    expect((await getQuote(env.DB, quote.id))?.status).toBe("expired");
+  });
+
+  it("serves null rates when they are stale", async () => {
+    const old = new Date(Date.now() - 7 * 3_600_000).toISOString();
+    await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?), ('EUR', 4.3, '2099-09-30', ?)").bind(old, old).run();
+    const body = await (await SELF.fetch(`${base}/api/pricing`)).json<{ plnPerUnit: unknown; fetchedAt: unknown; markupMin: number; fxBuffer: number; perOrderCapUsd: number }>();
+    expect(body.plnPerUnit).toBeNull();
+    expect(body.fetchedAt).toBeNull();
+    expect(body).toMatchObject({ markupMin: 0.4, fxBuffer: 0.03, perOrderCapUsd: 1000 });
+  });
+
+  it("scopes claims to the order, lowercases hashes, only for open requests and caps them", async () => {
+    const a = await quotedOrder();
+    const { requestId } = await (await accept(a.token, a.quote.id)).json<{ requestId: number }>();
+    const b = await quotedOrder();
+    const claim = (token: string, id: number, txHash: string) =>
+      SELF.fetch(`${base}/api/o/${token}/payments/${id}/claim`, { method: "POST", body: JSON.stringify({ txHash }) });
+    expect((await claim(b.token, requestId, `0x${"cd".repeat(32)}`)).status).toBe(404);
+    expect((await claim(a.token, requestId, `0x${"CD".repeat(32)}`)).status).toBe(201);
+    expect((await claim(a.token, requestId, `0x${"cd".repeat(32)}`)).status).toBe(201);
+    for (const n of ["01", "02", "03", "04"]) expect((await claim(a.token, requestId, `0x${n.repeat(32)}`)).status).toBe(201);
+    const sixth = await claim(a.token, requestId, `0x${"06".repeat(32)}`);
+    expect(sixth.status).toBe(429);
+    await env.DB.prepare("UPDATE payment_requests SET status = 'paid' WHERE id = ?").bind(requestId).run();
+    expect((await claim(a.token, requestId, `0x${"05".repeat(32)}`)).status).toBe(409);
   });
 
   it("caps new orders per day", async () => {

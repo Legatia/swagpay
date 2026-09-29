@@ -43,7 +43,7 @@ function renderQuote(quote) {
   if (!quote) return;
   $("quote-text").textContent = `Quote #${quote.id}: ${quote.price} ${quote.currency} for the whole order. Deposit: ${quote.deposit} ${quote.currency}.`;
   const until = new Date(quote.validUntil).toLocaleString("en-GB", { timeZone: "Europe/Warsaw", dateStyle: "medium", timeStyle: "short" });
-  $("quote-valid").textContent = quote.status === "open" ? `Valid until ${until} (Warsaw time).` : `This quote is ${quote.status}.`;
+  $("quote-valid").textContent = quote.status === "open" ? `Valid until ${until} (Warsaw time).` : quote.status === "accepted" ? "Quote accepted." : `This quote is ${quote.status}. The agent will send a new one.`;
   openQuoteId = quote.status === "open" ? quote.id : null;
   $("accept").hidden = openQuoteId === null;
 }
