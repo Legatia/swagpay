@@ -1,37 +1,30 @@
-:root {
-  --paper: #f5f6f9; --sheet: #ffffff; --ink: #171a38; --ink-2: #4a4f72; --rule: #d9dcea;
-  --magenta: #d7266f; --magenta-soft: #fbe3ee; --usdc: #2466c4; --usdc-soft: #e2ecfa;
-  --font-display: "Big Shoulders Display", "Arial Narrow", Arial, sans-serif;
-  --font-body: "Figtree", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --paper: #0f1124; --sheet: #171a33; --ink: #eceef9; --ink-2: #a9aecb; --rule: #2c3052;
-    --magenta: #ff5b9b; --magenta-soft: #3a1830; --usdc: #6ea2ff; --usdc-soft: #182a4d; color-scheme: dark; }
-}
+@import url("/brand-tokens.css");
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--font-body); line-height: 1.5; padding: 24px 16px 64px; }
+body { margin: 0; background: var(--page); color: var(--text); font-family: var(--font-body); line-height: 1.5; padding: 24px 16px 64px; }
 main { max-width: 760px; margin: 0 auto; display: grid; gap: 20px; }
-h1, h2 { font-family: var(--font-display); text-transform: uppercase; margin: 0; line-height: 1; }
+.site-logo { display: block; width: min(230px, 70vw); }
+.site-logo img { display: block; width: 100%; height: auto; }
+h1, h2 { font-family: var(--font-display); font-weight: 700; margin: 0; line-height: 1.1; letter-spacing: -0.025em; }
 h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); }
 h2 { font-size: 1.4rem; }
-.sheet { background: var(--sheet); border: 1px solid var(--rule); padding: 20px; display: grid; gap: 14px; min-width: 0; }
-.label { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); }
+.sheet { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: grid; gap: 14px; min-width: 0; }
+.label { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
 label { display: grid; gap: 6px; font-weight: 600; }
 input, textarea, button { font: inherit; }
-input, textarea { padding: 10px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); border-radius: 4px; width: 100%; }
-button { padding: 10px 16px; border: 0; border-radius: 4px; background: var(--ink); color: var(--sheet); font-weight: 600; cursor: pointer; }
+input, textarea { padding: 10px; border: 1px solid var(--line); background: var(--page); color: var(--text); border-radius: 8px; width: 100%; }
+button, .button-link { padding: 10px 16px; border: 0; border-radius: 8px; background: var(--action); color: var(--action-text); font-weight: 600; cursor: pointer; }
+.button-link { display: inline-block; text-decoration: none; }
 button:disabled { opacity: 0.6; cursor: default; }
-button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--magenta); outline-offset: 2px; }
+button:focus-visible, .button-link:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 560px) { .row { grid-template-columns: minmax(0, 1fr); } }
-.error { color: var(--magenta); min-height: 1.5em; }
+.error { color: var(--error); min-height: 1.5em; }
 .thread { display: grid; gap: 10px; }
-.bubble { padding: 10px 12px; border-radius: 6px; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
-.bubble.host { justify-self: end; background: var(--usdc-soft); }
-.bubble.agent { justify-self: start; background: var(--magenta-soft); }
-.bubble.system { justify-self: center; font-size: 0.85rem; color: var(--ink-2); background: none; }
+.bubble { padding: 10px 12px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble.host { justify-self: end; background: var(--payment-bubble); }
+.bubble.agent { justify-self: start; background: var(--agent-bubble); }
+.bubble.system { justify-self: center; font-size: 0.85rem; color: var(--text-muted); background: none; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { font-family: var(--font-mono); font-size: 0.8rem; border: 1px solid var(--rule); padding: 2px 8px; border-radius: 999px; }
-.muted { color: var(--ink-2); }
+.chip { font-family: var(--font-mono); font-size: 0.8rem; border: 1px solid var(--line); padding: 2px 8px; border-radius: 999px; }
+.muted { color: var(--text-muted); }
 .mono { font-family: var(--font-mono); overflow-wrap: anywhere; }

@@ -1,0 +1,80 @@
+@import url("brand-tokens.css");
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: #f5f6f9; color: #171a38; font-family: var(--font-body); line-height: 1.5; }
+a { color: inherit; }
+img { display: block; max-width: 100%; }
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 16px max(24px, calc((100vw - 1160px) / 2)); background: #fff; border-bottom: 1px solid #d9dcea; }
+.topbar a { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 700; }
+.topbar img { width: 34px; height: 34px; }
+.topbar span, .eyebrow, .section-number, .file-type, .hex { font-family: var(--font-mono); font-size: .73rem; letter-spacing: .08em; text-transform: uppercase; }
+.topbar span { color: #4a4f72; }
+main { max-width: 1208px; margin: 0 auto; padding: 36px 24px 100px; }
+.hero { display: grid; grid-template-columns: 1.05fr .95fr; overflow: hidden; min-height: 470px; border-radius: 26px; background: #171a38; color: #f5f6f9; }
+.hero-copy { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; padding: clamp(32px, 6vw, 80px); }
+.hero .eyebrow { color: #fbe3ee; }
+h1, h2, h3, p { margin-top: 0; }
+h1, h2 { font-family: var(--font-display); font-weight: 700; line-height: 1.06; letter-spacing: -.035em; }
+h1 { font-size: clamp(3.2rem, 6.8vw, 6.2rem); margin-bottom: 22px; }
+h2 { font-size: clamp(2.2rem, 4vw, 3.5rem); margin-bottom: 14px; }
+h3 { font-size: 1.1rem; margin-bottom: 8px; }
+.hero-copy > p:not(.eyebrow) { color: #fbe3ee; max-width: 35rem; font-size: 1.08rem; }
+.hero-art { display: grid; place-items: center; padding: 24px; background: #fbe3ee; }
+.hero-art img { width: min(100%, 460px); }
+.button { display: inline-block; padding: 11px 17px; border-radius: 8px; background: #d7266f; color: #ffffff; font-weight: 700; text-decoration: none; }
+.button:focus-visible, a:focus-visible { outline: 3px solid #d7266f; outline-offset: 3px; }
+.section { padding-top: 74px; }
+.section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.section-heading > div { max-width: 720px; }
+.section-number { color: #b91e5a; margin-bottom: 11px; }
+.section-heading p { color: #4a4f72; margin-bottom: 0; }
+.logo-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.logo-card { min-height: 260px; display: flex; flex-direction: column; justify-content: space-between; gap: 32px; padding: 28px; border: 1px solid #d9dcea; border-radius: 18px; background: #fff; }
+.logo-card.dark { background: #171a38; border-color: #171a38; color: #f5f6f9; }
+.logo-card.soft { background: #fbe3ee; }
+.logo-card img { width: min(100%, 360px); height: auto; }
+.logo-card.dark img { width: min(100%, 360px); }
+.logo-card small { font-family: var(--font-mono); font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; opacity: .78; }
+.swatches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.swatch { border: 1px solid #d9dcea; border-radius: 16px; overflow: hidden; background: #fff; }
+.swatch-color { height: 115px; background: var(--swatch); }
+.swatch-info { display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; }
+.swatch-info strong { font-size: .87rem; }
+.hex { color: #4a4f72; white-space: nowrap; }
+.type-grid, .mascot-grid, .ui-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.type-card, .mascot-card, .ui-card { padding: 28px; min-width: 0; border: 1px solid #d9dcea; border-radius: 18px; background: #fff; }
+.type-card p:last-child, .mascot-card p:last-child, .ui-card p:last-child { margin-bottom: 0; }
+.type-display { font-family: var(--font-display); font-size: clamp(2.8rem, 5vw, 4.7rem); font-weight: 700; line-height: 1.04; letter-spacing: -.04em; margin: 22px 0; }
+.type-body { font-family: var(--font-body); font-size: 1.4rem; font-weight: 600; line-height: 1.35; margin: 22px 0; }
+.type-mono { font-family: var(--font-mono); font-size: 1rem; line-height: 1.5; margin: 22px 0; }
+.mascot-card.art { display: grid; place-items: center; min-height: 360px; background: #fbe3ee; }
+.mascot-card.art img { max-height: 320px; }
+.mascot-card.avatar { display: grid; place-items: center; min-height: 360px; background: #171a38; }
+.mascot-card.avatar img { width: min(100%, 280px); border-radius: 50%; }
+.ui-card .chip { display: inline-block; border: 1px solid #d9dcea; border-radius: 999px; padding: 4px 9px; font-family: var(--font-mono); font-size: .72rem; }
+.ui-card .sample-button { display: inline-block; margin: 16px 0; padding: 11px 16px; border-radius: 8px; background: #d7266f; color: #fff; font-weight: 700; }
+.chat { display: grid; gap: 9px; margin-top: 14px; }
+.chat span { display: block; width: fit-content; max-width: 85%; padding: 10px 13px; border-radius: 12px; }
+.chat .host { justify-self: end; background: #e2ecfa; }
+.chat .agent { background: #fbe3ee; }
+.files { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.file { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 16px 18px; border: 1px solid #d9dcea; border-radius: 12px; background: #fff; text-decoration: none; }
+.file:hover { border-color: #d7266f; background: #fbe3ee; }
+.file strong { font-size: .9rem; }
+.file-type { color: #4a4f72; white-space: nowrap; }
+.note { margin-top: 16px; color: #4a4f72; font-size: .9rem; }
+footer { padding-top: 58px; color: #4a4f72; font-family: var(--font-mono); font-size: .75rem; }
+@media (max-width: 760px) {
+  .hero { grid-template-columns: 1fr; }
+  .hero-art { min-height: 320px; }
+  .hero-art img { max-height: 310px; width: auto; }
+  .logo-grid, .type-grid, .mascot-grid, .ui-grid, .files { grid-template-columns: 1fr; }
+  .swatches { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .section { padding-top: 58px; }
+}
+@media (max-width: 440px) {
+  .topbar span { display: none; }
+  .swatches { grid-template-columns: 1fr; }
+  .section-heading { display: block; }
+}

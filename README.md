@@ -2,6 +2,7 @@
 
 Event swag (t-shirts and stickers) printed by local printers and paid in USDC or EURC on Arc.
 An AI agent runs each order. Design: `docs/design.md`.
+Brand kit: `docs/brand.md` (visual preview at `/brandkit.html`).
 
 ## Develop
 
