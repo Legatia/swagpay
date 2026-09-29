@@ -242,4 +242,21 @@ describe("OrderAgent", () => {
     const decisions = await listDecisions(env.DB, order.id);
     expect(decisions.at(-1)).toMatchObject({ tool: "agent_run", reason: "policy configuration invalid", outcome: "error" });
   });
+  it("records a preview only once the tool result holding it is saved", async () => {
+    const { order, stub } = await newAgent();
+    const fileId = crypto.randomUUID();
+    await env.ARTWORK.put(`artwork/${order.instance}/${fileId}`, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.init(order.id, intake);
+      await agent.addArtwork({ fileId, name: "logo.png", mediaType: "image/png", size: 8, key: `artwork/${order.instance}/${fileId}`, at: new Date().toISOString() });
+      const model = scriptedModel([
+        msg([toolUse("check_artwork", { fileId, reason: "host uploaded a logo" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      agent.modelOverride = model;
+      await agent.processTurn();
+      expect(agent.sql<{ file_id: string }>`SELECT file_id FROM previews`.map((r) => r.file_id)).toEqual([fileId]);
+      expect(JSON.stringify(model.requests[1].messages.at(-1))).toContain(`fileId ${fileId}`);
+    });
+  });
 });

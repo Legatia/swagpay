@@ -2,10 +2,15 @@ function base64url(bytes: Uint8Array): string {
   return toBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export function toBase64(bytes: Uint8Array): string {
+/** Bytes as a one-byte-per-char string (for btoa and byte-level regexes). */
+export function binaryString(bytes: Uint8Array): string {
   let s = "";
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(s);
+  return s;
+}
+
+export function toBase64(bytes: Uint8Array): string {
+  return btoa(binaryString(bytes));
 }
 
 export function newToken(): string {

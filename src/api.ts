@@ -3,6 +3,7 @@ import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, type Order
 import { newFileId } from "./ids";
 import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
 import type { ArtworkMeta } from "./agent/order-agent";
+import { sniffMediaType } from "./sniff";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -105,11 +106,16 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     if (!(file instanceof File)) return fail(400, "file is required");
     if (!UPLOAD_TYPES.includes(file.type)) return fail(400, "send PNG, JPEG, WebP, GIF, SVG or PDF");
     if (file.size > MAX_UPLOAD_BYTES) return fail(413, "files can be up to 10 MB");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.length === 0) return fail(400, "the file is empty");
+    if (sniffMediaType(bytes) !== file.type) {
+      return fail(400, "the file's content doesn't match its type; export it again as PNG, JPEG, WebP, GIF, SVG or PDF");
+    }
     const view = await agent.getView();
     if (view.artwork.length >= MAX_FILES_PER_ORDER) return fail(400, "an order can have up to 10 files");
     const fileId = newFileId();
     const key = `artwork/${order.instance}/${fileId}`;
-    await env.ARTWORK.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
+    await env.ARTWORK.put(key, bytes, { httpMetadata: { contentType: file.type } });
     const meta: ArtworkMeta = {
       fileId,
       name: file.name.slice(0, 120),

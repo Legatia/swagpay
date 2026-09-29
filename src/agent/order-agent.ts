@@ -5,7 +5,8 @@ import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
 import { SqlR2ConversationStore } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
-import { runTurn, type TurnResult } from "./loop";
+import { runTurn, type ConversationStore, type TurnResult } from "./loop";
+import { previewsIn } from "./previews";
 import { createAnthropicModel, type ModelClient } from "./model";
 import { SYSTEM_PROMPT } from "./prompt";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile } from "./tools";
@@ -221,7 +222,6 @@ export class OrderAgent extends Agent<Env, OrderState> {
         hasArtwork: async (fileId) => this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM artwork WHERE file_id = ${fileId}`[0].n > 0,
         previewedBytes: async () => this.sql<{ n: number }>`SELECT COALESCE(SUM(bytes), 0) AS n FROM previews`[0].n,
         wasPreviewed: async (fileId) => this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM previews WHERE file_id = ${fileId}`[0].n > 0,
-        recordPreview: async (fileId, bytes) => { this.sql`INSERT OR REPLACE INTO previews (file_id, bytes) VALUES (${fileId}, ${bytes})`; },
         logDecision: (d) => log({ orderId, ...d }),
       });
     } catch (err) {
@@ -236,6 +236,16 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.turnRunning = true;
     try {
       const store = new SqlR2ConversationStore(this.sql.bind(this), this.env.ARTWORK, `conv/${this.name}/`);
+      // A preview counts only once the message holding it is saved.
+      const tracked: ConversationStore = {
+        load: () => store.load(),
+        append: async (message) => {
+          await store.append(message);
+          for (const p of previewsIn(message)) {
+            this.sql`INSERT OR REPLACE INTO previews (file_id, bytes) VALUES (${p.fileId}, ${p.bytes})`;
+          }
+        },
+      };
       await this.repairDanglingToolUse(store);
       if (pending.length > 0) {
         // Move the inbox into the conversation as one user message, then clear it.
@@ -258,7 +268,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
         system: SYSTEM_PROMPT,
         tools: TOOL_DEFINITIONS,
         handlers,
-        store,
+        store: tracked,
         maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
       });
       if (result.status === "refused") {

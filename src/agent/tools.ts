@@ -4,11 +4,13 @@ import type { NewDecision } from "../db";
 import { toBase64 } from "../ids";
 import { OrderSpecSchema, missingInfo, specErrors, type OrderSpec } from "../order-spec";
 import { checkItem, type Policy } from "../policy";
+import { countPdfPages, sniffMediaType } from "../sniff";
 import { sanitize } from "./inbox";
 import type { ToolHandler, ToolOutcome } from "./loop";
 
 export const MAX_IMAGE_PREVIEW_BYTES = 3_500_000;
 export const MAX_PDF_PREVIEW_BYTES = 5_000_000;
+export const MAX_PDF_PREVIEW_PAGES = 10;
 /** Cumulative raw bytes of artwork embedded in the conversation per order (it is re-sent on every model call). */
 export const MAX_PREVIEW_BYTES_PER_ORDER = 8_000_000;
 const PREVIEW_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
@@ -29,7 +31,6 @@ export interface ToolContext {
   hasArtwork(fileId: string): Promise<boolean>;
   previewedBytes(): Promise<number>;
   wasPreviewed(fileId: string): Promise<boolean>;
-  recordPreview(fileId: string, bytes: number): Promise<void>;
   logDecision(d: Omit<NewDecision, "orderId">): Promise<void>;
 }
 
@@ -145,28 +146,39 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
       if (!file) {
         return { verdict: "none", outcome: "error", detail: "unknown fileId", result: { content: `No uploaded file has fileId "${fileId}".`, isError: true } };
       }
-      const head = `File (from the host): ${JSON.stringify(sanitize(file.name))}, ${file.mediaType}, ${file.bytes.length} bytes.`;
+      const head = `File (from the host): ${JSON.stringify(sanitize(file.name))} (fileId ${fileId}), ${file.mediaType}, ${file.bytes.length} bytes.`;
       const done = (content: ToolOutcome["content"]): Logged => ({ verdict: "none", outcome: "done", result: { content } });
+      const actual = sniffMediaType(file.bytes);
+      if (actual !== file.mediaType) {
+        return done(`${head} The file's content doesn't match its type (it looks like ${actual ?? "an unknown format"}). Ask the host to export it again as a PNG or PDF.`);
+      }
       const isImage = (PREVIEW_IMAGE_TYPES as readonly string[]).includes(file.mediaType);
       const isPdf = file.mediaType === "application/pdf";
-      if (isImage || isPdf) {
-        const limit = isImage ? MAX_IMAGE_PREVIEW_BYTES : MAX_PDF_PREVIEW_BYTES;
-        if (file.bytes.length > limit) {
-          return done(isImage
-            ? `${head} This image is too large to preview. Ask the host for a PNG under 3.5 MB, or a PDF.`
-            : `${head} This PDF is too large to preview. Ask the host for one under 5 MB.`);
-        }
-        if (await ctx.wasPreviewed(fileId)) return done(`${head} You already looked at this file earlier in this conversation; use that review.`);
-        if ((await ctx.previewedBytes()) + file.bytes.length > MAX_PREVIEW_BYTES_PER_ORDER) {
-          return done(`${head} This order's preview allowance is used up. Ask the host for a smaller PNG (under 3.5 MB) or PDF (under 5 MB) if you still need to see it.`);
-        }
-        await ctx.recordPreview(fileId, file.bytes.length);
-        const text = { type: "text" as const, text: `${head} Review it, then record the result with update_order.` };
-        return done(isImage
-          ? [text, { type: "image", source: { type: "base64", media_type: file.mediaType as (typeof PREVIEW_IMAGE_TYPES)[number], data: toBase64(file.bytes) } }]
-          : [text, { type: "document", source: { type: "base64", media_type: "application/pdf", data: toBase64(file.bytes) } }]);
+      if (!isImage && !isPdf) {
+        return done(`${head} I can't preview ${file.mediaType}. Ask the host to export it as a PDF or a PNG with a transparent background.`);
       }
-      return done(`${head} I can't preview ${file.mediaType}. Ask the host to export it as a PDF or a PNG with a transparent background.`);
+      const limit = isImage ? MAX_IMAGE_PREVIEW_BYTES : MAX_PDF_PREVIEW_BYTES;
+      if (file.bytes.length > limit) {
+        return done(isImage
+          ? `${head} This image is too large to preview. Ask the host for a PNG under 3.5 MB, or a PDF.`
+          : `${head} This PDF is too large to preview. Ask the host for one under 5 MB.`);
+      }
+      if (isPdf) {
+        const pages = countPdfPages(file.bytes);
+        if (pages !== null && pages > MAX_PDF_PREVIEW_PAGES) {
+          return done(`${head} This PDF has ${pages} pages. Ask the host for just the artwork, as a one-page PDF or a PNG.`);
+        }
+      }
+      if (await ctx.wasPreviewed(fileId)) {
+        return done(`${head} Its preview is already earlier in this conversation; use that review. If you can't find it there, ask the host to upload the file again.`);
+      }
+      if ((await ctx.previewedBytes()) + file.bytes.length > MAX_PREVIEW_BYTES_PER_ORDER) {
+        return done(`${head} This order's preview allowance is used up. Ask the host for a smaller PNG (under 3.5 MB) or PDF (under 5 MB) if you still need to see it.`);
+      }
+      const text = { type: "text" as const, text: `${head} Review it, then record the result with update_order.` };
+      return done(isImage
+        ? [text, { type: "image", source: { type: "base64", media_type: file.mediaType as (typeof PREVIEW_IMAGE_TYPES)[number], data: toBase64(file.bytes) } }]
+        : [text, { type: "document", source: { type: "base64", media_type: "application/pdf", data: toBase64(file.bytes) } }]);
     }),
   };
 }

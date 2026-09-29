@@ -56,7 +56,7 @@ describe("API", () => {
   it("stores artwork in R2 and lists it", async () => {
     const token = await newOrder();
     const form = new FormData();
-    form.append("file", new File([new Uint8Array([137, 80, 78, 71])], "logo.png", { type: "image/png" }));
+    form.append("file", new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "logo.png", { type: "image/png" }));
     const res = await SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: form });
     expect(res.status).toBe(201);
     const { fileId } = await res.json<{ fileId: string }>();
@@ -86,7 +86,7 @@ describe("API", () => {
     const token = await newOrder();
     const upload = () => {
       const form = new FormData();
-      form.append("file", new File([new Uint8Array([137, 80, 78, 71])], "logo.png", { type: "image/png" }));
+      form.append("file", new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "logo.png", { type: "image/png" }));
       return SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: form });
     };
     for (let i = 0; i < 10; i++) expect((await upload()).status).toBe(201);
@@ -98,6 +98,20 @@ describe("API", () => {
   it("rejects unsupported methods on an order", async () => {
     const token = await newOrder();
     expect((await SELF.fetch(`${base}/api/o/${token}`, { method: "PUT" })).status).toBe(405);
+  });
+
+  it("refuses uploads whose bytes don't match their type, and empty files", async () => {
+    const token = await newOrder();
+    const disguised = new FormData();
+    disguised.append("file", new File([new TextEncoder().encode("%PDF-1.4")], "logo.png", { type: "image/png" }));
+    const r1 = await SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: disguised });
+    expect(r1.status).toBe(400);
+    expect((await r1.json<{ error: string }>()).error).toContain("doesn't match its type");
+    const empty = new FormData();
+    empty.append("file", new File([new Uint8Array(0)], "logo.png", { type: "image/png" }));
+    const r2 = await SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: empty });
+    expect(r2.status).toBe(400);
+    expect((await r2.json<{ error: string }>()).error).toContain("empty");
   });
 
   it("caps new orders per day", async () => {
