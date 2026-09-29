@@ -3,7 +3,7 @@ import type { BetaTool } from "@anthropic-ai/sdk/resources/beta/messages/message
 import type { NewDecision } from "../db";
 import { toBase64 } from "../ids";
 import { OrderSpecSchema, missingInfo, specErrors, type OrderSpec } from "../order-spec";
-import { checkItem, type Policy } from "../policy";
+import { checkItem, type Policy, type Verdict } from "../policy";
 import { countPdfPages, imageSize, sniffMediaType } from "../sniff";
 import { sanitize } from "./inbox";
 import type { ToolHandler, ToolOutcome } from "./loop";
@@ -121,6 +121,27 @@ function logged<S extends z.ZodType>(
   };
 }
 
+export interface ItemApproval {
+  r: string;
+  e: { id: number; status: "open" | "approved" | "rejected"; created: boolean };
+}
+
+/**
+ * Asks the owner about items off the policy list, once per version of those items.
+ * The key is the reason plus quantity and description as shown to the owner, so a changed item is asked again
+ * and filling in details the owner doesn't see (such as the print method) is not.
+ */
+async function itemApprovals(ctx: ToolContext, spec: OrderSpec, verdicts: Verdict[]): Promise<ItemApproval[]> {
+  const reasons = [...new Set(verdicts.filter((v): v is { kind: "escalate"; reason: string } => v.kind === "escalate").map((v) => v.reason))];
+  const out: ItemApproval[] = [];
+  for (const r of reasons) {
+    const items = spec.items.filter((_, i) => verdicts[i].kind === "escalate" && (verdicts[i] as { reason: string }).reason === r);
+    const detail = items.map((it) => `${it.quantity} × ${it.description.replace(/\s+/g, " ")}`).join("; ");
+    out.push({ r, e: await ctx.escalateOnce(`approval:${r} [${detail}]`, "approval", `Approve: ${r} (${detail})`, { reason: r, items }) });
+  }
+  return out;
+}
+
 export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
   // makeHandlers runs once per turn, so this is the turn scope: previews embedded but not yet saved.
   const embeddedThisTurn = new Map<string, number>();
@@ -142,14 +163,7 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         return { verdict: "block", outcome: "blocked", detail, result: { content: `Not saved. ${detail}`, isError: true } };
       }
       // Ask the owner before saving: approvals are keyed on the items exactly as the owner saw them.
-      const reasons = [...new Set(verdicts.filter((v): v is { kind: "escalate"; reason: string } => v.kind === "escalate").map((v) => v.reason))];
-      const decided: { r: string; e: { id: number; status: "open" | "approved" | "rejected"; created: boolean } }[] = [];
-      for (const r of reasons) {
-        const items = spec.items.filter((_, i) => verdicts[i].kind === "escalate" && (verdicts[i] as { reason: string }).reason === r);
-        const detail = items.map((it) => `${it.quantity} × ${it.description.replace(/\s+/g, " ")}${it.method ? ` (${it.method})` : ""}`).join("; ");
-        const e = await ctx.escalateOnce(`approval:${r} [${detail}]`, "approval", `Approve: ${r} (${detail})`, { reason: r, items });
-        decided.push({ r, e });
-      }
+      const decided = await itemApprovals(ctx, spec, verdicts);
       const rejected = decided.filter((d) => d.e.status === "rejected");
       if (rejected.length) {
         const detail = rejected.map((d) => `the owner rejected ${d.r} (#${d.e.id})`).join("; ");
@@ -168,7 +182,7 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
       const missing = missingInfo(spec);
       lines.push(missing.length ? `Still missing: ${missing.join("; ")}` : waiting ? "Everything else is complete; the order waits for the owner's decision." : "The order is complete.");
       return waiting
-        ? { verdict: "escalate", outcome: "escalated", detail: reasons.join("; "), result: { content: lines.join(" ") } }
+        ? { verdict: "escalate", outcome: "escalated", detail: decided.map((d) => d.r).join("; "), result: { content: lines.join(" ") } }
         : { verdict: "allow", outcome: "done", result: { content: lines.join(" ") } };
     }),
 

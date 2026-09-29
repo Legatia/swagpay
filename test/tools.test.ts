@@ -135,6 +135,10 @@ describe("update_order", () => {
     const approved = await h.update_order({ spec, reason: "owner approved the banner" });
     expect(approved.content).toContain("Approved by the owner (#1)");
     expect(state.decisions.at(-1)).toMatchObject({ verdict: "allow", outcome: "done" });
+
+    const withMethod = await h.update_order({ spec: { items: [tee, { ...banner, method: "uv" }], artwork: [] }, reason: "print method chosen" });
+    expect(withMethod.content).toContain("Approved by the owner (#1)");
+    expect(state.escalations).toHaveLength(1);
   });
 
   it("refuses to save an item the owner rejected", async () => {
