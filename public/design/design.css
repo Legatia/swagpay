@@ -37,7 +37,8 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 .product .owner { color: var(--error, #b91e5a); font-size: 0.8rem; }
 
 .editor { display: grid; gap: 12px; }
-.stage-wrap { background: var(--surface, #ffffff); border: 1px solid var(--line, #d9dcea); border-radius: 12px; padding: 8px; }
+/* The stage stays white in dark mode: garments, print areas and exports are drawn for white. */
+.stage-wrap { background: #ffffff; border: 1px solid var(--line, #d9dcea); border-radius: 12px; padding: 8px; }
 #stage { display: block; width: 100%; height: min(58vh, 560px); touch-action: none; user-select: none; -webkit-user-select: none; }
 #stage .garment { stroke: #171a38; stroke-width: 2; }
 #stage .print-area { fill: none; stroke: #2466c4; stroke-width: 1.5; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
