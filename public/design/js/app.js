@@ -1,7 +1,9 @@
+import { renderControls, updateCutPath } from "./controls.js";
 import { clampToArea } from "./geometry.js";
 import { attachGestures } from "./gestures.js";
-import { newImageLayer, nextAssetKey } from "./layers.js";
+import { newImageLayer, newTextLayer, nextAssetKey } from "./layers.js";
 import { mockupFor } from "./mockups.js";
+import { renderPanel } from "./panel.js";
 import { OWNER_NOTE, PRODUCTS, defaultOptions, viewAreas } from "./products.js";
 import { layerQuality, qualityMessage } from "./quality.js";
 import { measureText, renderStage } from "./stage.js";
@@ -221,6 +223,15 @@ export const beforeNext = {
   },
 };
 
+function addText() {
+  const s = store.get();
+  const dark = ["black", "navy"].includes(s.options.colour);
+  const layer = clampToArea(newTextLayer(area(), { colour: dark ? "#ffffff" : "#171a38" }), area()).layer;
+  store.set({ layers: { ...s.layers, [s.side]: [...s.layers[s.side], layer] }, selectedId: layer.id });
+  announce("Text added. Edit it in the panel.");
+  requestAnimationFrame(() => document.querySelector('#panel [data-k="text"]')?.select());
+}
+
 function init() {
   attachGestures({ svg, store, getContext: ctx, announce });
   renderProducts();
@@ -232,6 +243,15 @@ function init() {
     const file = e.target.files?.[0];
     if (file) addLogo(file);
     e.target.value = "";
+  });
+  $("add-text").addEventListener("click", addText);
+  renderers.push((s) => {
+    if (s.step !== "design" || !s.product) return;
+    renderPanel($("panel"), s, { store, area, announce });
+    renderControls($("product-controls"), s, { store });
+  });
+  store.subscribe((s) => {
+    if (s.product === "sticker" && s.step === "design") updateCutPath(store);
   });
   $("undo").addEventListener("click", () => store.undo());
   $("redo").addEventListener("click", () => store.redo());
