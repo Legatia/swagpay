@@ -23,6 +23,14 @@ describe("sniffMediaType", () => {
     expect(sniffMediaType(enc("<html><body>hi</body></html>"))).toBeNull();
     expect(sniffMediaType(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBeNull(); // truncated PNG signature
   });
+
+  it("rejects crafted prefixes quickly", () => {
+    const started = Date.now();
+    expect(sniffMediaType(new TextEncoder().encode("<??>".repeat(1000) + "x"))).toBeNull();
+    expect(sniffMediaType(new TextEncoder().encode("<!---->".repeat(500) + "x"))).toBeNull();
+    expect(sniffMediaType(new TextEncoder().encode("<!DOCTYPE svg [" + "<".repeat(3000)))).toBeNull();
+    expect(Date.now() - started).toBeLessThan(200);
+  });
 });
 
 describe("countPdfPages", () => {
