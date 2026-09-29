@@ -1,6 +1,7 @@
 import { OrderAgent } from "./agent/order-agent";
 import { handleAdmin } from "./admin";
 import { handleApi } from "./api";
+import { handleScheduled } from "./scheduled";
 import { handleTelegram } from "./telegram-webhook";
 
 export { OrderAgent };
@@ -30,5 +31,8 @@ export default {
       return env.ASSETS.fetch(new Request(new URL("/order", url), request));
     }
     return env.ASSETS.fetch(request);
+  },
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(handleScheduled(controller.cron, env).catch((err) => console.error("scheduled job failed", controller.cron, err)));
   },
 } satisfies ExportedHandler<Env>;
