@@ -24,6 +24,8 @@ export interface TransferRow {
   request_id: number | null;
   via: "amount" | "claim" | null;
   notified_at: string | null;
+  paid_after: number | null;
+  notify_attempts: number;
   created_at: string;
 }
 
@@ -129,7 +131,7 @@ const CREDIT = `UPDATE payment_requests
       status = CASE WHEN status = 'open' AND paid_units + ?1 >= amount_units THEN 'paid' ELSE status END,
       paid_at = CASE WHEN paid_at IS NULL AND paid_units + ?1 >= amount_units THEN ?2 ELSE paid_at END
   WHERE id = ?3 AND EXISTS (SELECT 1 FROM transfers WHERE tx_hash = ?4 AND log_index = ?5 AND request_id IS NULL)`;
-const ASSIGN = "UPDATE transfers SET request_id = ?1, via = ?4 WHERE tx_hash = ?2 AND log_index = ?3 AND request_id IS NULL";
+const ASSIGN = "UPDATE transfers SET request_id = ?1, via = ?4, notified_at = NULL, paid_after = (SELECT paid_units FROM payment_requests WHERE id = ?1) WHERE tx_hash = ?2 AND log_index = ?3 AND request_id IS NULL";
 
 function creditStatements(db: D1Database, t: { txHash: string; logIndex: number; amountUnits: number }, requestId: number, via: "amount" | "claim", now: Date): D1PreparedStatement[] {
   return [
@@ -184,7 +186,7 @@ export async function applyClaims(db: D1Database, now: Date = new Date()): Promi
 
 /** Transfers whose side effects (agent event, order status, owner notices) have not completed yet, oldest first. */
 export async function listUnnotified(db: D1Database, limit = 50): Promise<TransferRow[]> {
-  return (await db.prepare("SELECT * FROM transfers WHERE notified_at IS NULL ORDER BY block_number, log_index LIMIT ?").bind(limit).all<TransferRow>()).results;
+  return (await db.prepare("SELECT * FROM transfers WHERE notified_at IS NULL ORDER BY notify_attempts, block_number, log_index LIMIT ?").bind(limit).all<TransferRow>()).results;
 }
 
 export async function markNotified(db: D1Database, t: { tx_hash: string; log_index: number }, now: Date = new Date()): Promise<void> {

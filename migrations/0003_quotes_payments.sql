@@ -54,6 +54,8 @@ CREATE TABLE transfers (
   request_id INTEGER REFERENCES payment_requests(id),
   via TEXT,
   notified_at TEXT,
+  paid_after INTEGER,
+  notify_attempts INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   PRIMARY KEY (tx_hash, log_index)
 );

@@ -56,7 +56,7 @@ describe("runWatcher", () => {
 
   it("reads both emitters for the receiving address in 5,000-block chunks", async () => {
     await setLastBlock(0);
-    const { rpc, calls } = fakeRpc(12_005);
+    const { rpc, calls } = fakeRpc(12_030);
     const r = await runWatcher(env, { rpc, telegram: silent });
     expect(r).toMatchObject({ from: 1, to: 12_000 });
     expect(calls.map((c) => [c.fromBlock, c.toBlock])).toEqual([[1, 5000], [5001, 10_000], [10_001, 12_000]]);
@@ -68,7 +68,7 @@ describe("runWatcher", () => {
   it("credits a deposit, moves the order and tells the agent once", async () => {
     const { order, stub, req } = await pendingDeposit(4242);
     await setLastBlock(100);
-    const { rpc } = fakeRpc(110, [usdcLog(105, req.amount_units, 1)]);
+    const { rpc } = fakeRpc(135, [usdcLog(105, req.amount_units, 1)]);
     const r = await runWatcher(env, { rpc, telegram: silent });
     expect(r?.outcomes).toHaveLength(1);
     expect(r?.outcomes[0].kind).toBe("matched");
@@ -87,7 +87,7 @@ describe("runWatcher", () => {
     await setLastBlock(200);
     const sent: string[] = [];
     const telegram: TelegramClient = { async send(_c, text) { sent.push(text); return 1; }, async answerCallback() {} };
-    const { rpc } = fakeRpc(210, [usdcLog(205, 77_000_000, 2)]);
+    const { rpc } = fakeRpc(240, [usdcLog(205, 77_000_000, 2)]);
     await runWatcher(env, { rpc, telegram });
     const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.kind === "payment" && x.summary.includes("77.000000 USDC"));
     expect(e?.order_id).toBeNull();
@@ -98,9 +98,9 @@ describe("runWatcher", () => {
     const { order, req } = await pendingDeposit(5151);
     await setLastBlock(300);
     const odd = usdcLog(305, 250_000_000, 3);
-    await runWatcher(env, { rpc: fakeRpc(310, [odd]).rpc, telegram: silent });
+    await runWatcher(env, { rpc: fakeRpc(340, [odd]).rpc, telegram: silent });
     await addClaim(env.DB, req.id, odd.transactionHash);
-    const r = await runWatcher(env, { rpc: fakeRpc(310).rpc, telegram: silent });
+    const r = await runWatcher(env, { rpc: fakeRpc(340).rpc, telegram: silent });
     expect(r?.outcomes.map((o) => o.kind)).toEqual(["matched"]);
     expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_pending");
     const flagged = (await listEscalations(env.DB, { status: "open" })).find((x) => x.order_id === order.id && x.summary.includes("because the payer pasted its hash"));
@@ -112,41 +112,105 @@ describe("runWatcher", () => {
     await setLastBlock(400);
     const big = usdcLog(405, 300_000_000, 4);
     await addClaim(env.DB, req.id, big.transactionHash);
-    await runWatcher(env, { rpc: fakeRpc(410, [big]).rpc, telegram: silent });
+    await runWatcher(env, { rpc: fakeRpc(440, [big]).rpc, telegram: silent });
     const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.kind === "payment" && x.order_id === order.id && x.summary.includes("overpaid"));
     expect(e?.summary).toContain(`Order ${order.id} overpaid by 42.493839 USDC`);
   });
 
   it("retries notifications that failed", async () => {
-    const { order, stub, req } = await pendingDeposit(7171, { init: false });
+    const { order, stub, req } = await pendingDeposit(7171);
     await setLastBlock(600);
     const paid = usdcLog(605, req.amount_units, 5);
-    await runWatcher(env, { rpc: fakeRpc(620, [paid]).rpc, telegram: silent });
+    const broken = ({ ...env, OrderAgent: { idFromName() { throw new Error("agent unavailable"); } } }) as unknown as Env;
+    const inbox = () => runInDurableObject(stub, async (agent: OrderAgent) => agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text).join("\n"));
+    const unnotified = async () => (await listUnnotified(env.DB)).some((t) => t.tx_hash === paid.transactionHash);
+    await runWatcher(broken, { rpc: fakeRpc(640, [paid]).rpc, telegram: silent });
     expect((await env.DB.prepare("SELECT status FROM payment_requests WHERE id = ?").bind(req.id).first<{ status: string }>())?.status).toBe("paid");
-    expect((await listUnnotified(env.DB)).some((t) => t.tx_hash === paid.transactionHash)).toBe(true);
-    await stub.init(order.id, intakeFor());
-    await runWatcher(env, { rpc: fakeRpc(620).rpc, telegram: silent });
     expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_paid");
+    expect(await unnotified()).toBe(true);
+    expect(await inbox()).not.toContain("Payment received");
+    await runWatcher(env, { rpc: fakeRpc(640).rpc, telegram: silent });
+    expect(await inbox()).toContain("Payment received");
+    expect(await unnotified()).toBe(false);
+  });
+
+  it("gives up once after ten failed notifications and raises a system escalation", async () => {
+    const { order, req } = await pendingDeposit(7272);
+    await setLastBlock(650);
+    const paid = usdcLog(655, req.amount_units, 8);
+    const broken = ({ ...env, OrderAgent: { idFromName() { throw new Error("agent unavailable"); } } }) as unknown as Env;
+    await runWatcher(broken, { rpc: fakeRpc(690, [paid]).rpc, telegram: silent });
+    await env.DB.prepare("UPDATE transfers SET notify_attempts = 9 WHERE tx_hash = ?").bind(paid.transactionHash).run();
+    await runWatcher(broken, { rpc: fakeRpc(690).rpc, telegram: silent });
+    const found = (await listEscalations(env.DB, { status: "open" })).filter((x) => x.kind === "system" && x.summary.includes(`Payment notification keeps failing for tx ${paid.transactionHash}`));
+    expect(found).toHaveLength(1);
+    expect(found[0].order_id).toBe(order.id);
+    await runWatcher(broken, { rpc: fakeRpc(690).rpc, telegram: silent });
+    expect((await listUnnotified(env.DB)).some((t) => t.tx_hash === paid.transactionHash)).toBe(false);
+    expect((await listEscalations(env.DB, { status: "open" })).filter((x) => x.summary.includes("keeps failing for tx " + paid.transactionHash))).toHaveLength(1);
+  });
+
+  it("reports each credit from its own point in time", async () => {
+    const { order, stub, req } = await pendingDeposit(6262);
+    await setLastBlock(900);
+    const a = usdcLog(905, req.amount_units - 157_500_000, 9);
+    const b = usdcLog(906, 300_000_000, 10);
+    await addClaim(env.DB, req.id, b.transactionHash);
+    await runWatcher(env, { rpc: fakeRpc(940, [a, b]).rpc, telegram: silent });
     await runInDurableObject(stub, async (agent: OrderAgent) => {
       const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text).join("\n");
-      expect(inbox).toContain("Payment received");
+      expect(inbox).toContain("Still due");
     });
+    const over = (await listEscalations(env.DB, { status: "open" })).filter((x) => x.order_id === order.id && x.summary.includes("overpaid"));
+    expect(over).toHaveLength(1);
+    expect(over[0].summary).toContain("overpaid by 142.500000");
+  });
+
+  it("notifies already-recorded transfers even when the RPC is down", async () => {
+    const { req } = await pendingDeposit(7373);
+    await setLastBlock(950);
+    const paid = usdcLog(955, req.amount_units, 11);
+    const broken = ({ ...env, OrderAgent: { idFromName() { throw new Error("agent unavailable"); } } }) as unknown as Env;
+    await runWatcher(broken, { rpc: fakeRpc(990, [paid]).rpc, telegram: silent });
+    const failing: RpcClient = { async blockNumber() { return 1100; }, async getLogs() { throw new Error("HTTP 503"); } };
+    await expect(runWatcher(env, { rpc: failing, telegram: silent })).rejects.toThrow("HTTP 503");
     expect((await listUnnotified(env.DB)).some((t) => t.tx_hash === paid.transactionHash)).toBe(false);
+  });
+
+  it("skips a malformed log and records the good one", async () => {
+    const { req } = await pendingDeposit(7474);
+    await setLastBlock(1200);
+    const good = usdcLog(1205, req.amount_units, 12);
+    const bad = { ...usdcLog(1205, 1, 13), data: "0xzz" };
+    const empty = { topics: [] } as unknown as RawLog;
+    const r = await runWatcher(env, { rpc: fakeRpc(1240, [empty, bad, good]).rpc, telegram: silent });
+    expect(r?.outcomes.map((o) => o.kind)).toEqual(["matched"]);
+  });
+
+  it("runs one at a time", async () => {
+    await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('lock_until', ?)").bind(String(Date.now() + 60_000)).run();
+    let called = false;
+    const rpc: RpcClient = { async blockNumber() { called = true; return 1; }, async getLogs() { return []; } };
+    expect(await runWatcher(env, { rpc, telegram: silent })).toBeNull();
+    expect(called).toBe(false);
+    await env.DB.prepare("UPDATE watcher_state SET value = '0' WHERE key = 'lock_until'").run();
   });
 
   it("completes an order still in quoted", async () => {
     const { order, req } = await pendingDeposit(8181, { pending: false });
     await setOrderStatus(env.DB, order.id, ["draft"], "quoted");
     await setLastBlock(700);
-    await runWatcher(env, { rpc: fakeRpc(720, [usdcLog(705, req.amount_units, 6)]).rpc, telegram: silent });
+    await runWatcher(env, { rpc: fakeRpc(740, [usdcLog(705, req.amount_units, 6)]).rpc, telegram: silent });
     expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_paid");
   });
 
   it("does not escalate dust", async () => {
     await setLastBlock(800);
-    await runWatcher(env, { rpc: fakeRpc(820, [usdcLog(805, 5_000, 7)]).rpc, telegram: silent });
+    await runWatcher(env, { rpc: fakeRpc(840, [usdcLog(805, 5_000, 7)]).rpc, telegram: silent });
     const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.summary.includes("0.005000 USDC"));
     expect(e).toBeUndefined();
+    const row = await env.DB.prepare("SELECT notified_at FROM transfers WHERE tx_hash = ?").bind(usdcLog(805, 5_000, 7).transactionHash).first<{ notified_at: string | null }>();
+    expect(row?.notified_at).not.toBeNull();
   });
 
   it("does nothing without a receiving address, and keeps its place when the RPC fails", async () => {
