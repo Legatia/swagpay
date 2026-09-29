@@ -28,8 +28,13 @@ export default {
       }
     }
     if (url.pathname === "/log" && request.method === "GET") {
-      const [decisions, metrics] = await Promise.all([listPublicDecisions(env.DB), computeMetrics(env.DB)]);
-      return new Response(renderLog(decisions, metrics), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" } });
+      try {
+        const [decisions, metrics] = await Promise.all([listPublicDecisions(env.DB), computeMetrics(env.DB)]);
+        return new Response(renderLog(decisions, metrics), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" } });
+      } catch (err) {
+        console.error("log error", err);
+        return new Response("Something went wrong.", { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
     }
     if (url.pathname === "/admin" || url.pathname === "/admin/") return handleAdmin(request, env);
     if (/^\/o\/[A-Za-z0-9_-]{43}$/.test(url.pathname)) {

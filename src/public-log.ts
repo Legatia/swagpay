@@ -10,6 +10,13 @@ export interface PublicDecision {
   outcome: string;
 }
 
+/** Free model text on a public page: strip emails and phone-like runs; 0x addresses and hashes survive. */
+export function redactReason(text: string): string {
+  return text
+    .replace(/[^\s@<>"']+@[^\s@<>"']+\.[a-z]{2,}/gi, "[email]")
+    .replace(/0x[0-9a-f]+|\+?\d[\d\s().-]{7,}\d/gi, (m) => (/^0x/i.test(m) ? m : "[phone]"));
+}
+
 /** Both agents' decisions, newest first: tool, reason and outcome only; never inputs. */
 export async function listPublicDecisions(db: D1Database, limit = 100): Promise<PublicDecision[]> {
   const rows = (await db
@@ -21,7 +28,7 @@ export async function listPublicDecisions(db: D1Database, limit = 100): Promise<
     )
     .bind(limit)
     .all<PublicDecision>()).results;
-  return rows.map((r) => ({ ...r, reason: r.reason.slice(0, 300) }));
+  return rows.map((r) => ({ ...r, reason: redactReason(r.reason).slice(0, 300) }));
 }
 
 export interface Metrics {

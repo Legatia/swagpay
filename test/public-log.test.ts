@@ -1,14 +1,15 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { insertDecision } from "../src/db";
+import { redactReason } from "../src/public-log";
 import { insertTreasuryDecision } from "../src/treasury";
 import { newOrderRow } from "./fixtures";
 
 describe("public log and metrics", () => {
   it("lists both agents' decisions newest first without inputs, escaped", async () => {
     const { order } = await newOrderRow();
-    await insertDecision(env.DB, { orderId: order.id, tool: "send_quote", reason: "cost arrived <b>inside</b> the band", input: { contactEmail: "ana@example.com" }, verdict: "allow", outcome: "done" }, new Date("2099-01-01T10:00:00Z"));
-    await insertTreasuryDecision(env.DB, { orderId: order.id, tool: "pay_obligation", reason: "deposit covers the printer cost", input: { secret: "x" }, verdict: "allow", outcome: "done" }, new Date("2099-01-01T11:00:00Z"));
+    await insertDecision(env.DB, { orderId: order.id, tool: "send_quote", reason: "cost arrived <b>inside</b> the band, mail ana@example.com", input: { contactEmail: "ana@example.com" }, verdict: "allow", outcome: "done" }, new Date("2099-01-01T10:00:00Z"));
+    await insertTreasuryDecision(env.DB, { orderId: order.id, tool: "pay_obligation", reason: "deposit covers the printer cost, paid to 0x1234567890123456789012345678901234567890", input: { secret: "x" }, verdict: "allow", outcome: "done" }, new Date("2099-01-01T11:00:00Z"));
     const api = await (await SELF.fetch("https://swagpay.test/api/log")).json<{ decisions: Array<{ agent: string; tool: string; order: number | null }> }>();
     expect(api.decisions[0]).toMatchObject({ agent: "treasury", tool: "pay_obligation", order: order.id });
     expect(api.decisions[1]).toMatchObject({ agent: "order", tool: "send_quote" });
@@ -16,12 +17,27 @@ describe("public log and metrics", () => {
     const page = await SELF.fetch("https://swagpay.test/log");
     expect(page.headers.get("cache-control")).toBe("public, max-age=60");
     const html = await page.text();
-    expect(html).toContain("cost arrived &lt;b&gt;inside&lt;/b&gt; the band");
+    expect(html).toContain("cost arrived &lt;b&gt;inside&lt;/b&gt; the band, mail [email]");
+    expect(html).toContain("0x1234567890123456789012345678901234567890");
+    expect(JSON.stringify(api)).not.toContain("example.com");
     expect(html).not.toContain("ana@example.com");
     expect(html).not.toContain('"secret"');
   });
 
+  it("redacts emails and phones but keeps addresses and order numbers", () => {
+    expect(redactReason("write to ana@example.com")).toBe("write to [email]");
+    expect(redactReason("call +48 600 123 456 now")).toBe("call [phone] now");
+    expect(redactReason("call 600-123-456 now")).toBe("call [phone] now");
+    const a = "0x1234567890123456789012345678901234567890";
+    expect(redactReason(`sent to ${a}`)).toBe(`sent to ${a}`);
+    expect(redactReason("Order 12 is paid")).toBe("Order 12 is paid");
+  });
+
   it("counts money in and out and decisions made against escalated", async () => {
+    const get = async () => (await SELF.fetch("https://swagpay.test/api/metrics")).json<{
+      orders: Record<string, number>; received: { USDC: string }; paidOut: { USDC: string }; obligations: { settledByAgent: number }; decisions: { total: number; escalated: number };
+    }>();
+    const before = await get();
     const { order } = await newOrderRow();
     await env.DB.prepare("INSERT INTO transfers (tx_hash, log_index, block_number, token, from_address, amount_units, request_id, created_at) VALUES (?, 0, 1, 'USDC', '0x2', 5000000, NULL, ?)")
       .bind(`0x${"e".repeat(64)}`, new Date().toISOString()).run();
@@ -31,13 +47,13 @@ describe("public log and metrics", () => {
     await env.DB.prepare("INSERT INTO payouts (obligation_id, method, chain, token, amount_units, destination, idempotency_key, status, created_at, updated_at) VALUES (?, 'transfer', 'ARC', 'USDC', 2000000, '0x3', ?, 'sent', ?, ?)")
       .bind(ob!.id, crypto.randomUUID(), new Date().toISOString(), new Date().toISOString()).run();
     await insertDecision(env.DB, { orderId: order.id, tool: "escalate", reason: "discount asked", input: {}, verdict: "escalate", outcome: "escalated" });
-    const m = await (await SELF.fetch("https://swagpay.test/api/metrics")).json<{
-      orders: Record<string, number>; paidOut: { USDC: string }; obligations: { settledByAgent: number }; decisions: { total: number; escalated: number };
-    }>();
+    const m = await get();
+    const d6 = (a: string, b: string) => Math.round((Number(a) - Number(b)) * 1e6) / 1e6;
     expect(m.orders.draft).toBeGreaterThanOrEqual(1);
-    expect(Number(m.paidOut.USDC)).toBeGreaterThanOrEqual(2);
-    expect(m.obligations.settledByAgent).toBeGreaterThanOrEqual(1);
-    expect(m.decisions.escalated).toBeGreaterThanOrEqual(1);
+    expect(d6(m.received.USDC, before.received.USDC)).toBe(0);
+    expect(d6(m.paidOut.USDC, before.paidOut.USDC)).toBe(2);
+    expect(m.obligations.settledByAgent - before.obligations.settledByAgent).toBe(1);
+    expect(m.decisions.escalated - before.decisions.escalated).toBe(1);
     expect(m.decisions.total).toBeGreaterThanOrEqual(m.decisions.escalated);
   });
 });
