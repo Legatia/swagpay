@@ -260,6 +260,32 @@ describe("runWatcher", () => {
     expect((await env.DB.prepare("SELECT value FROM watcher_state WHERE key = 'last_block'").first<{ value: string }>())?.value).toBe("500");
   });
 
+  it("stops starting chunks after two minutes of a run", async () => {
+    await setLastBlock(20_000);
+    try {
+      const { rpc, calls } = fakeRpc(40_030);
+      let t = 0;
+      const clock = () => { const now = t; t += 50_000; return now; }; // start 0; checks at 50 s, 100 s, then 150 s stops
+      const r = await runWatcher(env, { rpc, telegram: silent, clock });
+      expect(calls.map((c) => [c.fromBlock, c.toBlock])).toEqual([[20_001, 25_000], [25_001, 30_000]]);
+      expect(r).toMatchObject({ from: 20_001, to: 30_000 });
+      expect((await env.DB.prepare("SELECT value FROM watcher_state WHERE key = 'last_block'").first<{ value: string }>())?.value).toBe("30000");
+    } finally {
+      await setLastBlock(2200);
+    }
+  });
+
+  it("ignores logs the RPC returns for another address or outside the requested blocks", async () => {
+    await setLastBlock(3000);
+    const elsewhere = { ...usdcLog(3010, 77_000_000, 18), topics: [TRANSFER_TOPIC, addressTopic("0x2222222222222222222222222222222222222222"), addressTopic("0x3333333333333333333333333333333333333333")] };
+    const early = usdcLog(50, 77_000_000, 19);
+    const rpc: RpcClient = { async chainId() { return 5042; }, async blockNumber() { return 3040; }, async getLogs() { return [elsewhere, early]; } };
+    const r = await runWatcher(env, { rpc, telegram: silent });
+    expect(r?.outcomes).toEqual([]);
+    const stored = await env.DB.prepare("SELECT COUNT(*) AS n FROM transfers WHERE tx_hash IN (?, ?)").bind(elsewhere.transactionHash, early.transactionHash).first<{ n: number }>();
+    expect(stored?.n).toBe(0);
+  });
+
   describe("chain binding", () => {
     const state = async (key: string) => (await env.DB.prepare("SELECT value FROM watcher_state WHERE key = ?").bind(key).first<{ value: string }>())?.value ?? null;
     const systemAlerts = async (text: string) => (await listEscalations(env.DB)).filter((x) => x.kind === "system" && x.order_id === null && x.summary === text);

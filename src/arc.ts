@@ -33,12 +33,16 @@ function isLogArray(r: unknown): boolean {
 
 const hex = (n: number) => `0x${n.toString(16)}`;
 
-/** JSON-RPC over fetch; each call tries the URLs in order and throws the last error. */
+/**
+ * JSON-RPC over fetch. Until a URL answers, each call tries the URLs in order and throws the last error; after that,
+ * every call uses the URL that answered and throws when it fails, so one client (one watcher run) reads one node.
+ */
 export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcClient {
   let id = 0;
+  let pinned: string | null = null;
   const call = async (method: string, params: unknown[], check: (result: unknown) => boolean): Promise<unknown> => {
     let last: Error = new Error("no RPC URL configured");
-    for (const url of urls) {
+    for (const url of pinned === null ? urls : [pinned]) {
       try {
         const res = await fetchImpl(url, {
           method: "POST",
@@ -50,6 +54,7 @@ export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcC
         const body = (await res.json()) as { result?: unknown; error?: { code?: number; message?: string } };
         if (body.error) throw new Error(`${method}: ${body.error.code} ${body.error.message}`);
         if (!check(body.result)) throw new Error(`${method}: unexpected result`);
+        pinned = url;
         return body.result;
       } catch (err) {
         last = err instanceof Error ? err : new Error(String(err));
@@ -76,9 +81,15 @@ export function addressTopic(address: string): string {
   return `0x${"0".repeat(24)}${address.slice(2).toLowerCase()}`;
 }
 
-/** A Transfer log to our address as a NewTransfer, or null when it isn't USDC (system emitter) or EURC. */
-export function decodeTransfer(log: RawLog, eurcAddress: string): NewTransfer | null {
+/**
+ * A Transfer log to our address as a NewTransfer, or null when it isn't USDC (system emitter) or EURC.
+ * With `recipient` or `range`, also null for a log to another address or from a block outside the range.
+ */
+export function decodeTransfer(log: RawLog, eurcAddress: string, recipient?: string, range?: { from: number; to: number }): NewTransfer | null {
   if (log.topics.length !== 3 || log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC) return null;
+  if (recipient !== undefined && log.topics[2]?.toLowerCase() !== addressTopic(recipient)) return null;
+  const blockNumber = Number(BigInt(log.blockNumber));
+  if (range && (blockNumber < range.from || blockNumber > range.to)) return null;
   const emitter = log.address.toLowerCase();
   let units: bigint;
   let token: NewTransfer["token"];
@@ -96,7 +107,7 @@ export function decodeTransfer(log: RawLog, eurcAddress: string): NewTransfer | 
   return {
     txHash: log.transactionHash.toLowerCase(),
     logIndex: Number(BigInt(log.logIndex)),
-    blockNumber: Number(BigInt(log.blockNumber)),
+    blockNumber,
     token,
     from: `0x${log.topics[1].slice(-40)}`.toLowerCase(),
     amountUnits: Number(units),

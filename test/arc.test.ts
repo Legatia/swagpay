@@ -26,6 +26,16 @@ describe("decodeTransfer", () => {
   });
 });
 
+describe("decodeTransfer with a recipient and a block range", () => {
+  it("returns null for a log to another address or outside the range", () => {
+    expect(decodeTransfer(log({}), EURC, TO, { from: 100, to: 100 })).toMatchObject({ blockNumber: 100, amountUnits: 257500042 });
+    expect(decodeTransfer(log({}), EURC, TO.toUpperCase().replace("0X", "0x"))).not.toBeNull();
+    expect(decodeTransfer(log({ topics: [TRANSFER_TOPIC, addressTopic(TO), addressTopic(FROM)] }), EURC, TO)).toBeNull();
+    expect(decodeTransfer(log({}), EURC, TO, { from: 101, to: 200 })).toBeNull();
+    expect(decodeTransfer(log({}), EURC, undefined, { from: 0, to: 99 })).toBeNull();
+  });
+});
+
 describe("createRpc", () => {
   it("falls back to the next URL on HTTP and JSON-RPC errors", async () => {
     const seen: string[] = [];
@@ -70,6 +80,24 @@ describe("createRpc", () => {
     }) as typeof fetch;
     expect(await createRpc(["https://a"], fetchImpl).chainId()).toBe(5042);
     expect(methods).toEqual(["eth_chainId"]);
+  });
+
+  it("keeps using the first URL that answered, and throws when it fails", async () => {
+    const seen: string[] = [];
+    let bUp = true;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      seen.push(url);
+      const { id } = JSON.parse(String(init?.body));
+      if (url === "https://a" || (url === "https://b" && !bUp)) return new Response("down", { status: 502 });
+      return Response.json({ jsonrpc: "2.0", id, result: "0x10" });
+    }) as typeof fetch;
+    const rpc = createRpc(["https://a", "https://b", "https://c"], fetchImpl);
+    expect(await rpc.chainId()).toBe(16);
+    expect(await rpc.blockNumber()).toBe(16);
+    bUp = false;
+    await expect(rpc.blockNumber()).rejects.toThrow("HTTP 502");
+    expect(seen).toEqual(["https://a", "https://b", "https://b", "https://b"]);
   });
 
   it("throws the last error when every URL fails", async () => {

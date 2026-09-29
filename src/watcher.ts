@@ -35,6 +35,8 @@ async function alertOnce(env: Env, telegram: TelegramClient, key: string, summar
   await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
 }
 
+/** A run starts no new chunk after this much wall-clock time, well inside the cron's limits and the lock's lease. */
+export const RUN_BUDGET_MS = 120_000;
 /** A cursor this far past the chain head belongs to another chain or database. */
 export const MAX_CURSOR_AHEAD_BLOCKS = 1000;
 
@@ -168,9 +170,11 @@ async function notifyPass(env: Env, telegram: TelegramClient): Promise<void> {
 /** One pass: new Transfer logs to RECEIVING_ADDRESS since the last processed block, then claimed leftovers. */
 export async function runWatcher(
   env: Env,
-  deps: { rpc: RpcClient; telegram?: TelegramClient; now?: Date },
+  deps: { rpc: RpcClient; telegram?: TelegramClient; now?: Date; clock?: () => number },
 ): Promise<{ from: number; to: number; outcomes: TransferOutcome[] } | null> {
   if (!isAddress(env.RECEIVING_ADDRESS)) return null;
+  const clock = deps.clock ?? Date.now;
+  const startedAt = clock();
   const lock = await takeLock(env.DB, (deps.now ?? new Date()).getTime());
   if (lock === null) return null;
   try {
@@ -211,7 +215,7 @@ export async function runWatcher(
         await setState(env.DB, "last_block", String(head));
         return null;
       }
-      for (let chunk = 0; chunk < MAX_CHUNKS_PER_RUN && from <= head; chunk++) {
+      for (let chunk = 0; chunk < MAX_CHUNKS_PER_RUN && from <= head && clock() - startedAt < RUN_BUDGET_MS; chunk++) {
         const to = Math.min(from + CHUNK_BLOCKS - 1, head);
         const logs = await deps.rpc.getLogs({
           fromBlock: from, toBlock: to,
@@ -221,7 +225,7 @@ export async function runWatcher(
         const transfers: NewTransfer[] = [];
         for (const l of logs) {
           try {
-            const t = decodeTransfer(l, env.EURC_ADDRESS);
+            const t = decodeTransfer(l, env.EURC_ADDRESS, env.RECEIVING_ADDRESS, { from, to });
             if (t) transfers.push(t);
           } catch (err) {
             console.error("skipping malformed log", err);
