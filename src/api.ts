@@ -59,9 +59,10 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
   if (path === "/api/orders" && request.method === "POST") {
     const body = await readJson(request);
     if (body === undefined) return fail(400, "body must be JSON");
-    if (env.REQUIRE_TURNSTILE === "1") {
-      const verifyHuman = deps.verifyHuman ?? ((token, ip) => verifyTurnstile(token, ip, env.TURNSTILE_SECRET ?? ""));
-      if (!(await verifyHuman((body as { turnstile?: unknown }).turnstile, request.headers.get("cf-connecting-ip")))) {
+    if (String(env.REQUIRE_TURNSTILE) !== "0") {
+      const secret = env.TURNSTILE_SECRET;
+      const verifyHuman = deps.verifyHuman ?? (secret ? (token: unknown, ip: string | null) => verifyTurnstile(token, ip, secret) : async () => false);
+      if (!(await verifyHuman((body as { turnstile?: unknown } | null)?.turnstile, request.headers.get("cf-connecting-ip")))) {
         return fail(403, "Please complete the human check and try again.");
       }
     }

@@ -56,4 +56,11 @@ describe("new-order gate", () => {
     const res = await handleApi(new Request("https://swagpay.test/api/config"), env);
     expect(await res.json()).toEqual({ turnstileSiteKey: "1x00000000000000000000AA" });
   });
+
+  it("fails closed without a secret, on a null body, and on an unknown REQUIRE_TURNSTILE value", async () => {
+    const noSecret = envWith({ REQUIRE_TURNSTILE: "1", TURNSTILE_SECRET: "" });
+    expect((await handleApi(post({ ...intake, turnstile: "good" }), noSecret)).status).toBe(403);
+    expect((await handleApi(post(null), envWith({ REQUIRE_TURNSTILE: "1" }), { verifyHuman: async () => false })).status).toBe(403);
+    expect((await handleApi(post({ ...intake, turnstile: "x" }), envWith({ REQUIRE_TURNSTILE: "true" }), { verifyHuman: async () => false })).status).toBe(403);
+  });
 });
