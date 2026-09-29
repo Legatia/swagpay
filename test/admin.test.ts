@@ -2,9 +2,15 @@ import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { handleAdmin } from "../src/admin";
 import { createOrder } from "../src/db";
-import { createEscalation } from "../src/escalations";
+import { createEscalation, decideEscalation } from "../src/escalations";
 import { IntakeSchema } from "../src/intake";
 import { TEAM, makeSigner } from "./access-signer";
+
+async function admin(e: Env): Promise<Response> {
+  const { sign, fetchImpl } = await makeSigner();
+  const token = await sign({ aud: ["test-aud"], iss: TEAM, exp: Math.floor(Date.now() / 1000) + 600, email: "owner@example.com" });
+  return handleAdmin(new Request("https://swagpay.test/admin", { headers: { "cf-access-jwt-assertion": token } }), e, { fetch: fetchImpl });
+}
 
 describe("/admin", () => {
   it("shows open escalations and orders to a verified owner, escaped", async () => {
@@ -23,6 +29,30 @@ describe("/admin", () => {
     expect(html).toContain("&lt;b&gt;Meetup&lt;/b&gt;");
     expect(html).not.toContain("<script>x");
     expect(html).toContain("owner@example.com");
+  });
+
+  it("shows recent decisions, escaped, and whether the agent was told", async () => {
+    const e = await createEscalation(env.DB, { orderId: null, kind: "agent", summary: "Discount?", payload: {} });
+    await decideEscalation(env.DB, e.id, "rejected", "<b>not this time</b>");
+    const n = await createEscalation(env.DB, { orderId: null, kind: "system", summary: "Model failed", payload: {} });
+    await decideEscalation(env.DB, n.id, "approved", null);
+    const html = await (await admin(env)).text();
+    expect(html).toContain("Recent decisions");
+    expect(html).toContain("&lt;b&gt;not this time&lt;/b&gt;");
+    expect(html).not.toContain("<b>not this time");
+    expect(html).toMatch(new RegExp(`<td>#${e.id}</td>.*?<td>rejected</td>.*?<td>no</td></tr>`));
+    expect(html).toMatch(new RegExp(`<td>#${n.id}</td>.*?<td>acknowledged</td>`));
+  });
+
+  it("warns about missing Telegram and Turnstile config", async () => {
+    // The test env has no bot token and doesn't require Turnstile.
+    const html = await (await admin(env)).text();
+    expect(html).toContain('<p class="error">Telegram is not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_OWNER_CHAT_ID).</p>');
+    expect(html).not.toContain("Turnstile secret is missing");
+    const strict = await (await admin(({ ...env, REQUIRE_TURNSTILE: "1", TURNSTILE_SECRET: "" }) as Env)).text();
+    expect(strict).toContain('<p class="error">Turnstile secret is missing: new orders are refused.</p>');
+    const configured = await (await admin(({ ...env, TELEGRAM_BOT_TOKEN: "t", REQUIRE_TURNSTILE: "1", TURNSTILE_SECRET: "s" }) as Env)).text();
+    expect(configured).not.toContain('class="error"');
   });
 
   it("refuses without a valid token, and is off when Access isn't configured", async () => {

@@ -74,3 +74,11 @@ export async function listUndelivered(db: D1Database, limit = 20): Promise<Escal
     .bind(limit)
     .all<EscalationRow>()).results;
 }
+
+/** Decided escalations, most recently decided first. */
+export async function listDecided(db: D1Database, limit = 50): Promise<EscalationRow[]> {
+  return (await db
+    .prepare("SELECT * FROM escalations WHERE status != 'open' ORDER BY decided_at DESC, id DESC LIMIT ?")
+    .bind(limit)
+    .all<EscalationRow>()).results;
+}

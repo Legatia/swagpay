@@ -48,9 +48,17 @@ export function escalationButtons(e: EscalationRow): InlineButton[][] {
   return [[{ text: "Approve", data: `esc:${e.id}:approve` }, { text: "Reject", data: `esc:${e.id}:reject` }]];
 }
 
+let warnedNoOwner = false;
+
 /** Pushes an escalation to the owner's chat. Failures are logged, never thrown. */
 export async function notifyOwner(db: D1Database, telegram: TelegramClient, ownerChatId: string | undefined, e: EscalationRow): Promise<void> {
-  if (!ownerChatId) return;
+  if (!ownerChatId) {
+    if (!warnedNoOwner) {
+      warnedNoOwner = true;
+      console.warn("TELEGRAM_OWNER_CHAT_ID is not set; escalations are not sent to Telegram");
+    }
+    return;
+  }
   try {
     const messageId = await telegram.send(ownerChatId, escalationText(e), escalationButtons(e));
     if (messageId !== null) await setTelegramMessageId(db, e.id, messageId);

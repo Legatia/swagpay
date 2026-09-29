@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createOrder } from "../src/db";
 import { createEscalation, getEscalation, type EscalationRow } from "../src/escalations";
 import { IntakeSchema } from "../src/intake";
@@ -69,6 +69,10 @@ describe("escalation messages", () => {
 
     const broken: TelegramClient = { async send() { throw new Error("down"); }, async answerCallback() {} };
     await expect(notifyOwner(env.DB, broken, "42", e)).resolves.toBeUndefined();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await expect(notifyOwner(env.DB, ok, "", e)).resolves.toBeUndefined();
+    await expect(notifyOwner(env.DB, ok, undefined, e)).resolves.toBeUndefined();
+    expect(warn.mock.calls).toEqual([["TELEGRAM_OWNER_CHAT_ID is not set; escalations are not sent to Telegram"]]);
+    warn.mockRestore();
   });
 });
