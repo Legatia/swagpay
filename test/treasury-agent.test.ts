@@ -2,12 +2,19 @@ import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { TreasuryAgent } from "../src/agent/treasury-agent";
-import { createEscalation } from "../src/escalations";
-import { createObligation, getObligation, listQueuedPayouts, setObligationStatus } from "../src/treasury";
+import { createEscalation, listEscalations } from "../src/escalations";
+import { handleTelegram } from "../src/telegram-webhook";
+import { createObligation, getObligation, listQueuedPayouts, queuePayout, recordPayoutResult, setObligationStatus } from "../src/treasury";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
 const quiet = { async send() { return 1; }, async answerCallback() {} };
 const rich = { async chainId() { return 5042; }, async blockNumber() { return 1; }, async getLogs() { return []; }, async erc20Balance() { return 10_000_000_000; } };
+const fromOwner = (text: string) => new Request("https://swagpay.test/api/telegram", {
+  method: "POST", headers: { "x-telegram-bot-api-secret-token": "test-secret" },
+  body: JSON.stringify({ message: { chat: { id: 42 }, text } }),
+});
+const inboxOf = async () => runInDurableObject(await getAgentByName(env.TreasuryAgent, "treasury"), async (agent: TreasuryAgent) =>
+  agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n"));
 
 describe("TreasuryAgent", () => {
   it("pays an open printer cost on a deposit event and logs the decision", async () => {
@@ -39,10 +46,30 @@ describe("TreasuryAgent", () => {
     }));
     expect(res.status).toBe(200);
     expect(await getObligation(env.DB, ob.id)).toMatchObject({ status: "approved", approved_by: "owner" });
+    expect(await inboxOf()).toContain(`Owner decision on escalation #${e.id} (summary: "obligation #${ob.id} (now approved): Refund?"): approved.`);
+  });
+
+  it("an owner decision on a treasury escalation reaches the treasury and re-arms the question", async () => {
     const stub = await getAgentByName(env.TreasuryAgent, "treasury");
-    await runInDurableObject(stub, async (agent: TreasuryAgent) => {
-      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).toContain(`Owner decision on obligation #${ob.id}: approved.`);
+    const summary = `The wallet needs a top-up ${crypto.randomUUID()}`;
+    const escalateTurn = async () => runInDurableObject(stub, async (agent: TreasuryAgent) => {
+      agent.telegramOverride = quiet;
+      agent.rpcOverride = rich;
+      agent.modelOverride = scriptedModel([msg([toolUse("escalate", { summary, reason: "the wallet runs low" })], "tool_use"), msg([], "end_turn")]);
+      await agent.notify("Daily review.");
+      await agent.processTurn();
     });
+    const asked = async () => (await listEscalations(env.DB, { limit: 500 })).filter((x) => x.summary === `Treasury: ${summary}`);
+    await escalateTurn();
+    const [first] = await asked();
+    expect(first).toMatchObject({ kind: "agent", order_id: null });
+    expect(JSON.parse(first.payload_json)).toEqual({ treasury: true });
+    expect((await handleTelegram(fromOwner(`/approve ${first.id} topped up`), env, { telegram: quiet })).status).toBe(200);
+    expect(await inboxOf()).toContain(`Owner decision on escalation #${first.id} (summary: ${JSON.stringify(`Treasury: ${summary}`)}): approved. Note from the owner: "topped up".`);
+    await escalateTurn();
+    const both = await asked();
+    expect(both).toHaveLength(2);
+    expect(both.map((x) => x.id)).toContain(first.id);
   });
 
   it("stops at the daily model call budget", async () => {
@@ -65,8 +92,8 @@ describe("TreasuryAgent", () => {
     });
   });
 
-  async function decide(cmd: string, kind: "approval" | "payment", payload: Record<string, unknown>, status: "open" | "escalated" | "failed") {
-    const ob = await createObligation(env.DB, { orderId: null, kind: "refund", token: "USDC", amountUnits: 5_000_000, destination: "0x2222222222222222222222222222222222222222", chain: "ARC", dueAt: new Date(), sourceRef: `d:${crypto.randomUUID()}`, ...(status === "failed" ? {} : { status }) });
+  async function decide(cmd: string, kind: "approval" | "payment", payload: Record<string, unknown>, status: "open" | "escalated" | "failed", token: "USDC" | "EURC" = "USDC") {
+    const ob = await createObligation(env.DB, { orderId: null, kind: "refund", token, amountUnits: 5_000_000, destination: "0x2222222222222222222222222222222222222222", chain: "ARC", dueAt: new Date(), sourceRef: `d:${crypto.randomUUID()}`, ...(status === "failed" ? {} : { status }) });
     if (status === "failed") await setObligationStatus(env.DB, ob.id, ["open"], "failed");
     const e = await createEscalation(env.DB, { orderId: null, kind, summary: "x", payload: { obligationId: ob.id, ...payload } });
     const res = await SELF.fetch(new Request("https://swagpay.test/api/telegram", {
@@ -81,12 +108,30 @@ describe("TreasuryAgent", () => {
     expect(await decide("/approve", "payment", {}, "open")).toMatchObject({ status: "open", approved_by: null });
   });
 
-  it("rejecting an approval cancels an escalated obligation", async () => {
-    expect((await decide("/reject", "approval", {}, "escalated"))?.status).toBe("cancelled");
+  it("rejecting an approval settles an escalated obligation: the owner handles it", async () => {
+    expect(await decide("/reject", "approval", {}, "escalated")).toMatchObject({ status: "settled", approved_by: null });
+  });
+
+  it("approving a EURC obligation settles it: the treasury only pays USDC", async () => {
+    expect(await decide("/approve", "approval", {}, "escalated", "EURC")).toMatchObject({ status: "settled", approved_by: "owner" });
   });
 
   it("an approval reopens a failed obligation only with a payoutId", async () => {
     expect((await decide("/approve", "approval", {}, "failed"))?.status).toBe("failed");
     expect(await decide("/approve", "approval", { payoutId: 1 }, "failed")).toMatchObject({ status: "approved", approved_by: "owner" });
+  });
+
+  it("a stale payout's approval leaves a newer failed payout alone", async () => {
+    const ob = await createObligation(env.DB, { orderId: null, kind: "printer_cost", token: "USDC", amountUnits: 5_000_000, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC", dueAt: new Date(), sourceRef: `s:${crypto.randomUUID()}` });
+    const p1 = (await queuePayout(env.DB, ob))!;
+    await recordPayoutResult(env.DB, p1.id, { status: "failed", error: "RPC timeout" });
+    const p2 = (await queuePayout(env.DB, (await getObligation(env.DB, ob.id))!))!;
+    await recordPayoutResult(env.DB, p2.id, { status: "failed", error: "RPC timeout" });
+    const stale = await createEscalation(env.DB, { orderId: null, kind: "approval", summary: "old", payload: { obligationId: ob.id, payoutId: p1.id } });
+    await SELF.fetch(fromOwner(`/approve ${stale.id}`));
+    expect((await getObligation(env.DB, ob.id))?.status).toBe("failed");
+    const latest = await createEscalation(env.DB, { orderId: null, kind: "approval", summary: "new", payload: { obligationId: ob.id, payoutId: p2.id } });
+    await SELF.fetch(fromOwner(`/approve ${latest.id}`));
+    expect(await getObligation(env.DB, ob.id)).toMatchObject({ status: "approved", approved_by: "owner" });
   });
 });

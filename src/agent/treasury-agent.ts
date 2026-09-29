@@ -57,6 +57,13 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
     await this.trigger();
   }
 
+  /** The owner decided one of the treasury's escalations: re-arm its key, so the same question can be asked again, and tell the agent. */
+  async ownerDecision(e: { id: number; summary: string }, decision: "approved" | "rejected", note: string | null): Promise<void> {
+    this.ensureTables();
+    this.sql`DELETE FROM escalated WHERE escalation_id = ${e.id}`;
+    await this.notify(`Owner decision on escalation #${e.id} (summary: ${JSON.stringify(e.summary)}): ${decision}.${note ? ` Note from the owner: ${JSON.stringify(note)}.` : ""}`);
+  }
+
   /** Scheduled by hold_obligation. */
   async recheck(payload: { obligationId: number }): Promise<void> {
     await this.notify(`Recheck obligation #${payload.obligationId}: you held it earlier.`);

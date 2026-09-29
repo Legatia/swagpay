@@ -97,7 +97,8 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
 
     escalate: logged(ctx, "escalate", EscalateInput, async ({ summary }) => {
       const oneLine = summary.replace(/\s+/g, " ");
-      const e = await ctx.escalateOnce(`agent:${oneLine}`, { orderId: null, kind: "agent", summary: `Treasury: ${oneLine}`, payload: {} });
+      // The payload routes the owner's decision back to the treasury (deliver() in telegram-webhook.ts).
+      const e = await ctx.escalateOnce(`agent:${oneLine}`, { orderId: null, kind: "agent", summary: `Treasury: ${oneLine}`, payload: { treasury: true } });
       return { verdict: "escalate", outcome: "escalated", detail: `#${e.id}`, result: { content: e.created ? `Sent to the owner as #${e.id}; their decision arrives as an event.` : `Already with the owner as #${e.id}.` } };
     }),
   };

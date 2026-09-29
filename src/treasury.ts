@@ -1,7 +1,8 @@
 import { isAddress, type Token } from "./money";
 
 export type ObligationKind = "printer_cost" | "refund" | "reserve";
-export type ObligationStatus = "open" | "approved" | "queued" | "paid" | "failed" | "escalated" | "cancelled";
+/** "settled": the owner handled it outside the agent (a reject, or an approved non-USDC obligation). "cancelled" is unused. */
+export type ObligationStatus = "open" | "approved" | "queued" | "paid" | "failed" | "escalated" | "settled" | "cancelled";
 
 export interface ObligationRow {
   id: number;
@@ -119,6 +120,26 @@ export async function setObligationStatus(
     .bind(to, extra.approvedBy ?? null, id, ...from)
     .run();
   return res.meta.changes === 1;
+}
+
+/**
+ * The owner's decision on an obligation's approval escalation. Approve moves a USDC obligation to approved (the treasury pays it)
+ * and any other token to settled (the treasury can't pay it); reject means the owner handles it, so it is settled too.
+ * A failed obligation moves only for the escalation of its latest payout, so a stale /resend can't reopen a newer failure.
+ */
+export async function decideObligation(
+  db: D1Database, id: number, decision: "approved" | "rejected", payoutId: number | null,
+): Promise<ObligationRow | null> {
+  const ob = await getObligation(db, id);
+  if (!ob) return null;
+  const from: ObligationStatus[] = ["escalated", "open"];
+  if (payoutId !== null) {
+    const newer = await db.prepare("SELECT 1 AS n FROM payouts WHERE obligation_id = ? AND id > ? LIMIT 1").bind(id, payoutId).first();
+    if (!newer) from.push("failed");
+  }
+  const to: ObligationStatus = decision === "approved" && ob.token === "USDC" ? "approved" : "settled";
+  await setObligationStatus(db, id, from, to, decision === "approved" ? { approvedBy: "owner" } : {});
+  return getObligation(db, id);
 }
 
 export async function setObligationNote(db: D1Database, id: number, note: string): Promise<void> {

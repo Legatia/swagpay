@@ -7,7 +7,7 @@ import { createPaymentRequest } from "./payments";
 import { warsawTime } from "./quote-text";
 import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
-import { setObligationStatus } from "./treasury";
+import { decideObligation } from "./treasury";
 
 type Update = {
   message?: { chat?: { id?: number }; text?: string };
@@ -37,15 +37,18 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
   try {
     // First: a failure here delivers nothing, so /resend repeats it (both steps are idempotent).
     // Only real approvals decide an obligation: a payment notice's Acknowledge button must not approve a payout.
-    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown; payoutId?: unknown } | null; } catch { return null; } })();
+    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown; payoutId?: unknown; treasury?: unknown } | null; } catch { return null; } })();
+    const decision = row.status as "approved" | "rejected";
     if (row.kind === "approval" && typeof payload?.obligationId === "number") {
       const obligationId = payload.obligationId;
-      // A failed payout may have been broadcast; only the runner-result escalation (it carries payoutId) may reopen it.
-      const from: ("escalated" | "open" | "failed")[] = typeof payload.payoutId === "number" ? ["escalated", "open", "failed"] : ["escalated", "open"];
-      if (row.status === "approved") await setObligationStatus(env.DB, obligationId, from, "approved", { approvedBy: "owner" });
-      else await setObligationStatus(env.DB, obligationId, from, "cancelled");
+      // A failed payout may have been broadcast; only the escalation of its latest payout (it carries payoutId) may reopen it.
+      const ob = await decideObligation(env.DB, obligationId, decision, typeof payload.payoutId === "number" ? payload.payoutId : null);
+      const now = ob === null ? "" : ob.status === "settled" ? " (now settled by the owner)" : ` (now ${ob.status})`;
       const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
-      await treasury.notify(`Owner decision on obligation #${obligationId}: ${row.status}.${row.decision_note ? ` Note from the owner: ${JSON.stringify(row.decision_note)}.` : ""}`);
+      await treasury.ownerDecision({ id: row.id, summary: `obligation #${obligationId}${now}: ${row.summary}` }, decision, row.decision_note);
+    } else if (payload?.treasury === true) {
+      const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
+      await treasury.ownerDecision({ id: row.id, summary: row.summary }, decision, row.decision_note);
     }
     if (row.order_id !== null) {
       const order = await getOrderById(env.DB, row.order_id);
@@ -53,7 +56,7 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
         const agent = await getAgentByName(env.OrderAgent, order.instance);
         const cost = row.kind === "cost" && row.status === "approved" ? /^(\d+\.\d{2}) PLN(?:; ([\s\S]*))?$/.exec(row.decision_note ?? "") : null;
         if (cost) await agent.setPrinterCost(row.id, Number(cost[1]), cost[2] ?? null);
-        else await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, row.status as "approved" | "rejected", row.decision_note);
+        else await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, decision, row.decision_note);
       }
     }
     await markDelivered(env.DB, row.id);
