@@ -1,3 +1,4 @@
+import { clampToArea } from "./geometry.js";
 import { PRODUCTS, cm, viewAreas } from "./products.js";
 import { rasterize } from "./raster.js";
 import { allowedShapes, circlePathD, roundedSquarePathD, simplify, smoothPathD, traceOutline } from "./sticker.js";
@@ -100,7 +101,10 @@ function buildControls(container, s, { store }) {
   if (p.presets && p.presets.length > 1) {
     parts.push(group("Size", p.presets.map((x) => chip(`preset:${x.key}`, x.label, s.options.size === x.key, () => {
       const options = { ...s.options, size: x.key };
-      store.set({ options, areas: viewAreas(s.product, options, s.sticker), layers: { front: [], back: [] }, selectedId: null });
+      const areas = viewAreas(s.product, options, s.sticker);
+      // Keep the design and pull each layer into the new size instead of deleting it.
+      const front = (s.layers.front || []).map((l) => clampToArea(l, areas[0]).layer);
+      store.set({ options, areas, layers: { front, back: [] }, selectedId: null });
     }))));
   }
   if (p.sizes) {
