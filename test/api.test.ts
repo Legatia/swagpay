@@ -11,6 +11,7 @@ const base = "https://swagpay.test";
 async function newOrder(): Promise<string> {
   const res = await SELF.fetch(`${base}/api/orders`, { method: "POST", body: JSON.stringify(intake), headers: { "content-type": "application/json" } });
   expect(res.status).toBe(201);
+  expect(res.headers.get("cache-control")).toBe("no-store");
   const body = await res.json<{ token: string; url: string }>();
   expect(body.url).toBe(`/o/${body.token}`);
   return body.token;
