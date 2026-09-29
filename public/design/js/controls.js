@@ -2,8 +2,9 @@ import { PRODUCTS, cm, viewAreas } from "./products.js";
 import { rasterize } from "./raster.js";
 import { allowedShapes, circlePathD, roundedSquarePathD, simplify, smoothPathD, traceOutline } from "./sticker.js";
 
-function chip(label, pressed, onClick, extra) {
+function chip(key, label, pressed, onClick, extra) {
   const b = document.createElement("button");
+  b.dataset.key = key;
   b.type = "button";
   b.className = "chip";
   b.setAttribute("aria-pressed", String(pressed));
@@ -73,29 +74,37 @@ export function updateCutPath(store) {
   }, 250);
 }
 
+// Every store change rebuilds the chips, so remember which one has focus and put it back.
 export function renderControls(container, s, { store }) {
+  const active = document.activeElement;
+  const focusKey = active && container.contains(active) ? active.dataset.key : null;
+  buildControls(container, s, { store });
+  if (focusKey) container.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
+}
+
+function buildControls(container, s, { store }) {
   const p = PRODUCTS[s.product];
   if (!p) return container.replaceChildren();
   const parts = [];
   if (p.views && p.views.length > 1) {
-    parts.push(group("Side", p.views.map((v) => chip(v.side === "front" ? "Front" : "Back", s.side === v.side, () => store.set({ side: v.side, selectedId: null }, { record: false })))));
+    parts.push(group("Side", p.views.map((v) => chip(`side:${v.side}`, v.side === "front" ? "Front" : "Back", s.side === v.side, () => store.set({ side: v.side, selectedId: null }, { record: false })))));
   }
   if (p.colours) {
     parts.push(group("Colour", p.colours.map((c) => {
       const dot = document.createElement("span");
       dot.className = "swatch";
       dot.style.background = c.hex;
-      return chip(c.label, s.options.colour === c.key, () => store.set({ options: { ...s.options, colour: c.key } }), dot);
+      return chip(`colour:${c.key}`, c.label, s.options.colour === c.key, () => store.set({ options: { ...s.options, colour: c.key } }), dot);
     })));
   }
   if (p.presets && p.presets.length > 1) {
-    parts.push(group("Size", p.presets.map((x) => chip(x.label, s.options.size === x.key, () => {
+    parts.push(group("Size", p.presets.map((x) => chip(`preset:${x.key}`, x.label, s.options.size === x.key, () => {
       const options = { ...s.options, size: x.key };
       store.set({ options, areas: viewAreas(s.product, options, s.sticker), layers: { front: [], back: [] }, selectedId: null });
     }))));
   }
   if (p.sizes) {
-    parts.push(group("Size (longest side)", p.sizes.map((L) => chip(cm(L), s.sticker.longestSideMm === L, () => {
+    parts.push(group("Size (longest side)", p.sizes.map((L) => chip(`size:${L}`, cm(L), s.sticker.longestSideMm === L, () => {
       const sticker = { ...s.sticker, longestSideMm: L };
       const oldA = s.areas[0].widthMm;
       const newA = viewAreas("sticker", {}, sticker)[0];
@@ -106,7 +115,7 @@ export function renderControls(container, s, { store }) {
     }))));
     const allowed = allowedShapes(s.layers.front || [], s.assets);
     const shapeChips = p.shapes.map((sh) => {
-      const c = chip(sh.label, s.sticker.shape === sh.key, () => {
+      const c = chip(`shape:${sh.key}`, sh.label, s.sticker.shape === sh.key, () => {
         store.set({ sticker: { ...s.sticker, shape: sh.key } });
         updateCutPath(store);
       });

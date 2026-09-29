@@ -114,6 +114,8 @@ export function renderPanel(container, state, { store, area, announce }) {
     del.addEventListener("click", () => {
       store.set((st) => removeLayer(st, st.side, layer.id));
       announce("Layer removed.");
+      // The panel empties, so keyboard focus goes to the stage instead of the page top.
+      document.getElementById("stage")?.focus({ preventScroll: true });
     });
     parts.push(del);
     container.replaceChildren(...parts);
