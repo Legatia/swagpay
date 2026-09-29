@@ -1,4 +1,4 @@
-import { MAX_TAG, UNITS_PER_CENT, taggedUnits, type Token } from "./money";
+import { MAX_TAG, tagOf, taggedUnits, type Token } from "./money";
 
 export interface PaymentRequestRow {
   id: number;
@@ -37,9 +37,10 @@ export interface NewTransfer {
 export type TransferOutcome =
   | { kind: "duplicate" }
   | { kind: "unmatched"; transfer: TransferRow }
-  | { kind: "matched"; transfer: TransferRow; request: PaymentRequestRow };
+  | { kind: "matched"; transfer: TransferRow; request: PaymentRequestRow; via: "amount" | "claim" };
 
 const isUniqueError = (err: unknown) => err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
+export const TAG_QUARANTINE_DAYS = 30;
 const randomTag = () => 1 + Math.floor(Math.random() * MAX_TAG);
 
 export async function createPaymentRequest(
@@ -50,6 +51,12 @@ export async function createPaymentRequest(
 ): Promise<PaymentRequestRow> {
   for (let attempt = 0; attempt < 20; attempt++) {
     const tag = nextTag();
+    const since = new Date(now.getTime() - TAG_QUARANTINE_DAYS * 86_400_000).toISOString();
+    const busy = await db
+      .prepare("SELECT 1 AS x FROM payment_requests WHERE token = ? AND tag = ? AND (status = 'open' OR (status = 'paid' AND paid_at >= ?))")
+      .bind(r.token, tag, since)
+      .first();
+    if (busy) continue;
     try {
       const row = await db
         .prepare("INSERT INTO payment_requests (order_id, quote_id, stage, token, amount_units, tag, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *")
@@ -90,24 +97,28 @@ export async function addClaim(db: D1Database, requestId: number, txHash: string
   }
 }
 
-/** The request a transfer pays: a claimed hash first, then the exact amount still due, then the tag. */
-export async function matchTransfer(db: D1Database, t: { txHash: string; token: Token; amountUnits: number }): Promise<PaymentRequestRow | null> {
-  const claimed = await db
-    .prepare("SELECT r.* FROM payment_claims c JOIN payment_requests r ON r.id = c.request_id WHERE c.tx_hash = ? AND r.token = ? AND r.status != 'cancelled'")
-    .bind(t.txHash.toLowerCase(), t.token)
-    .first<PaymentRequestRow>();
-  if (claimed) return claimed;
+/** The request a transfer pays: the exact amount still due, then a tag on a short payment, and only then a claimed hash. */
+export async function matchTransfer(
+  db: D1Database,
+  t: { txHash: string; token: Token; amountUnits: number },
+): Promise<{ request: PaymentRequestRow; via: "amount" | "claim" } | null> {
   const exact = (await db
     .prepare("SELECT * FROM payment_requests WHERE status = 'open' AND token = ? AND amount_units - paid_units = ?")
     .bind(t.token, t.amountUnits)
     .all<PaymentRequestRow>()).results;
-  if (exact.length === 1) return exact[0];
+  if (exact.length === 1) return { request: exact[0], via: "amount" };
   if (exact.length > 1) return null;
   const tagged = (await db
-    .prepare("SELECT * FROM payment_requests WHERE status = 'open' AND token = ? AND tag = ?")
-    .bind(t.token, t.amountUnits % UNITS_PER_CENT)
+    .prepare("SELECT * FROM payment_requests WHERE status = 'open' AND token = ? AND tag = ? AND amount_units - paid_units >= ?")
+    .bind(t.token, tagOf(t.amountUnits), t.amountUnits)
     .all<PaymentRequestRow>()).results;
-  return tagged.length === 1 ? tagged[0] : null;
+  if (tagged.length === 1) return { request: tagged[0], via: "amount" };
+  if (tagged.length > 1) return null;
+  const claimed = await db
+    .prepare("SELECT r.* FROM payment_claims c JOIN payment_requests r ON r.id = c.request_id WHERE c.tx_hash = ? AND r.token = ? AND r.status != 'cancelled'")
+    .bind(t.txHash.toLowerCase(), t.token)
+    .first<PaymentRequestRow>();
+  return claimed ? { request: claimed, via: "claim" } : null;
 }
 
 // Credit the request only while the transfer is still unassigned, then assign it. Run both in one batch (one transaction).
@@ -129,7 +140,8 @@ function creditStatements(db: D1Database, t: { txHash: string; logIndex: number;
 export async function recordTransfer(db: D1Database, t: NewTransfer, now: Date = new Date()): Promise<TransferOutcome> {
   const txHash = t.txHash.toLowerCase();
   if (await getTransfer(db, txHash, t.logIndex)) return { kind: "duplicate" };
-  const request = await matchTransfer(db, { txHash, token: t.token, amountUnits: t.amountUnits });
+  const match = await matchTransfer(db, { txHash, token: t.token, amountUnits: t.amountUnits });
+  const request = match?.request;
   const insert = db
     .prepare("INSERT INTO transfers (tx_hash, log_index, block_number, token, from_address, amount_units, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .bind(txHash, t.logIndex, t.blockNumber, t.token, t.from.toLowerCase(), t.amountUnits, now.toISOString());
@@ -144,7 +156,7 @@ export async function recordTransfer(db: D1Database, t: NewTransfer, now: Date =
   if (!request) return { kind: "unmatched", transfer };
   const updated = await getPaymentRequest(db, request.id);
   if (!updated) throw new Error("payment request vanished");
-  return { kind: "matched", transfer, request: updated };
+  return { kind: "matched", transfer, request: updated, via: match!.via };
 }
 
 /** Credits transfers that arrived unmatched and were claimed by a payer afterwards. */
@@ -159,10 +171,11 @@ export async function applyClaims(db: D1Database, now: Date = new Date()): Promi
     .all<{ tx_hash: string; log_index: number; amount_units: number; claimed: number }>()).results;
   const out: TransferOutcome[] = [];
   for (const row of rows) {
-    await db.batch(creditStatements(db, { txHash: row.tx_hash, logIndex: row.log_index, amountUnits: row.amount_units }, row.claimed, now));
+    const [credit] = await db.batch(creditStatements(db, { txHash: row.tx_hash, logIndex: row.log_index, amountUnits: row.amount_units }, row.claimed, now));
+    if (credit.meta.changes !== 1) continue;
     const transfer = await getTransfer(db, row.tx_hash, row.log_index);
     const request = await getPaymentRequest(db, row.claimed);
-    if (transfer?.request_id === row.claimed && request) out.push({ kind: "matched", transfer, request });
+    if (transfer?.request_id === row.claimed && request) out.push({ kind: "matched", transfer, request, via: "claim" });
   }
   return out;
 }

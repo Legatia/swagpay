@@ -26,7 +26,8 @@ export function formatUnits(units: number): string {
 
 /** 41237 → "412.37" */
 export function formatCents(cents: number): string {
-  return `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+  const abs = Math.abs(cents);
+  return `${cents < 0 ? "-" : ""}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
 }
 
 export function isAddress(s: unknown): s is string {

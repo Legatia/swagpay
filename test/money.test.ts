@@ -17,6 +17,7 @@ describe("money", () => {
     expect(formatUnits(-1_000_000)).toBe("-1.000000");
     expect(formatCents(41237)).toBe("412.37");
     expect(formatCents(5)).toBe("0.05");
+    expect(formatCents(-5)).toBe("-0.05");
   });
 
   it("maps currencies to tokens and checks addresses", () => {
