@@ -23,6 +23,21 @@ async function setState(db: D1Database, key: string, value: string): Promise<voi
   await db.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES (?, ?)").bind(key, value).run();
 }
 
+async function clearState(db: D1Database, key: string): Promise<void> {
+  await db.prepare("DELETE FROM watcher_state WHERE key = ?").bind(key).run();
+}
+
+/** One system escalation per alert key until the key is cleared (when the problem goes away). */
+async function alertOnce(env: Env, telegram: TelegramClient, key: string, summary: string): Promise<void> {
+  if ((await getState(env.DB, key)) !== null) return;
+  const e = await createEscalation(env.DB, { orderId: null, kind: "system", summary, payload: { watcher: key } });
+  await setState(env.DB, key, String(e.id));
+  await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+}
+
+/** A cursor this far past the chain head belongs to another chain or database. */
+export const MAX_CURSOR_AHEAD_BLOCKS = 1000;
+
 /** Tells the order's agent (and the host's thread) about a credited transfer; escalates overpayment. Reports the request as it stood when this transfer was credited. */
 async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: TransferRow; request: PaymentRequestRow; via: "amount" | "claim" }): Promise<void> {
   const r = o.request;
@@ -166,8 +181,32 @@ export async function runWatcher(
     const start = from;
     let scanError: unknown = null;
     let failed = false;
+    // A run stopped by a chain check touches nothing: the stored state may belong to another chain.
+    let halted = false;
     try {
-      const head = (await deps.rpc.blockNumber()) - HEAD_LAG_BLOCKS;
+      const chain = await deps.rpc.chainId();
+      if (chain !== Number(env.ARC_CHAIN_ID)) {
+        halted = true;
+        await alertOnce(env, telegram, "alert_chain", `RPC chain ${chain} does not match ARC_CHAIN_ID ${env.ARC_CHAIN_ID}; the payment watcher is stopped.`);
+        return null;
+      }
+      await clearState(env.DB, "alert_chain");
+      const stored = await getState(env.DB, "chain_id");
+      if (stored !== null && Number(stored) !== chain) {
+        halted = true;
+        await alertOnce(env, telegram, "alert_state_chain", `watcher_state belongs to chain ${stored}; clear it before watching chain ${chain}.`);
+        return null;
+      }
+      await clearState(env.DB, "alert_state_chain");
+      const latest = await deps.rpc.blockNumber();
+      if (start0 !== null && Number(start0) > latest + MAX_CURSOR_AHEAD_BLOCKS) {
+        halted = true;
+        await alertOnce(env, telegram, "alert_cursor", "last_block is ahead of the chain head; the watcher state looks stale (a testnet cursor?).");
+        return null;
+      }
+      await clearState(env.DB, "alert_cursor");
+      if (stored === null) await setState(env.DB, "chain_id", String(chain));
+      const head = latest - HEAD_LAG_BLOCKS;
       if (start0 === null) {
         await setState(env.DB, "last_block", String(head));
         return null;
@@ -209,15 +248,17 @@ export async function runWatcher(
       scanError = err;
     } finally {
       // Claims and notifications don't wait on the RPC.
-      try {
-        for (const o of await applyClaims(env.DB, deps.now)) outcomes.push(o);
-      } catch (err) {
-        console.error("applyClaims failed", err);
-      }
-      try {
-        await notifyPass(env, telegram);
-      } catch (err) {
-        console.error("notification pass failed", err);
+      if (!halted) {
+        try {
+          for (const o of await applyClaims(env.DB, deps.now)) outcomes.push(o);
+        } catch (err) {
+          console.error("applyClaims failed", err);
+        }
+        try {
+          await notifyPass(env, telegram);
+        } catch (err) {
+          console.error("notification pass failed", err);
+        }
       }
     }
     if (failed) throw scanError;

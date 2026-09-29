@@ -70,6 +70,7 @@ it("runs an order from a complete spec to a paid deposit", async () => {
   // 6. The deposit lands on Arc as a native USDC send.
   await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('last_block', '999')").run();
   const rpc: RpcClient = {
+    async chainId() { return 5042; },
     async blockNumber() { return 1040; }, // the watcher stays HEAD_LAG_BLOCKS (30) behind the head
     async getLogs() {
       return [{

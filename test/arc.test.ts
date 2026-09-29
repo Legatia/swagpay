@@ -61,6 +61,17 @@ describe("createRpc", () => {
     expect(logs[0].data).toBe("0x");
   });
 
+  it("reads the chain id", async () => {
+    const methods: string[] = [];
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const { id, method } = JSON.parse(String(init?.body));
+      methods.push(method);
+      return Response.json({ jsonrpc: "2.0", id, result: "0x13b2" });
+    }) as typeof fetch;
+    expect(await createRpc(["https://a"], fetchImpl).chainId()).toBe(5042);
+    expect(methods).toEqual(["eth_chainId"]);
+  });
+
   it("throws the last error when every URL fails", async () => {
     const fetchImpl = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
     await expect(createRpc(["https://a"], fetchImpl).blockNumber()).rejects.toThrow("HTTP 503");

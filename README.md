@@ -58,7 +58,13 @@ Apply the new migration remotely before deploying: `npx wrangler d1 migrations a
 
 - `RECEIVING_ADDRESS`: the Arc address of the owner's Circle agent wallet. While it is empty, hosts cannot accept quotes and the watcher does nothing.
 - `ARC_RPC_URL` defaults to Blockdaemon's keyless endpoint. The official RPC rate-limits `eth_getLogs` from Cloudflare. `ARC_RPC_FALLBACK_URL` is optional; an Alchemy Arc URL with a key is a good choice.
-- `ARC_CHAIN_ID`, `USDC_ADDRESS`, `EURC_ADDRESS`: mainnet values are set. For the testnet rehearsal, use chain `5042002` and EURC `0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a`.
+- `ARC_CHAIN_ID`, `USDC_ADDRESS`, `EURC_ADDRESS`: mainnet values are set.
+- Testnet rehearsal: use a separate D1 database, or clear `watcher_state` and the payment tables before and after:
+
+      npx wrangler d1 execute swagpay --remote --command "DELETE FROM payment_claims; DELETE FROM transfers; DELETE FROM payment_requests; DELETE FROM watcher_state;"
+
+  Set `ARC_CHAIN_ID=5042002`, the testnet `EURC_ADDRESS` (`0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a`), and point `ARC_RPC_URL` and `ARC_RPC_FALLBACK_URL` at testnet RPC URLs.
+  The watcher records the chain it watches in `watcher_state`. It stops, and tells you once in Telegram, when the RPC's chain differs from `ARC_CHAIN_ID`, when `watcher_state` belongs to another chain, or when its cursor is more than 1,000 blocks ahead of the chain head.
 - Crons:
   - `* * * * *` runs the payment watcher. It stays 30 blocks (about 20 seconds) behind the chain head, and only one run works at a time. The first run only records where to start: let it run once before any host accepts a quote. Notifications (the agent event, order status, owner notices) retry every minute until they succeed.
   - `17 * * * *` refreshes the NBP złoty rates. Quotes are refused while the rates are older than 6 hours.

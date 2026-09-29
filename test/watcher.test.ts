@@ -14,9 +14,10 @@ import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
 const TO = "0x1111111111111111111111111111111111111111";
 const silent: TelegramClient = { async send() { return null; }, async answerCallback() {} };
 
-function fakeRpc(latest: number, logs: RawLog[] = []) {
+function fakeRpc(latest: number, logs: RawLog[] = [], chain = 5042) {
   const calls: { fromBlock: number; toBlock: number; address: string[]; topics: (string | null)[] }[] = [];
   const rpc: RpcClient = {
+    async chainId() { return chain; },
     async blockNumber() { return latest; },
     async getLogs(f) {
       calls.push(f);
@@ -205,7 +206,7 @@ describe("runWatcher", () => {
     const paid = usdcLog(955, req.amount_units, 11);
     const broken = ({ ...env, OrderAgent: { idFromName() { throw new Error("agent unavailable"); } } }) as unknown as Env;
     await runWatcher(broken, { rpc: fakeRpc(990, [paid]).rpc, telegram: silent });
-    const failing: RpcClient = { async blockNumber() { return 1100; }, async getLogs() { throw new Error("HTTP 503"); } };
+    const failing: RpcClient = { async chainId() { return 5042; }, async blockNumber() { return 1100; }, async getLogs() { throw new Error("HTTP 503"); } };
     await expect(runWatcher(env, { rpc: failing, telegram: silent })).rejects.toThrow("HTTP 503");
     expect((await listUnnotified(env.DB)).some((t) => t.tx_hash === paid.transactionHash)).toBe(false);
   });
@@ -225,7 +226,7 @@ describe("runWatcher", () => {
     await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('lock_until', ?)").bind(String(Date.now() + 60_000)).run();
     try {
       let called = false;
-      const rpc: RpcClient = { async blockNumber() { called = true; return 1; }, async getLogs() { return []; } };
+      const rpc: RpcClient = { async chainId() { called = true; return 5042; }, async blockNumber() { called = true; return 1; }, async getLogs() { return []; } };
       expect(await runWatcher(env, { rpc, telegram: silent })).toBeNull();
       expect(called).toBe(false);
     } finally {
@@ -254,8 +255,59 @@ describe("runWatcher", () => {
     const closed = ({ ...env, RECEIVING_ADDRESS: "" }) as Env;
     expect(await runWatcher(closed, { rpc: fakeRpc(1).rpc })).toBeNull();
     await setLastBlock(500);
-    const failing: RpcClient = { async blockNumber() { return 600; }, async getLogs() { throw new Error("HTTP 503"); } };
+    const failing: RpcClient = { async chainId() { return 5042; }, async blockNumber() { return 600; }, async getLogs() { throw new Error("HTTP 503"); } };
     await expect(runWatcher(env, { rpc: failing, telegram: silent })).rejects.toThrow("HTTP 503");
     expect((await env.DB.prepare("SELECT value FROM watcher_state WHERE key = 'last_block'").first<{ value: string }>())?.value).toBe("500");
+  });
+
+  describe("chain binding", () => {
+    const state = async (key: string) => (await env.DB.prepare("SELECT value FROM watcher_state WHERE key = ?").bind(key).first<{ value: string }>())?.value ?? null;
+    const systemAlerts = async (text: string) => (await listEscalations(env.DB)).filter((x) => x.kind === "system" && x.order_id === null && x.summary === text);
+
+    it("stops on an RPC for another chain, alerts once, and re-arms once the chain matches", async () => {
+      await setLastBlock(2000);
+      const text = "RPC chain 5042002 does not match ARC_CHAIN_ID 5042; the payment watcher is stopped.";
+      const wrong = fakeRpc(2100, [usdcLog(2050, 77_000_000, 16)], 5042002);
+      expect(await runWatcher(env, { rpc: wrong.rpc, telegram: silent })).toBeNull();
+      expect(await runWatcher(env, { rpc: wrong.rpc, telegram: silent })).toBeNull();
+      expect(wrong.calls).toHaveLength(0);
+      expect(await systemAlerts(text)).toHaveLength(1);
+      expect(await state("last_block")).toBe("2000");
+      await runWatcher(env, { rpc: fakeRpc(2030).rpc, telegram: silent });
+      expect(await state("alert_chain")).toBeNull();
+      await runWatcher(env, { rpc: wrong.rpc, telegram: silent });
+      expect(await systemAlerts(text)).toHaveLength(2);
+    });
+
+    it("stores the chain next to the cursor and refuses state from another chain", async () => {
+      await setLastBlock(2100);
+      await runWatcher(env, { rpc: fakeRpc(2130).rpc, telegram: silent });
+      expect(await state("chain_id")).toBe("5042");
+      await env.DB.prepare("UPDATE watcher_state SET value = '5042002' WHERE key = 'chain_id'").run();
+      try {
+        const rpc = fakeRpc(2200, [usdcLog(2150, 77_000_000, 17)]);
+        expect(await runWatcher(env, { rpc: rpc.rpc, telegram: silent })).toBeNull();
+        expect(await runWatcher(env, { rpc: rpc.rpc, telegram: silent })).toBeNull();
+        expect(rpc.calls).toHaveLength(0);
+        expect(await systemAlerts("watcher_state belongs to chain 5042002; clear it before watching chain 5042.")).toHaveLength(1);
+        expect(await state("last_block")).toBe("2100");
+      } finally {
+        await env.DB.prepare("UPDATE watcher_state SET value = '5042' WHERE key = 'chain_id'").run();
+      }
+    });
+
+    it("stops when the cursor is far ahead of the chain head", async () => {
+      await setLastBlock(9_000);
+      try {
+        const rpc = fakeRpc(7_000);
+        expect(await runWatcher(env, { rpc: rpc.rpc, telegram: silent })).toBeNull();
+        expect(await runWatcher(env, { rpc: rpc.rpc, telegram: silent })).toBeNull();
+        expect(rpc.calls).toHaveLength(0);
+        expect(await systemAlerts("last_block is ahead of the chain head; the watcher state looks stale (a testnet cursor?).")).toHaveLength(1);
+        expect(await state("last_block")).toBe("9000");
+      } finally {
+        await setLastBlock(2200);
+      }
+    });
   });
 });

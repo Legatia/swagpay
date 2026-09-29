@@ -21,6 +21,7 @@ export interface LogFilter {
 }
 
 export interface RpcClient {
+  chainId(): Promise<number>;
   blockNumber(): Promise<number>;
   getLogs(filter: LogFilter): Promise<RawLog[]>;
 }
@@ -56,9 +57,13 @@ export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcC
     }
     throw last;
   };
+  const quantity = (r: unknown) => typeof r === "string" && /^0x[0-9a-fA-F]+$/.test(r);
   return {
+    async chainId() {
+      return Number(BigInt(String(await call("eth_chainId", [], quantity))));
+    },
     async blockNumber() {
-      return Number(BigInt(String(await call("eth_blockNumber", [], (r) => typeof r === "string" && /^0x[0-9a-fA-F]+$/.test(r)))));
+      return Number(BigInt(String(await call("eth_blockNumber", [], quantity))));
     },
     async getLogs(f) {
       const result = await call("eth_getLogs", [{ fromBlock: hex(f.fromBlock), toBlock: hex(f.toBlock), address: f.address, topics: f.topics }], isLogArray);
