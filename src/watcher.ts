@@ -224,7 +224,8 @@ export async function runWatcher(
         let to = Math.min(from + CHUNK_BLOCKS - 1, head);
         let logs = await deps.rpc.getLogs(filter(from, to));
         if (deps.rpc.takeSwitched?.()) {
-          // These logs came from a different node than the head: re-read the head there and never trust blocks past it.
+          // These logs came from a different node than the head: check its chain, re-read its head, and never trust blocks past it.
+          if ((await deps.rpc.chainId()) !== Number(env.ARC_CHAIN_ID)) throw new Error("the fallback RPC is on another chain; its logs were discarded");
           const fresh = (await deps.rpc.blockNumber()) - HEAD_LAG_BLOCKS;
           head = Math.min(head, fresh);
           if (head < from) break;

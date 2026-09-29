@@ -335,6 +335,22 @@ describe("runWatcher", () => {
     expect(stored.map((x) => x.tx_hash)).toEqual([kept.transactionHash]);
   });
 
+  it("discards logs from a fallback node on another chain", async () => {
+    await setLastBlock(3600);
+    const chains = [5042, 5042002]; // the run starts on the right chain; the fallback it switches to is not
+    let switched = true;
+    const rpc: RpcClient = {
+      async chainId() { return chains.shift() ?? 5042002; },
+      async blockNumber() { return 3700; },
+      async getLogs() { return [usdcLog(3650, 77_000_000, 25)]; },
+      takeSwitched() { const was = switched; switched = false; return was; },
+    };
+    await expect(runWatcher(env, { rpc, telegram: silent })).rejects.toThrow("fallback RPC is on another chain");
+    expect((await env.DB.prepare("SELECT value FROM watcher_state WHERE key = 'last_block'").first<{ value: string }>())?.value).toBe("3600");
+    const stored = await env.DB.prepare("SELECT COUNT(*) AS n FROM transfers WHERE tx_hash = ?").bind(usdcLog(3650, 77_000_000, 25).transactionHash).first<{ n: number }>();
+    expect(stored?.n).toBe(0);
+  });
+
   describe("chain binding", () => {
     const state = async (key: string) => (await env.DB.prepare("SELECT value FROM watcher_state WHERE key = ?").bind(key).first<{ value: string }>())?.value ?? null;
     const systemAlerts = async (text: string) => (await listEscalations(env.DB)).filter((x) => x.kind === "system" && x.order_id === null && x.summary === text);
