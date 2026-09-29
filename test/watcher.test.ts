@@ -179,7 +179,7 @@ describe("runWatcher", () => {
     expect(JSON.parse(approval!.payload_json).obligationId).toBe(refund.id);
   });
 
-  it("fails closed on bad treasury config before any side effect", async () => {
+  it("still reports a deposit once when the treasury config is invalid, and escalates the printer cost", async () => {
     const { order, stub, req } = await pendingDeposit(9494);
     await setLastBlock(4300);
     const bad = ({ ...env, TREASURY_DAILY_USDC: "1,500" as string }) as unknown as Env;
@@ -187,10 +187,26 @@ describe("runWatcher", () => {
     await runWatcher(bad, { rpc: fakeRpc(4340, [log]).rpc, telegram: silent });
     await runWatcher(bad, { rpc: fakeRpc(4340).rpc, telegram: silent });
     await runInDurableObject(stub, async (agent: OrderAgent) => {
-      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text).join("\n");
-      expect(inbox).not.toContain("Payment received on Arc");
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text);
+      expect(inbox.filter((t) => t.includes("Payment received on Arc"))).toHaveLength(1);
     });
-    expect((await listEscalations(env.DB)).filter((x) => x.order_id === order.id)).toHaveLength(0);
+    const obs = (await env.DB.prepare("SELECT * FROM obligations WHERE order_id = ? AND kind = 'printer_cost'").bind(order.id).all<ObligationRow>()).results;
+    expect(obs).toHaveLength(1);
+    expect(obs[0]).toMatchObject({ status: "escalated", amount_units: 257_500_000, note: 'treasury config is invalid (TREASURY_DAILY_USDC must be a non-negative number, got "1,500")' });
+    const book = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.summary.includes("Book the printer"));
+    expect(book).toHaveLength(1);
+    expect(book[0].summary).toContain("The treasury agent can't move it (treasury config is invalid (TREASURY_DAILY_USDC");
+    expect(book[0].summary).toContain("pay from the wallet by hand");
+  });
+
+  it("uses the default FX buffer for the printer cost when the order policy is invalid", async () => {
+    const { order, req } = await pendingDeposit(9393);
+    await setLastBlock(4200);
+    const bad = ({ ...env, POLICY_FX_BUFFER: "lots" as string }) as unknown as Env;
+    await runWatcher(bad, { rpc: fakeRpc(4240, [usdcLog(4205, req.amount_units, 9393)]).rpc, telegram: silent });
+    const ob = await env.DB.prepare("SELECT * FROM obligations WHERE order_id = ? AND kind = 'printer_cost'").bind(order.id).first<ObligationRow>();
+    // 1000 PLN at 4 PLN/USD with the default 3% buffer.
+    expect(ob).toMatchObject({ status: "escalated", amount_units: 257_500_000, note: 'treasury config is invalid (POLICY_FX_BUFFER must be a non-negative number, got "lots")' });
   });
 
   it("escalates the printer cost for manual payment when PAYOUT_ADDRESS is not set", async () => {

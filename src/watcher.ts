@@ -4,12 +4,12 @@ import { getOrderById, setOrderStatus } from "./db";
 import { createEscalation } from "./escalations";
 import { formatCents, formatUnits, isAddress } from "./money";
 import { applyClaims, depositPaid, getPaymentRequest, listUnnotified, markNotified, recordTransfer, type NewTransfer, type PaymentRequestRow, type TransferOutcome, type TransferRow } from "./payments";
-import { loadPolicy } from "./policy";
+import { DEFAULT_POLICY, loadPolicy } from "./policy";
 import { warsawTime } from "./quote-text";
 import { getQuote } from "./quotes";
 import { createTelegram, notifyOwner, type TelegramClient } from "./telegram";
 import { TREASURY_NAME } from "./agent/treasury-agent";
-import { createObligation, loadTreasuryPolicy, printerCostUnits } from "./treasury";
+import { createObligation, loadTreasuryPolicy, printerCostUnits, type TreasuryPolicy } from "./treasury";
 
 export const CHUNK_BLOCKS = 5000;
 export const MAX_CHUNKS_PER_RUN = 20;
@@ -76,10 +76,17 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
   }
   const surplus = paid > r.amount_units ? Math.min(t.amount_units, paid - r.amount_units) : 0;
   if (surplus > 0) text += ` Overpaid by ${formatUnits(surplus)} ${r.token}; the owner will refund it.`;
-  // Bad treasury config must throw before any side effect, so a retry never repeats the agent event or owner pings.
+  // Bad config never throws here: it would hold back the host's payment notice. The printer cost goes to the owner instead.
   const quote = completedDeposit ? await getQuote(env.DB, r.quote_id) : null;
-  const treasury = quote ? loadTreasuryPolicy(env as unknown as Record<string, unknown>) : null;
-  const fxBuffer = quote ? loadPolicy(env as unknown as Record<string, unknown>).fxBuffer : 0;
+  let treasury: TreasuryPolicy | null = null;
+  let fxBuffer = DEFAULT_POLICY.fxBuffer;
+  const configErrors: string[] = [];
+  if (quote) {
+    const vars = env as unknown as Record<string, unknown>;
+    const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+    try { treasury = loadTreasuryPolicy(vars); } catch (err) { configErrors.push(message(err)); }
+    try { fxBuffer = loadPolicy(vars).fxBuffer; } catch (err) { configErrors.push(message(err)); }
+  }
   const agent = await getAgentByName(env.OrderAgent, order.instance);
   await agent.pushEvent(text, `Payment received: ${got}.`);
   // Owner escalations come last, so a failing agent call cannot repeat owner pings on every retry.
@@ -109,12 +116,13 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     const cost = quote ? `cost ${formatCents(quote.cost_pln_grosze)} PLN gross (quote #${quote.id})` : `quote #${r.quote_id} is missing; check the cost by hand`;
     let costOb: { id: number; amount_units: number; status: string } | null = null;
     let why = "";
-    if (quote && treasury) {
-      if (!treasury.payoutAddress) why = "PAYOUT_ADDRESS is not set";
+    if (quote) {
+      if (configErrors.length) why = `treasury config is invalid (${configErrors.join("; ").slice(0, 300)})`;
+      else if (!treasury?.payoutAddress) why = "PAYOUT_ADDRESS is not set";
       else if (r.token !== "USDC") why = "only USDC payouts are configured";
       costOb = await createObligation(env.DB, {
         orderId: order.id, kind: "printer_cost", token: r.token, amountUnits: printerCostUnits(quote, fxBuffer),
-        destination: treasury.payoutAddress ?? "", chain: treasury.payoutChain, dueAt: new Date(),
+        destination: treasury?.payoutAddress ?? "", chain: treasury?.payoutChain ?? "ARC", dueAt: new Date(),
         sourceRef: `printer_cost:quote:${quote.id}`, status: why || late ? "escalated" : "open", ...(why ? { note: why } : {}),
       });
     }
