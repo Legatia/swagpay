@@ -51,8 +51,10 @@ export function loadPolicy(vars: Record<string, unknown>): Policy {
 }
 
 export function checkItem(item: { kind: string; method?: string }, p: Policy): Verdict {
+  if (!Object.hasOwn(p.allowedItems, item.kind)) {
+    return { kind: "escalate", reason: `"${item.kind}" is not on the item list; the owner must approve it` };
+  }
   const methods = p.allowedItems[item.kind];
-  if (!methods) return { kind: "escalate", reason: `"${item.kind}" is not on the item list; the owner must approve it` };
   if (item.method !== undefined && !methods.includes(item.method as PrintMethod)) {
     return { kind: "block", reason: `${item.kind} is printed with ${methods.join(", ")}, not "${item.method}"` };
   }
@@ -105,6 +107,9 @@ export function checkQuote(q: QuoteInput, p: Policy): { verdict: Verdict; markup
 
 export function checkLeadTime(now: Date, deadline: Date, method: PrintMethod, p: Policy): Verdict {
   if (deadline.getTime() <= now.getTime()) return { kind: "block", reason: "the deadline has passed" };
+  if (!Object.hasOwn(p.minLeadBusinessDays, method)) {
+    return { kind: "block", reason: `unknown print method "${method}"` };
+  }
   const days = businessDaysBetween(now, deadline);
   const min = p.minLeadBusinessDays[method];
   if (days < min) {

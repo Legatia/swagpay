@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_POLICY, checkItem, checkLeadTime, checkPrinterChoice, checkQuote, depositFor, loadPolicy,
-  printerPaymentVerdict, quoteStillValid, refundVerdict,
+  printerPaymentVerdict, quoteStillValid, refundVerdict, PrintMethod,
 } from "../src/policy";
 
 const p = DEFAULT_POLICY;
@@ -77,5 +77,17 @@ describe("policy", () => {
     expect(loadPolicy({}).markupMin).toBe(0.4);
     expect(() => loadPolicy({ POLICY_FX_BUFFER: "abc" })).toThrow();
     expect(() => loadPolicy({ POLICY_MARKUP_MIN: "0.6" })).toThrow();
+  });
+
+  it("rejects Object.prototype names in checkItem without throwing", () => {
+    expect(checkItem({ kind: "constructor" }, p).kind).toBe("escalate");
+    expect(checkItem({ kind: "toString", method: "screen" }, p).kind).toBe("escalate");
+  });
+
+  it("rejects unknown print methods in checkLeadTime", () => {
+    const monday = new Date("2026-10-05T08:00:00Z");
+    const thursday = new Date("2026-10-08T15:00:00Z");
+    expect(checkLeadTime(monday, thursday, "constructor" as PrintMethod, p)).toEqual({ kind: "block", reason: `unknown print method "constructor"` });
+    expect(checkLeadTime(monday, thursday, "banner" as PrintMethod, p)).toEqual({ kind: "block", reason: `unknown print method "banner"` });
   });
 });
