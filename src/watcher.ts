@@ -12,8 +12,8 @@ export const CHUNK_BLOCKS = 5000;
 export const MAX_CHUNKS_PER_RUN = 20;
 /** Stay this many blocks behind the head (about 19 seconds on Arc) so a lagging node cannot skip a log we then mark processed. */
 export const HEAD_LAG_BLOCKS = 30;
-/** Unmatched transfers below 0.01 of a token are logged, not escalated. */
-export const MIN_ESCALATION_UNITS = 10_000;
+/** Unmatched transfers below 1 USDC/EURC are logged, not escalated. */
+export const MIN_ESCALATION_UNITS = 1_000_000;
 
 async function getState(db: D1Database, key: string): Promise<string | null> {
   return (await db.prepare("SELECT value FROM watcher_state WHERE key = ?").bind(key).first<{ value: string }>())?.value ?? null;
@@ -103,7 +103,7 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
 
 async function onUnmatched(env: Env, telegram: TelegramClient, t: TransferRow): Promise<void> {
   if (t.amount_units < MIN_ESCALATION_UNITS) {
-    console.log("dust transfer ignored", t.tx_hash, t.log_index, t.amount_units);
+    console.log("small unmatched transfer logged only", t.tx_hash, t.log_index, t.token, t.amount_units);
     return;
   }
   const e = await createEscalation(env.DB, {

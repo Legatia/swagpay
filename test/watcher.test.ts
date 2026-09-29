@@ -8,7 +8,7 @@ import { listEscalations } from "../src/escalations";
 import { addClaim, createPaymentRequest, listUnnotified } from "../src/payments";
 import { warsawTime } from "../src/quote-text";
 import type { TelegramClient } from "../src/telegram";
-import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, runWatcher } from "../src/watcher";
+import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, MIN_ESCALATION_UNITS, runWatcher } from "../src/watcher";
 import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
 
 const TO = "0x1111111111111111111111111111111111111111";
@@ -37,14 +37,15 @@ async function setLastBlock(n: number) {
   await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('last_block', ?)").bind(String(n)).run();
 }
 
-async function pendingDeposit(tag: number, opts: { init?: boolean; pending?: boolean; dueBy?: Date } = {}) {
+async function pendingDeposit(tag: number, opts: { init?: boolean; pending?: boolean; dueBy?: Date; currency?: "USD" | "EUR" } = {}) {
   const { order } = await newOrderRow();
   const stub = await getAgentByName(env.OrderAgent, order.instance);
   if (opts.init !== false) await stub.init(order.id, intakeFor());
-  const quoteId = await insertQuote(env.DB, order.id);
+  const quoteId = await insertQuote(env.DB, order.id, { currency: opts.currency ?? "USD" });
   if (opts.pending !== false) await setOrderStatus(env.DB, order.id, ["draft"], "deposit_pending");
   const dueBy = opts.dueBy ?? new Date(Date.now() + 48 * 3_600_000);
-  const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents: 25750, dueBy }, new Date(), () => tag);
+  const token = opts.currency === "EUR" ? "EURC" : "USDC";
+  const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token, cents: 25750, dueBy }, new Date(), () => tag);
   return { order, stub, req };
 }
 
@@ -242,13 +243,37 @@ describe("runWatcher", () => {
     expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_paid");
   });
 
-  it("does not escalate dust", async () => {
+  it("only logs unmatched transfers under one token", async () => {
+    expect(MIN_ESCALATION_UNITS).toBe(1_000_000);
     await setLastBlock(800);
-    await runWatcher(env, { rpc: fakeRpc(840, [usdcLog(805, 5_000, 7)]).rpc, telegram: silent });
-    const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.summary.includes("0.005000 USDC"));
-    expect(e).toBeUndefined();
-    const row = await env.DB.prepare("SELECT notified_at FROM transfers WHERE tx_hash = ?").bind(usdcLog(805, 5_000, 7).transactionHash).first<{ notified_at: string | null }>();
+    const dust = usdcLog(805, 5_000, 7);
+    const small = usdcLog(806, 999_999, 20);
+    const one = usdcLog(807, 1_000_000, 21);
+    await runWatcher(env, { rpc: fakeRpc(840, [dust, small, one]).rpc, telegram: silent });
+    const summaries = (await listEscalations(env.DB)).map((x) => x.summary);
+    expect(summaries.some((x) => x.includes(dust.transactionHash))).toBe(false);
+    expect(summaries.some((x) => x.includes(small.transactionHash))).toBe(false);
+    expect(summaries.some((x) => x.includes(`Unmatched transfer: 1.000000 USDC`) && x.includes(one.transactionHash))).toBe(true);
+    const row = await env.DB.prepare("SELECT notified_at FROM transfers WHERE tx_hash = ?").bind(small.transactionHash).first<{ notified_at: string | null }>();
     expect(row?.notified_at).not.toBeNull();
+  });
+
+  it("credits an EURC deposit paid from the EURC contract", async () => {
+    const { order, stub, req } = await pendingDeposit(4747, { currency: "EUR" });
+    expect(req.token).toBe("EURC");
+    await setLastBlock(1500);
+    const eurc: RawLog = {
+      address: env.EURC_ADDRESS, topics: [TRANSFER_TOPIC, addressTopic("0x2222222222222222222222222222222222222222"), addressTopic(TO)],
+      data: "0x" + BigInt(req.amount_units).toString(16).padStart(64, "0"),
+      blockNumber: "0x" + (1505).toString(16), transactionHash: "0x" + (22).toString(16).padStart(64, "0"), logIndex: "0x1",
+    };
+    const r = await runWatcher(env, { rpc: fakeRpc(1540, [eurc]).rpc, telegram: silent });
+    expect(r?.outcomes.map((o) => o.kind)).toEqual(["matched"]);
+    expect((await env.DB.prepare("SELECT status, paid_units FROM payment_requests WHERE id = ?").bind(req.id).first())).toEqual({ status: "paid", paid_units: req.amount_units });
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_paid");
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text).join("\n")).toContain(`Payment received on Arc: 257.504747 EURC for deposit request #${req.id}`);
+    });
   });
 
   it("does nothing without a receiving address, and keeps its place when the RPC fails", async () => {
