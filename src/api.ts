@@ -4,10 +4,15 @@ import { newFileId } from "./ids";
 import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
 import type { ArtworkMeta } from "./agent/order-agent";
 import { sniffMediaType } from "./sniff";
+import { verifyTurnstile } from "./turnstile";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
 export const UPLOAD_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml", "application/pdf"];
+
+export interface ApiDeps {
+  verifyHuman?: (token: unknown, ip: string | null) => Promise<boolean>;
+}
 
 const json = (status: number, body: unknown, headers?: HeadersInit) => Response.json(body, { status, headers });
 const NO_STORE = { "cache-control": "no-store" };
@@ -43,13 +48,23 @@ function publicOrder(o: OrderRow) {
   };
 }
 
-export async function handleApi(request: Request, env: Env): Promise<Response> {
+export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+
+  if (path === "/api/config" && request.method === "GET") {
+    return json(200, { turnstileSiteKey: env.TURNSTILE_SITE_KEY || null });
+  }
 
   if (path === "/api/orders" && request.method === "POST") {
     const body = await readJson(request);
     if (body === undefined) return fail(400, "body must be JSON");
+    if (env.REQUIRE_TURNSTILE === "1") {
+      const verifyHuman = deps.verifyHuman ?? ((token, ip) => verifyTurnstile(token, ip, env.TURNSTILE_SECRET ?? ""));
+      if (!(await verifyHuman((body as { turnstile?: unknown }).turnstile, request.headers.get("cf-connecting-ip")))) {
+        return fail(403, "Please complete the human check and try again.");
+      }
+    }
     const parsed = IntakeSchema.safeParse(body);
     if (!parsed.success) return fail(400, issueText(parsed.error));
     const now = new Date();

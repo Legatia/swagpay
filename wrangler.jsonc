@@ -11,5 +11,11 @@
     { "binding": "DB", "database_name": "swagpay", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [{ "binding": "ARTWORK", "bucket_name": "swagpay-artwork" }],
-  "vars": { "MODEL": "claude-sonnet-5-5", "AGENT_AUTORUN": "1", "MAX_NEW_ORDERS_PER_DAY": "20" }
+  "vars": {
+    "MODEL": "claude-sonnet-5-5",
+    "AGENT_AUTORUN": "1",
+    "MAX_NEW_ORDERS_PER_DAY": "20",
+    "REQUIRE_TURNSTILE": "1",
+    "TURNSTILE_SITE_KEY": "1x00000000000000000000AA"
+  }
 }

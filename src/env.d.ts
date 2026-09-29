@@ -1,6 +1,7 @@
 declare namespace Cloudflare {
   interface Env {
     ANTHROPIC_API_KEY: string;
+    TURNSTILE_SECRET?: string;
   }
 }
 

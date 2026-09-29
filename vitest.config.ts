@@ -13,6 +13,7 @@ export default defineConfig(async () => {
             AGENT_AUTORUN: "0",
             ANTHROPIC_API_KEY: "test-key",
             MAX_NEW_ORDERS_PER_DAY: "50",
+            REQUIRE_TURNSTILE: "0",
           },
         },
       }),
