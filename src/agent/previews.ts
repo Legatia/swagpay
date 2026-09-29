@@ -1,6 +1,6 @@
 import type { BetaMessageParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 
-const FILE_ID = /\(fileId ([0-9a-f-]{36})\)/;
+const FILE_ID = /^File ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \(name from the host: /;
 
 type Loose = { type?: string; text?: string; content?: unknown; source?: { type?: string; data?: string } };
 

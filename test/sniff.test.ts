@@ -11,7 +11,10 @@ describe("sniffMediaType", () => {
     expect(sniffMediaType(enc("RIFF\u0000\u0000\u0000\u0000WEBPVP8 "))).toBe("image/webp");
     expect(sniffMediaType(enc("%PDF-1.7\n"))).toBe("application/pdf");
     expect(sniffMediaType(enc('<?xml version="1.0"?>\n<!-- logo -->\n<svg xmlns="http://www.w3.org/2000/svg"></svg>'))).toBe("image/svg+xml");
-    expect(sniffMediaType(enc("﻿  <svg viewBox=\"0 0 1 1\"></svg>"))).toBe("image/svg+xml");
+    expect(sniffMediaType(enc('<?xml version="1.0"?><?xml-stylesheet href="a.css"?><svg></svg>'))).toBe("image/svg+xml");
+    expect(sniffMediaType(enc('<!DOCTYPE svg [ <!ENTITY a "b"> ]>\n<svg></svg>'))).toBe("image/svg+xml");
+    expect(sniffMediaType(enc(`<!-- ${"x".repeat(2000)} -->\n<svg></svg>`))).toBe("image/svg+xml");
+    expect(sniffMediaType(enc("\uFEFF  <svg viewBox=\"0 0 1 1\"></svg>"))).toBe("image/svg+xml");
   });
 
   it("returns null for anything else", () => {

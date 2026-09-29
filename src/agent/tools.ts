@@ -113,6 +113,8 @@ function logged<S extends z.ZodType>(
 }
 
 export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
+  // makeHandlers runs once per turn, so this is the turn scope: previews embedded but not yet saved.
+  const embeddedThisTurn = new Map<string, number>();
   return {
     ask_host: logged(ctx, "ask_host", AskHostInput, async ({ message }) => {
       await ctx.postToHost(message);
@@ -146,7 +148,7 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
       if (!file) {
         return { verdict: "none", outcome: "error", detail: "unknown fileId", result: { content: `No uploaded file has fileId "${fileId}".`, isError: true } };
       }
-      const head = `File (from the host): ${JSON.stringify(sanitize(file.name))} (fileId ${fileId}), ${file.mediaType}, ${file.bytes.length} bytes.`;
+      const head = `File ${fileId} (name from the host: ${JSON.stringify(sanitize(file.name))}), ${file.mediaType}, ${file.bytes.length} bytes.`;
       const done = (content: ToolOutcome["content"]): Logged => ({ verdict: "none", outcome: "done", result: { content } });
       const actual = sniffMediaType(file.bytes);
       if (actual !== file.mediaType) {
@@ -169,12 +171,15 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
           return done(`${head} This PDF has ${pages} pages. Ask the host for just the artwork, as a one-page PDF or a PNG.`);
         }
       }
-      if (await ctx.wasPreviewed(fileId)) {
+      if (embeddedThisTurn.has(fileId) || (await ctx.wasPreviewed(fileId))) {
         return done(`${head} Its preview is already earlier in this conversation; use that review. If you can't find it there, ask the host to upload the file again.`);
       }
-      if ((await ctx.previewedBytes()) + file.bytes.length > MAX_PREVIEW_BYTES_PER_ORDER) {
+      let used = await ctx.previewedBytes();
+      for (const [id, bytes] of embeddedThisTurn) if (!(await ctx.wasPreviewed(id))) used += bytes;
+      if (used + file.bytes.length > MAX_PREVIEW_BYTES_PER_ORDER) {
         return done(`${head} This order's preview allowance is used up. Ask the host for a smaller PNG (under 3.5 MB) or PDF (under 5 MB) if you still need to see it.`);
       }
+      embeddedThisTurn.set(fileId, file.bytes.length);
       const text = { type: "text" as const, text: `${head} Review it, then record the result with update_order.` };
       return done(isImage
         ? [text, { type: "image", source: { type: "base64", media_type: file.mediaType as (typeof PREVIEW_IMAGE_TYPES)[number], data: toBase64(file.bytes) } }]

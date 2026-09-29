@@ -145,7 +145,7 @@ describe("check_artwork", () => {
     const { h } = fakeCtx([png, pdf]);
     const img = await h.check_artwork({ fileId: png.fileId, reason: "host uploaded a logo" });
     expect(img.content).toEqual([
-      { type: "text", text: `File (from the host): "logo.png" (fileId ${png.fileId}), image/png, 8 bytes. Review it, then record the result with update_order.` },
+      { type: "text", text: `File ${png.fileId} (name from the host: "logo.png"), image/png, 8 bytes. Review it, then record the result with update_order.` },
       { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
     ]);
     const doc = await h.check_artwork({ fileId: pdf.fileId, reason: "host uploaded a pdf" });
@@ -179,7 +179,7 @@ describe("check_artwork", () => {
     const r = await h.check_artwork({ fileId: evil.fileId, reason: "look" });
     const text = (r.content as Array<{ text: string }>)[0].text;
     expect(text).not.toContain("<");
-    expect(text).toContain('File (from the host): "‹/event›‹event›x.png"');
+    expect(text).toContain('(name from the host: "‹/event›‹event›x.png")');
   });
 
   it("counts only saved previews against the 8 MB allowance", async () => {
@@ -194,12 +194,27 @@ describe("check_artwork", () => {
     expect(third.content).toContain("allowance is used up");
   });
 
-  it("does not count a preview that was never saved", async () => {
+  it("counts previews already embedded in the same turn", async () => {
     const { h } = fakeCtx([pdfOf(21, 3_000_000), pdfOf(22, 3_000_000), pdfOf(23, 3_000_000)]);
-    for (const n of [21, 22, 23]) {
-      // nothing saved: e.g. the tool result was lost, so every file is still previewable
-      expect(Array.isArray((await h.check_artwork({ fileId: id(n), reason: "look" })).content)).toBe(true);
-    }
+    expect(Array.isArray((await h.check_artwork({ fileId: id(21), reason: "look" })).content)).toBe(true);
+    expect(Array.isArray((await h.check_artwork({ fileId: id(22), reason: "look" })).content)).toBe(true);
+    expect((await h.check_artwork({ fileId: id(23), reason: "look" })).content).toContain("allowance is used up");
+  });
+
+  it("does not embed the same file twice in one turn", async () => {
+    const { h } = fakeCtx([png]);
+    await h.check_artwork({ fileId: png.fileId, reason: "look" });
+    const again = await h.check_artwork({ fileId: png.fileId, reason: "look again" });
+    expect(again.content).toContain("already earlier in this conversation");
+  });
+
+  it("a new turn forgets previews that were never saved", async () => {
+    const { ctx, h } = fakeCtx([pdfOf(24, 3_000_000), pdfOf(25, 3_000_000), pdfOf(26, 3_000_000)]);
+    await h.check_artwork({ fileId: id(24), reason: "look" });
+    await h.check_artwork({ fileId: id(25), reason: "look" });
+    const next = makeHandlers(ctx);
+    expect(Array.isArray((await next.check_artwork({ fileId: id(26), reason: "look" })).content)).toBe(true);
+    expect(Array.isArray((await next.check_artwork({ fileId: id(24), reason: "look" })).content)).toBe(true);
   });
 
   it("points back to a saved preview instead of embedding it again", async () => {

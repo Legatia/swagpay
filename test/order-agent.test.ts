@@ -256,7 +256,7 @@ describe("OrderAgent", () => {
       agent.modelOverride = model;
       await agent.processTurn();
       expect(agent.sql<{ file_id: string }>`SELECT file_id FROM previews`.map((r) => r.file_id)).toEqual([fileId]);
-      expect(JSON.stringify(model.requests[1].messages.at(-1))).toContain(`fileId ${fileId}`);
+      expect(JSON.stringify(model.requests[1].messages.at(-1))).toContain(`File ${fileId} (name from the host:`);
     });
   });
 });
