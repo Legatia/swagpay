@@ -1,11 +1,15 @@
 import { renderControls, updateCutPath } from "./controls.js";
+import { currentEstimate, initPricing, renderDetails, resetDetails } from "./details.js";
 import { clampToArea } from "./geometry.js";
 import { attachGestures } from "./gestures.js";
 import { newImageLayer, newTextLayer, nextAssetKey } from "./layers.js";
 import { mockupFor } from "./mockups.js";
 import { renderPanel } from "./panel.js";
+import { formatEstimate } from "./pricing.js";
 import { OWNER_NOTE, PRODUCTS, defaultOptions, viewAreas } from "./products.js";
 import { layerQuality, qualityMessage } from "./quality.js";
+import { renderReview } from "./review.js";
+import { buildSpec } from "./spec.js";
 import { measureText, renderStage } from "./stage.js";
 import { createStore, loadDraft } from "./store.js";
 import { readAsset } from "./upload.js";
@@ -116,6 +120,7 @@ function renderProducts() {
 }
 
 export function pickProduct(key) {
+  resetDetails();
   const s = store.get();
   const options = s.product === key ? s.options : defaultOptions(key);
   const areas = viewAreas(key, options, s.sticker);
@@ -250,6 +255,17 @@ function init() {
     renderPanel($("panel"), s, { store, area, announce });
     renderControls($("product-controls"), s, { store });
   });
+  renderers.push((s) => {
+    if (s.step === "details") renderDetails($("details"), s, { store });
+    if (s.step === "review") renderReview({ ...s, estimate: currentEstimate(s) });
+    $("estimate-bar").textContent = s.product && s.step !== "product" ? formatEstimate(currentEstimate(s)) : "";
+  });
+  beforeNext.details = () => {
+    const s = store.get();
+    const { error } = buildSpec({ ...s, estimate: currentEstimate(s) });
+    return error ?? null;
+  };
+  initPricing().then(() => store.set({}, { record: false, persist: false }));
   store.subscribe((s) => {
     if (s.product === "sticker" && s.step === "design") updateCutPath(store);
   });
