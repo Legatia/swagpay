@@ -1,5 +1,12 @@
 /** Circle CLI arguments for one payout from the agent wallet. */
 export function buildCommand(p, cfg) {
+  // Worker-supplied values go into argv: check each one here, none may start with "-".
+  if (p.method !== "transfer" && p.method !== "bridge") throw new Error(`unknown payout method ${p.method}`);
+  if (typeof p.destination !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(p.destination)) throw new Error("bad destination");
+  if (typeof p.chain !== "string" || !/^[A-Z0-9-]{2,24}$/.test(p.chain)) throw new Error("bad chain");
+  if (p.method === "transfer" && p.chain !== cfg.chain) throw new Error(`bad chain: a transfer must be on ${cfg.chain}`);
+  if (typeof p.amount !== "string" || !/^\d{1,12}\.\d{1,6}$/.test(p.amount) || !(Number(p.amount) > 0)) throw new Error("bad amount");
+  if (typeof p.idempotencyKey !== "string" || !/^[0-9a-fA-F-]{8,64}$/.test(p.idempotencyKey)) throw new Error("bad idempotencyKey");
   const common = ["--amount", p.amount, "--address", cfg.wallet, "--chain", cfg.chain, "--idempotency-key", p.idempotencyKey, "--output", "json"];
   if (p.method === "transfer") return ["wallet", "transfer", p.destination, "--token", cfg.usdc, ...common];
   if (p.method === "bridge") return ["bridge", "transfer", p.chain, p.destination, ...common];

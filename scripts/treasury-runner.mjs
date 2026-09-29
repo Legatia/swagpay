@@ -31,7 +31,15 @@ async function tick() {
   if (!res.ok) throw new Error(`payouts: HTTP ${res.status}`);
   const { payouts } = await res.json();
   for (const p of payouts) {
-    const args = buildCommand(p, cfg);
+    let args;
+    try {
+      args = buildCommand(p, cfg);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`payout #${p.id}: rejected (${message})`);
+      if (!cfg.dryRun) await api(`/api/treasury/payouts/${p.id}/result`, { method: "POST", body: JSON.stringify({ status: "failed", error: `runner rejected the payout: ${message}` }) });
+      continue;
+    }
     if (cfg.dryRun) {
       console.log(`[dry run] payout #${p.id}: ${cfg.circle} ${args.join(" ")}`);
       continue;
