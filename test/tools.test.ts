@@ -4,6 +4,7 @@ import { EMPTY_SPEC, type OrderSpec } from "../src/order-spec";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile, type ToolContext } from "../src/agent/tools";
 import { previewsIn } from "../src/agent/previews";
 import type { NewDecision } from "../src/db";
+import { toBase64 } from "../src/ids";
 
 function fakeCtx(files: ArtworkFile[] = []) {
   const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[] };
@@ -189,20 +190,24 @@ describe("update_order", () => {
 
 describe("check_artwork", () => {
   const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const u32be = (n: number) => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+  /** The first 24 bytes of a PNG: signature, then the IHDR chunk's length, type, width and height. */
+  const pngHeader = (w: number, h: number) => new Uint8Array([...PNG_SIG, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, ...u32be(w), ...u32be(h)]);
+  const ONE_PAGE_PDF = [...new TextEncoder().encode("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n")];
   const withHeader = (sig: number[], size: number) => { const b = new Uint8Array(size); b.set(sig); return b; };
   const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-  const png: ArtworkFile = { fileId: id(1), name: "logo.png", mediaType: "image/png", bytes: new Uint8Array(PNG_SIG) };
+  const png: ArtworkFile = { fileId: id(1), name: "logo.png", mediaType: "image/png", bytes: pngHeader(1200, 800) };
   const svg: ArtworkFile = { fileId: id(2), name: "logo.svg", mediaType: "image/svg+xml", bytes: new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>') };
   const huge: ArtworkFile = { fileId: id(3), name: "big.png", mediaType: "image/png", bytes: withHeader(PNG_SIG, 3_600_000) };
-  const pdf: ArtworkFile = { fileId: id(4), name: "logo.pdf", mediaType: "application/pdf", bytes: new Uint8Array([37, 80, 68, 70, 45]) };
-  const pdfOf = (n: number, size: number): ArtworkFile => ({ fileId: id(n), name: `${n}.pdf`, mediaType: "application/pdf", bytes: withHeader([37, 80, 68, 70, 45], size) });
+  const pdf: ArtworkFile = { fileId: id(4), name: "logo.pdf", mediaType: "application/pdf", bytes: new Uint8Array(ONE_PAGE_PDF) };
+  const pdfOf = (n: number, size: number): ArtworkFile => ({ fileId: id(n), name: `${n}.pdf`, mediaType: "application/pdf", bytes: withHeader(ONE_PAGE_PDF, size) });
 
   it("returns images and PDFs for the model to look at, naming the fileId", async () => {
     const { h } = fakeCtx([png, pdf]);
     const img = await h.check_artwork({ fileId: png.fileId, reason: "host uploaded a logo" });
     expect(img.content).toEqual([
-      { type: "text", text: `File ${png.fileId} (name from the host: "logo.png"), image/png, 8 bytes. Review it, then record the result with update_order.` },
-      { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+      { type: "text", text: `File ${png.fileId} (name from the host: "logo.png"), image/png, 24 bytes. Review it, then record the result with update_order.` },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: toBase64(png.bytes) } },
     ]);
     const doc = await h.check_artwork({ fileId: pdf.fileId, reason: "host uploaded a pdf" });
     expect((doc.content as Array<{ type: string }>)[1].type).toBe("document");
@@ -227,6 +232,24 @@ describe("check_artwork", () => {
     const { h } = fakeCtx([long]);
     const r = await h.check_artwork({ fileId: long.fileId, reason: "look" });
     expect(r.content).toContain("This PDF has 12 pages");
+  });
+
+  it("does not embed a PDF whose pages it can't count", async () => {
+    const opaque: ArtworkFile = { fileId: id(7), name: "art.pdf", mediaType: "application/pdf", bytes: new TextEncoder().encode("%PDF-1.5\n(compressed)") };
+    const { h } = fakeCtx([opaque]);
+    const r = await h.check_artwork({ fileId: opaque.fileId, reason: "look" });
+    expect(typeof r.content).toBe("string");
+    expect(r.content).toContain("I can't tell how many pages this PDF has, so I won't preview it. Ask the host to export the artwork as a PNG (under 3.5 MB).");
+  });
+
+  it("refuses images over 8000 pixels per side, and images whose size it can't read", async () => {
+    const wide: ArtworkFile = { fileId: id(8), name: "wide.png", mediaType: "image/png", bytes: pngHeader(9000, 100) };
+    const broken: ArtworkFile = { fileId: id(10), name: "broken.png", mediaType: "image/png", bytes: withHeader(PNG_SIG, 24) };
+    const { h } = fakeCtx([wide, broken]);
+    const w = await h.check_artwork({ fileId: wide.fileId, reason: "look" });
+    expect(w.content).toContain("This image is 9000×100 pixels; I can preview up to 8000 pixels per side. Ask the host for a smaller PNG export.");
+    const b = await h.check_artwork({ fileId: broken.fileId, reason: "look" });
+    expect(b.content).toContain("I can't read this image's size; it may be damaged. Ask the host to export it again as a PNG.");
   });
 
   it("quotes and sanitizes the host's file name", async () => {

@@ -307,10 +307,12 @@ describe("OrderAgent", () => {
   it("records a preview only once the tool result holding it is saved", async () => {
     const { order, stub } = await newAgent();
     const fileId = crypto.randomUUID();
-    await env.ARTWORK.put(`artwork/${order.instance}/${fileId}`, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    // A 1200×800 PNG header: signature, IHDR length and type, width, height.
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 4, 176, 0, 0, 3, 32]);
+    await env.ARTWORK.put(`artwork/${order.instance}/${fileId}`, png);
     await runInDurableObject(stub, async (agent: OrderAgent) => {
       await agent.init(order.id, intake);
-      await agent.addArtwork({ fileId, name: "logo.png", mediaType: "image/png", size: 8, key: `artwork/${order.instance}/${fileId}`, at: new Date().toISOString() });
+      await agent.addArtwork({ fileId, name: "logo.png", mediaType: "image/png", size: png.length, key: `artwork/${order.instance}/${fileId}`, at: new Date().toISOString() });
       const model = scriptedModel([
         msg([toolUse("check_artwork", { fileId, reason: "host uploaded a logo" })], "tool_use"),
         msg([], "end_turn"),

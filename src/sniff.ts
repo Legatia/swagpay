@@ -52,3 +52,67 @@ export function countPdfPages(bytes: Uint8Array): number | null {
   }
   return max > 0 ? max : null;
 }
+
+export interface ImageSize {
+  width: number;
+  height: number;
+}
+
+const sized = (width: number, height: number): ImageSize | null => (width > 0 && height > 0 ? { width, height } : null);
+
+function jpegSize(b: Uint8Array): ImageSize | null {
+  let i = 2;
+  while (i + 1 < b.length) {
+    if (b[i] !== 0xff) return null;
+    while (i + 1 < b.length && b[i + 1] === 0xff) i++; // fill bytes
+    if (i + 1 >= b.length) return null;
+    const marker = b[i + 1];
+    if (marker === 0xda || marker === 0xd9) return null;
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (i + 8 >= b.length) return null;
+      return sized((b[i + 7] << 8) | b[i + 8], (b[i + 5] << 8) | b[i + 6]);
+    }
+    if (i + 3 >= b.length) return null;
+    i += 2 + ((b[i + 2] << 8) | b[i + 3]);
+  }
+  return null;
+}
+
+function webpSize(b: Uint8Array): ImageSize | null {
+  if (startsWith(b, [0x56, 0x50, 0x38, 0x20], 12)) {
+    // "VP8 "
+    if (b.length < 30) return null;
+    return sized((b[26] | (b[27] << 8)) & 0x3fff, (b[28] | (b[29] << 8)) & 0x3fff);
+  }
+  if (startsWith(b, [0x56, 0x50, 0x38, 0x4c], 12)) {
+    // "VP8L"
+    if (b.length < 25 || b[20] !== 0x2f) return null;
+    return sized(1 + (((b[22] & 0x3f) << 8) | b[21]), 1 + (((b[24] & 0x0f) << 10) | (b[23] << 2) | ((b[22] & 0xc0) >> 6)));
+  }
+  if (startsWith(b, [0x56, 0x50, 0x38, 0x58], 12)) {
+    // "VP8X"
+    if (b.length < 30) return null;
+    return sized(1 + (b[24] | (b[25] << 8) | (b[26] << 16)), 1 + (b[27] | (b[28] << 8) | (b[29] << 16)));
+  }
+  return null;
+}
+
+/** Pixel size from the image's header alone, or null when it can't be read. */
+export function imageSize(bytes: Uint8Array, mediaType: string): ImageSize | null {
+  const b = bytes;
+  switch (mediaType) {
+    case "image/png": {
+      if (b.length < 24 || !startsWith(b, [0x49, 0x48, 0x44, 0x52], 12)) return null;
+      const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+      return sized(view.getUint32(16), view.getUint32(20));
+    }
+    case "image/gif":
+      return b.length < 10 ? null : sized(b[6] | (b[7] << 8), b[8] | (b[9] << 8));
+    case "image/jpeg":
+      return jpegSize(b);
+    case "image/webp":
+      return webpSize(b);
+    default:
+      return null;
+  }
+}

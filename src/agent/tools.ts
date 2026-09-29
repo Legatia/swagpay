@@ -4,13 +4,15 @@ import type { NewDecision } from "../db";
 import { toBase64 } from "../ids";
 import { OrderSpecSchema, missingInfo, specErrors, type OrderSpec } from "../order-spec";
 import { checkItem, type Policy } from "../policy";
-import { countPdfPages, sniffMediaType } from "../sniff";
+import { countPdfPages, imageSize, sniffMediaType } from "../sniff";
 import { sanitize } from "./inbox";
 import type { ToolHandler, ToolOutcome } from "./loop";
 
 export const MAX_IMAGE_PREVIEW_BYTES = 3_500_000;
 export const MAX_PDF_PREVIEW_BYTES = 5_000_000;
 export const MAX_PDF_PREVIEW_PAGES = 10;
+/** The Claude API refuses images larger than this on either side. */
+export const MAX_IMAGE_SIDE = 8000;
 /** Cumulative raw bytes of artwork embedded in the conversation per order (it is re-sent on every model call). */
 export const MAX_PREVIEW_BYTES_PER_ORDER = 8_000_000;
 const PREVIEW_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
@@ -202,10 +204,22 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
           ? `${head} This image is too large to preview. Ask the host for a PNG under 3.5 MB, or a PDF.`
           : `${head} This PDF is too large to preview. Ask the host for one under 5 MB.`);
       }
+      // One file the API refuses would break every later model call of the order, so embed only what is known to fit.
       if (isPdf) {
         const pages = countPdfPages(file.bytes);
-        if (pages !== null && pages > MAX_PDF_PREVIEW_PAGES) {
+        if (pages === null) {
+          return done(`${head} I can't tell how many pages this PDF has, so I won't preview it. Ask the host to export the artwork as a PNG (under 3.5 MB).`);
+        }
+        if (pages > MAX_PDF_PREVIEW_PAGES) {
           return done(`${head} This PDF has ${pages} pages. Ask the host for just the artwork, as a one-page PDF or a PNG.`);
+        }
+      } else {
+        const size = imageSize(file.bytes, file.mediaType);
+        if (!size) {
+          return done(`${head} I can't read this image's size; it may be damaged. Ask the host to export it again as a PNG.`);
+        }
+        if (size.width > MAX_IMAGE_SIDE || size.height > MAX_IMAGE_SIDE) {
+          return done(`${head} This image is ${size.width}×${size.height} pixels; I can preview up to ${MAX_IMAGE_SIDE} pixels per side. Ask the host for a smaller PNG export.`);
         }
       }
       if (embeddedThisTurn.has(fileId) || (await ctx.wasPreviewed(fileId))) {

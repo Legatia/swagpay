@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countPdfPages, sniffMediaType } from "../src/sniff";
+import { countPdfPages, imageSize, sniffMediaType } from "../src/sniff";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -45,5 +45,43 @@ describe("countPdfPages", () => {
 
   it("returns null when it can't tell", () => {
     expect(countPdfPages(enc("%PDF-1.5\n(compressed)"))).toBeNull();
+  });
+});
+
+describe("imageSize", () => {
+  const u32be = (n: number) => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+  const png = (w: number, h: number) =>
+    new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, ...u32be(w), ...u32be(h)]);
+  const riff = (chunk: string, body: number[]) => new Uint8Array([...enc("RIFF"), 0, 0, 0, 0, ...enc("WEBP"), ...enc(chunk), 0, 0, 0, 0, ...body]);
+
+  it("reads PNG, GIF, JPEG and WebP headers", () => {
+    expect(imageSize(png(1200, 800), "image/png")).toEqual({ width: 1200, height: 800 });
+    expect(imageSize(new Uint8Array([...enc("GIF89a"), 0x2c, 0x01, 0xc8, 0x00, 0, 0, 0]), "image/gif")).toEqual({ width: 300, height: 200 });
+    const jpeg = new Uint8Array([
+      0xff, 0xd8,
+      0xff, 0xe0, 0x00, 0x10, ...enc("JFIF\0"), 1, 1, 0, 0, 1, 0, 1, 0, 0,
+      0xff, 0xc0, 0x00, 0x11, 8, 0x01, 0xe0, 0x02, 0x80, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1,
+    ]);
+    expect(imageSize(jpeg, "image/jpeg")).toEqual({ width: 640, height: 480 });
+    // VP8X: 24-bit little-endian width-1 and height-1.
+    expect(imageSize(riff("VP8X", [0, 0, 0, 0, 0xcf, 0x07, 0x00, 0xe7, 0x03, 0x00]), "image/webp")).toEqual({ width: 2000, height: 1000 });
+    // VP8L: signature 0x2f, then 14-bit width-1 and height-1.
+    expect(imageSize(riff("VP8L", [0x2f, 0xaf, 0xc4, 0xc7, 0x00]), "image/webp")).toEqual({ width: 1200, height: 800 });
+    // VP8: frame tag, start code, then 14-bit width and height.
+    expect(imageSize(riff("VP8 ", [0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01]), "image/webp")).toEqual({ width: 640, height: 480 });
+  });
+
+  it("returns null when it can't read the size", () => {
+    expect(imageSize(png(1200, 800).subarray(0, 20), "image/png")).toBeNull();
+    const noIhdr = png(1200, 800);
+    noIhdr.set(enc("IDAT"), 12);
+    expect(imageSize(noIhdr, "image/png")).toBeNull();
+    const noSof = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0, 0, 0xff, 0xda, 0x00, 0x04, 0, 0, 0xff, 0xd9]);
+    expect(imageSize(noSof, "image/jpeg")).toBeNull();
+    expect(imageSize(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x7f, 0xff]), "image/jpeg")).toBeNull();
+    expect(imageSize(enc("GIF89a"), "image/gif")).toBeNull();
+    expect(imageSize(riff("VP8L", [0x00, 0xaf, 0xc4, 0xc7, 0x00]), "image/webp")).toBeNull();
+    expect(imageSize(png(0, 800), "image/png")).toBeNull();
+    expect(imageSize(png(1200, 800), "image/svg+xml")).toBeNull();
   });
 });
