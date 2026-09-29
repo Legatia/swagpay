@@ -5,6 +5,7 @@ import { handleApi } from "./api";
 import { computeMetrics, listPublicDecisions, renderLog } from "./public-log";
 import { handleScheduled } from "./scheduled";
 import { handleTelegram } from "./telegram-webhook";
+import { handleTreasuryApi } from "./treasury-api";
 
 export { OrderAgent, TreasuryAgent };
 
@@ -18,6 +19,14 @@ export default {
       } catch (err) {
         console.error("telegram webhook error", err);
         return new Response("ok");
+      }
+    }
+    if (url.pathname.startsWith("/api/treasury/")) {
+      try {
+        return await handleTreasuryApi(request, env);
+      } catch (err) {
+        console.error("treasury api error", err);
+        return Response.json({ error: "Something went wrong." }, { status: 500 });
       }
     }
     if (url.pathname.startsWith("/api/")) {

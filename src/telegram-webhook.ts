@@ -25,7 +25,7 @@ export const HELP = [
   "/printed <order> — the printer finished; send the balance request",
 ].join("\n");
 
-function sameSecret(given: string, expected: string): boolean {
+export function sameSecret(given: string, expected: string): boolean {
   const enc = new TextEncoder();
   const a = enc.encode(given);
   const b = enc.encode(expected);

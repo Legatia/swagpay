@@ -23,10 +23,11 @@ export default defineConfig(async () => {
             PAYOUT_CHAIN: "MATIC",
             PAYOUT_ADDRESS: "0x3333333333333333333333333333333333333333",
             RESERVE_ADDRESS: "0x4444444444444444444444444444444444444444",
+            TREASURY_RUNNER_TOKEN: "runner-secret",
           },
         },
       }),
     ],
-    test: { setupFiles: ["./test/apply-migrations.ts"] },
+    test: { include: ["test/**/*.test.{ts,js}"], setupFiles: ["./test/apply-migrations.ts"] },
   };
 });
