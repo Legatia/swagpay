@@ -62,3 +62,18 @@ export function missingInfo(spec: OrderSpec): string[] {
   if (!spec.artwork.some((a) => a.printable)) missing.push("printable artwork");
   return missing;
 }
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj).filter((k) => obj[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Identifies the items as they stand; a printer cost is only valid for the key it was given for. */
+export async function itemsKey(spec: OrderSpec): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalJson(spec.items)));
+  return [...new Uint8Array(digest)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
