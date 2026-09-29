@@ -1,6 +1,6 @@
 import { getAgentByName } from "agents";
 import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, setOrderStatus, type OrderRow } from "./db";
-import { DesignSpecSchema, MAX_DESIGN_BYTES, designProblems } from "./design-spec";
+import { DesignSpecSchema, FILE_ROLES, MAX_DESIGN_BYTES, designProblems, type FileRole } from "./design-spec";
 import { newFileId } from "./ids";
 import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
 import type { ArtworkMeta } from "./agent/order-agent";
@@ -12,10 +12,6 @@ import { addClaim, createPaymentRequest, findPaymentRequest, getPaymentRequest, 
 import { EMPTY_SPEC, itemsKey, type OrderSpec } from "./order-spec";
 import { loadPolicy, quoteStillValid } from "./policy";
 import { acceptQuoteForOrder, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
-
-export const FILE_ROLES = ["artwork", "mockup", "print", "cutline"] as const;
-export type FileRole = (typeof FILE_ROLES)[number];
-
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;

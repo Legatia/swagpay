@@ -56,7 +56,7 @@ describe("OrderAgent", () => {
     await runInDurableObject(stub, async (agent: OrderAgent) => {
       await agent.init(order.id, { ...intake, designPending: true });
       const first = agent.sql<{ text: string }>`SELECT text FROM inbox ORDER BY id LIMIT 1`[0].text;
-      expect(first).toContain("The host is designing in the Swagpay editor; a design event will follow.");
+      expect(first).toContain("The host is designing in the Swagpay editor: the first message was written by the editor, and a design event will follow. Wait for the design before asking about items");
     });
   });
 

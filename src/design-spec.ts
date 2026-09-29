@@ -4,6 +4,9 @@ import { SIZES } from "./order-spec";
 
 export const MAX_DESIGN_BYTES = 65_536;
 
+export const FILE_ROLES = ["artwork", "mockup", "print", "cutline"] as const;
+export type FileRole = (typeof FILE_ROLES)[number];
+
 const Mm = z.number().finite().min(-10_000).max(10_000);
 const Size = z.number().finite().positive().max(10_000);
 const Rotation = z.number().finite().min(-360).max(360);
@@ -31,13 +34,19 @@ export const DesignSpecSchema = z.object({
   product: z.enum(["tshirt", "sticker", "banner", "rollup", "flag"]),
   options: z.record(z.string().min(1).max(40), z.string().max(60)).optional(),
   views: z.array(View).min(1).max(4),
-  sizes: z.partialRecord(z.enum(SIZES), z.number().int().min(0).max(5000)).nullable().optional(),
+  // "2XL" is accepted as XXL; with both present the object is left alone, so the unknown key is refused.
+  sizes: z.preprocess(
+    (v) => (v && typeof v === "object" && !Array.isArray(v) && "2XL" in v && !("XXL" in v)
+      ? Object.fromEntries(Object.entries(v).map(([k, n]) => [k === "2XL" ? "XXL" : k, n]))
+      : v),
+    z.partialRecord(z.enum(SIZES), z.number().int().min(0).max(5000)).nullable().optional(),
+  ),
   quantity: z.number().int().min(1).max(5000),
   sticker: z.object({
     longestSideMm: Size, shape: z.enum(["contour", "circle", "rounded-square"]), borderMm: z.number().finite().min(0).max(20),
   }).nullable(),
   estimate: z.object({ currency: z.enum(["USD", "EUR"]), low: z.number().finite().nonnegative(), high: z.number().finite().nonnegative() }).nullable().optional(),
-  files: z.record(z.string().min(1).max(40), z.object({ role: z.enum(["artwork", "mockup", "print", "cutline"]), fileId: z.uuid() }))
+  files: z.record(z.string().min(1).max(40), z.object({ role: z.enum(FILE_ROLES), fileId: z.uuid() }))
     .refine((f) => Object.keys(f).length <= 10, "at most 10 files"),
 });
 
@@ -67,17 +76,17 @@ export function designSummary(d: DesignSpec): string {
   if (d.sizes) lines.push(`sizes ${Object.entries(d.sizes).filter(([, n]) => n).map(([s, n]) => `${s} ${n}`).join(", ")}`);
   if (d.sticker) lines.push(`sticker: longest side ${d.sticker.longestSideMm} mm, ${d.sticker.shape}, ${d.sticker.borderMm} mm border`);
   for (const v of d.views) {
-    lines.push(`view ${q(v.side)} (print area ${v.printArea.widthMm} × ${v.printArea.heightMm} mm):`);
+    lines.push(`view (from the host) ${q(v.side)} (print area ${v.printArea.widthMm} × ${v.printArea.heightMm} mm):`);
     for (const l of v.layers) {
       if (l.type === "image") {
         const f = d.files[l.file];
-        lines.push(`- image ${q(l.file)} (fileId ${f?.fileId ?? "?"}, ${f?.role ?? "?"}) ${l.widthMm} × ${l.heightMm} mm${l.effectiveDpi !== undefined ? ` at ${l.effectiveDpi} dpi` : ""}`);
+        lines.push(`- image (from the host) ${q(l.file)} (fileId ${f?.fileId ?? "?"}, ${f?.role ?? "?"}) ${l.widthMm} × ${l.heightMm} mm${l.effectiveDpi !== undefined ? ` at ${l.effectiveDpi} dpi` : " (vector)"}`);
       } else {
-        lines.push(`- text (from the host) ${q(l.text)} in font ${q(l.font)} ${l.weight}, ${l.sizeMm} mm, ${l.colour}`);
+        lines.push(`- text (from the host) ${q(l.text)} in font (from the host) ${q(l.font)} ${l.weight}, ${l.sizeMm} mm, ${l.colour}`);
       }
     }
   }
-  const other = Object.entries(d.files).filter(([, f]) => f.role !== "artwork").map(([k, f]) => `${q(k)} ${f.role} (fileId ${f.fileId})`);
+  const other = Object.entries(d.files).filter(([, f]) => f.role !== "artwork").map(([k, f]) => `(from the host) ${q(k)} ${f.role} (fileId ${f.fileId})`);
   if (other.length) lines.push(`other files: ${other.join("; ")}`);
   if (d.estimate) lines.push(`host's estimate ${d.estimate.low}–${d.estimate.high} ${d.estimate.currency} (from the editor, not a quote)`);
   return lines.join("\n");

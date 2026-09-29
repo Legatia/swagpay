@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import { createOrder } from "../src/db";
+import { DesignSpecSchema, type DesignSpec } from "../src/design-spec";
 import { IntakeSchema } from "../src/intake";
 import type { OrderSpec } from "../src/order-spec";
 
@@ -36,3 +37,17 @@ export async function insertQuote(db: D1Database, orderId: number, o: Partial<{ 
     .first<{ id: number }>();
   return row!.id;
 }
+
+export const F1 = "11111111-1111-4111-8111-111111111111";
+export const F2 = "22222222-2222-4222-8222-222222222222";
+
+export const tshirtDesign = (): DesignSpec => DesignSpecSchema.parse({
+  version: 1, product: "tshirt", options: { colour: "black" },
+  views: [{ side: "front", printArea: { widthMm: 280, heightMm: 380 }, layers: [
+    { type: "image", file: "logo-1", xMm: 40, yMm: 30, widthMm: 200, heightMm: 120, rotationDeg: 0, effectiveDpi: 212 },
+    { type: "text", text: "Builders <b>meetup</b>", font: "Big Shoulders Display", weight: 800, colour: "#FFFFFF", sizeMm: 18, xMm: 40, yMm: 170, widthMm: 200, rotationDeg: 0, align: "center" },
+  ] }],
+  sizes: { S: 10, M: 20, L: 20, XL: 10 }, quantity: 60, sticker: null,
+  estimate: { currency: "USD", low: 410, high: 450 },
+  files: { "logo-1": { role: "artwork", fileId: F1 }, "mockup-front": { role: "mockup", fileId: F2 } },
+});

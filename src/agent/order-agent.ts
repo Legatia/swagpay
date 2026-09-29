@@ -3,7 +3,7 @@ import { getOrderById, insertDecision, saveOrderSpec } from "../db";
 import { createEscalation, type EscalationKind } from "../escalations";
 import { ratesFor, refreshRates } from "../fx";
 import type { Intake } from "../intake";
-import { designSummary, type DesignSpec } from "../design-spec";
+import { designSummary, type DesignSpec, type FileRole } from "../design-spec";
 import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
 import { priceBand } from "../quote-text";
@@ -45,7 +45,7 @@ export interface ArtworkMeta {
   mediaType: string;
   size: number;
   key: string;
-  role: "artwork" | "mockup" | "print" | "cutline";
+  role: FileRole;
   at: string;
 }
 
@@ -197,7 +197,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(EMPTY_SPEC)})`;
     this.addInbox({
       kind: "event",
-      text: `New order. Event name (from the host): ${JSON.stringify(intake.eventName)}. Event date (from the host): ${JSON.stringify(intake.eventDate)}. Deliver to (from the host): ${JSON.stringify(intake.deliveryPlace)}. Deliver by (from the host, Warsaw time): ${JSON.stringify(intake.deliverBy)}. Host's first name (from the host): ${JSON.stringify(intake.contactName.split(" ")[0])}.${intake.designPending ? " The host is designing in the Swagpay editor; a design event will follow. Don't ask about items before it arrives, unless the host writes to you first." : ""}`,
+      text: `New order. Event name (from the host): ${JSON.stringify(intake.eventName)}. Event date (from the host): ${JSON.stringify(intake.eventDate)}. Deliver to (from the host): ${JSON.stringify(intake.deliveryPlace)}. Deliver by (from the host, Warsaw time): ${JSON.stringify(intake.deliverBy)}. Host's first name (from the host): ${JSON.stringify(intake.contactName.split(" ")[0])}.${intake.designPending ? " The host is designing in the Swagpay editor: the first message was written by the editor, and a design event will follow. Wait for the design before asking about items, unless the host sends another message." : ""}`,
     });
     this.addInbox({ kind: "host", text: intake.request });
     this.addThread("host", intake.request);

@@ -383,6 +383,19 @@ describe("API", () => {
     expect(r.status).toBe(400);
     expect((await r.json<{ error: string }>()).error).toContain('files["logo-1"]');
     expect((await postDesign(token, "x".repeat(65_537))).status).toBe(413);
+    const order = (await getOrderByToken(env.DB, token))!;
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM design`[0].n).toBe(0);
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).not.toContain("Design from the Swagpay editor");
+    });
+  });
+
+  it("accepts a design while the order is quoted", async () => {
+    const { token, design } = await designOrder();
+    const order = (await getOrderByToken(env.DB, token))!;
+    await env.DB.prepare("UPDATE orders SET status = 'quoted' WHERE id = ?").bind(order.id).run();
+    expect((await postDesign(token, JSON.stringify(design))).status).toBe(201);
   });
 
   it("refuses a design after a quote was accepted", async () => {
@@ -392,7 +405,6 @@ describe("API", () => {
     expect((await postDesign(token, JSON.stringify(design))).status).toBe(409);
     const stub = await getAgentByName(env.OrderAgent, order.instance);
     await runInDurableObject(stub, async (agent: OrderAgent) => {
-      agent.sql`CREATE TABLE IF NOT EXISTS design (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL, at TEXT NOT NULL)`;
       expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM design`[0].n).toBe(0);
       expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).not.toContain("Design from the Swagpay editor");
     });
