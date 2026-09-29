@@ -35,3 +35,35 @@ export function classifyResult(code, stdout, stderr) {
   if (/spending (limit|policy)|polic(y|ies) (denied|violation|violated)|not allowed by (the )?polic|exceeds? (the )?(per[- ]?tx|daily|weekly|monthly) limit/i.test(text)) return { status: "denied", error: text.slice(0, 500) };
   return { status: "failed", error: text.slice(0, 500) || `exit ${code}` };
 }
+
+/**
+ * One poll: send each queued payout from the agent wallet and report its result.
+ * A payout whose result can't be posted stays queued at Swagpay, so the next poll sends it again under the same
+ * idempotency key (README: check on testnet that Circle makes the repeat a no-op).
+ * `api(path, init)` resolves a fetch Response; `run(args)` resolves { code, stdout, stderr }; `log` has info and error.
+ */
+export async function runOnce({ api, run, cfg, log }) {
+  const res = await api("/api/treasury/payouts");
+  if (!res.ok) throw new Error(`payouts: HTTP ${res.status}`);
+  const { payouts } = await res.json();
+  for (const p of payouts) {
+    let args;
+    try {
+      args = buildCommand(p, cfg);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error(`payout #${p.id}: rejected (${message})`);
+      if (!cfg.dryRun) await api(`/api/treasury/payouts/${p.id}/result`, { method: "POST", body: JSON.stringify({ status: "failed", error: `runner rejected the payout: ${message}` }) });
+      continue;
+    }
+    if (cfg.dryRun) {
+      log.info(`[dry run] payout #${p.id}: ${cfg.circle} ${args.join(" ")}`);
+      continue;
+    }
+    log.info(`payout #${p.id}: ${p.amount} ${p.token} to ${p.chain} ${p.destination}`);
+    const { code, stdout, stderr } = await run(args);
+    const r = classifyResult(code, stdout, stderr);
+    const posted = await api(`/api/treasury/payouts/${p.id}/result`, { method: "POST", body: JSON.stringify(r) });
+    log.info(`payout #${p.id}: ${r.status}${r.ref ? ` ${r.ref}` : ""}${r.error ? ` (${r.error})` : ""} -> HTTP ${posted.status}`);
+  }
+}

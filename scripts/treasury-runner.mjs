@@ -2,7 +2,7 @@
 // Runs on the owner's machine, where `circle wallet login` holds the agent wallet session.
 // Polls Swagpay for payouts the treasury agent queued, sends each from the Circle agent wallet, and reports back.
 import { execFile } from "node:child_process";
-import { buildCommand, classifyResult } from "./treasury-runner-lib.mjs";
+import { runOnce } from "./treasury-runner-lib.mjs";
 
 const cfg = {
   base: process.env.SWAGPAY_URL,
@@ -30,35 +30,11 @@ function run(args) {
   });
 }
 
-async function tick() {
-  const res = await api("/api/treasury/payouts");
-  if (!res.ok) throw new Error(`payouts: HTTP ${res.status}`);
-  const { payouts } = await res.json();
-  for (const p of payouts) {
-    let args;
-    try {
-      args = buildCommand(p, cfg);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`payout #${p.id}: rejected (${message})`);
-      if (!cfg.dryRun) await api(`/api/treasury/payouts/${p.id}/result`, { method: "POST", body: JSON.stringify({ status: "failed", error: `runner rejected the payout: ${message}` }) });
-      continue;
-    }
-    if (cfg.dryRun) {
-      console.log(`[dry run] payout #${p.id}: ${cfg.circle} ${args.join(" ")}`);
-      continue;
-    }
-    console.log(`payout #${p.id}: ${p.amount} ${p.token} to ${p.chain} ${p.destination}`);
-    const { code, stdout, stderr } = await run(args);
-    const r = classifyResult(code, stdout, stderr);
-    const posted = await api(`/api/treasury/payouts/${p.id}/result`, { method: "POST", body: JSON.stringify(r) });
-    console.log(`payout #${p.id}: ${r.status}${r.ref ? ` ${r.ref}` : ""}${r.error ? ` (${r.error})` : ""} -> HTTP ${posted.status}`);
-  }
-}
+const log = { info: (m) => console.log(m), error: (m) => console.error(m) };
 
 for (;;) {
   try {
-    await tick();
+    await runOnce({ api, run, cfg, log });
   } catch (err) {
     console.error("runner tick failed:", err instanceof Error ? err.message : err);
   }
