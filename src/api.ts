@@ -1,5 +1,6 @@
 import { getAgentByName } from "agents";
 import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, setOrderStatus, type OrderRow } from "./db";
+import { DesignSpecSchema, MAX_DESIGN_BYTES, designProblems } from "./design-spec";
 import { newFileId } from "./ids";
 import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
 import type { ArtworkMeta } from "./agent/order-agent";
@@ -125,7 +126,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     return json(201, { token, url: `/o/${token}` }, NO_STORE);
   }
 
-  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork|\/quote\/accept|\/payments\/(\d{1,9})\/claim)?$/.exec(path);
+  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork|\/design|\/quote\/accept|\/payments\/(\d{1,9})\/claim)?$/.exec(path);
   if (!m) return fail(404, "not found");
   const order = await getOrderByToken(env.DB, m[1]);
   if (!order) return fail(404, "order not found");
@@ -269,6 +270,25 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     const claims = (await env.DB.prepare("SELECT COUNT(*) AS n FROM payment_claims WHERE request_id = ?").bind(payment.id).first<{ n: number }>())?.n ?? 0;
     if (claims >= 5) return fail(429, "Too many transaction hashes for this payment. The owner will check it.");
     if ((await addClaim(env.DB, payment.id, txHash)) === "taken") return fail(409, "That transaction is already linked to another payment.");
+    return json(201, { ok: true });
+  }
+
+  if (sub === "/design" && request.method === "POST") {
+    const raw = await request.text();
+    if (new TextEncoder().encode(raw).length > MAX_DESIGN_BYTES) return fail(413, "a design can be up to 64 KB");
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      return fail(400, "body must be JSON");
+    }
+    const parsed = DesignSpecSchema.safeParse(body);
+    if (!parsed.success) return fail(400, issueText(parsed.error));
+    if (order.status !== "draft" && order.status !== "quoted") return fail(409, "A quote was already accepted; the design can't change now.");
+    const view = await agent.getView();
+    const problems = designProblems(parsed.data, view.artwork.map((a) => ({ fileId: a.fileId, role: a.role })));
+    if (problems.length) return fail(400, problems.join("; "));
+    await agent.setDesign(parsed.data);
     return json(201, { ok: true });
   }
 

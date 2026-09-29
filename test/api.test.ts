@@ -341,6 +341,57 @@ describe("API", () => {
     expect((await claim(a.token, requestId, `0x${"05".repeat(32)}`)).status).toBe(409);
   });
 
+  async function designOrder() {
+    const token = await newOrder();
+    const up = async (role: string) => {
+      const form = new FormData();
+      form.append("file", new File([pngBytes()], `${role}.png`, { type: "image/png" }));
+      form.append("role", role);
+      return (await (await SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: form })).json<{ fileId: string }>()).fileId;
+    };
+    const logo = await up("artwork");
+    const mockup = await up("mockup");
+    const design = {
+      version: 1, product: "tshirt", options: { colour: "black" },
+      views: [{ side: "front", printArea: { widthMm: 280, heightMm: 380 }, layers: [
+        { type: "image", file: "logo-1", xMm: 40, yMm: 30, widthMm: 200, heightMm: 120, rotationDeg: 0, effectiveDpi: 212 },
+      ] }],
+      sizes: { S: 10, M: 20, L: 20, XL: 10 }, quantity: 60, sticker: null, estimate: null,
+      files: { "logo-1": { role: "artwork", fileId: logo }, "mockup-front": { role: "mockup", fileId: mockup } },
+    };
+    return { token, design };
+  }
+  const postDesign = (token: string, body: string) => SELF.fetch(`${base}/api/o/${token}/design`, { method: "POST", body });
+
+  it("stores a design and wakes the agent", async () => {
+    const { token, design } = await designOrder();
+    expect((await postDesign(token, JSON.stringify(design))).status).toBe(201);
+    const order = (await getOrderByToken(env.DB, token))!;
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).toContain("Design from the Swagpay editor: 60 × tshirt");
+      expect(JSON.parse(agent.sql<{ json: string }>`SELECT json FROM design WHERE id = 1`[0].json).quantity).toBe(60);
+    });
+  });
+
+  it("refuses bad designs before doing any work", async () => {
+    const { token, design } = await designOrder();
+    expect((await postDesign(token, "{")).status).toBe(400);
+    expect((await postDesign(token, JSON.stringify({ ...design, version: 2 }))).status).toBe(400);
+    const foreign = { ...design, files: { ...design.files, "logo-1": { role: "artwork", fileId: "33333333-3333-4333-8333-333333333333" } } };
+    const r = await postDesign(token, JSON.stringify(foreign));
+    expect(r.status).toBe(400);
+    expect((await r.json<{ error: string }>()).error).toContain('files["logo-1"]');
+    expect((await postDesign(token, "x".repeat(65_537))).status).toBe(413);
+  });
+
+  it("refuses a design after a quote was accepted", async () => {
+    const { token, design } = await designOrder();
+    const order = (await getOrderByToken(env.DB, token))!;
+    await env.DB.prepare("UPDATE orders SET status = 'deposit_pending' WHERE id = ?").bind(order.id).run();
+    expect((await postDesign(token, JSON.stringify(design))).status).toBe(409);
+  });
+
   it("caps new orders per day", async () => {
     // MAX_NEW_ORDERS_PER_DAY is 50 in the test config. Fill today's quota directly, then ask for one more.
     const now = new Date().toISOString();

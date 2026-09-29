@@ -3,6 +3,7 @@ import { getOrderById, insertDecision, saveOrderSpec } from "../db";
 import { createEscalation, type EscalationKind } from "../escalations";
 import { ratesFor, refreshRates } from "../fx";
 import type { Intake } from "../intake";
+import { designSummary, type DesignSpec } from "../design-spec";
 import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
 import { priceBand } from "../quote-text";
@@ -77,6 +78,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS escalated (key TEXT PRIMARY KEY, escalation_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open')`;
     this.sql`CREATE TABLE IF NOT EXISTS printer_costs (spec_key TEXT PRIMARY KEY, cost_grosze INTEGER NOT NULL, escalation_id INTEGER NOT NULL, note TEXT, at TEXT NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS design (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL, at TEXT NOT NULL)`;
     this.tablesReady = true;
   }
 
@@ -212,6 +214,16 @@ export class OrderAgent extends Agent<Env, OrderState> {
     const entry = this.addThread("host", text);
     await this.trigger();
     return entry;
+  }
+
+  /** The latest design from the editor; the agent turns it into items with update_order. */
+  async setDesign(design: DesignSpec): Promise<void> {
+    this.ensureTables();
+    this.orderId();
+    this.sql`INSERT OR REPLACE INTO design (id, json, at) VALUES (1, ${JSON.stringify(design)}, ${new Date().toISOString()})`;
+    this.addInbox({ kind: "event", text: designSummary(design) });
+    this.addThread("system", "Design received from the editor.");
+    await this.trigger();
   }
 
   async addArtwork(meta: ArtworkMeta): Promise<void> {
