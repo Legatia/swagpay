@@ -41,6 +41,14 @@ describe("createRpc", () => {
     expect(seen).toEqual(["https://a", "https://b", "https://c"]);
   });
 
+  it("falls back when a result is malformed", async () => {
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const { id } = JSON.parse(String(init?.body));
+      return Response.json({ jsonrpc: "2.0", id, result: String(input) === "https://a" ? null : "0x10" });
+    }) as typeof fetch;
+    expect(await createRpc(["https://a", "https://b"], fetchImpl).blockNumber()).toBe(16);
+  });
+
   it("throws the last error when every URL fails", async () => {
     const fetchImpl = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
     await expect(createRpc(["https://a"], fetchImpl).blockNumber()).rejects.toThrow("HTTP 503");

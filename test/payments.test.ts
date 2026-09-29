@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { setOrderStatus } from "../src/db";
 import {
-  addClaim, applyClaims, createPaymentRequest, depositPaid, listPaymentRequests, matchTransfer, recordTransfer,
+  addClaim, applyClaims, createPaymentRequest, depositPaid, listPaymentRequests, listUnnotified, markNotified, matchTransfer, recordTransfer,
   type NewTransfer,
 } from "../src/payments";
 import { insertQuote, newOrderRow } from "./fixtures";
@@ -98,6 +98,28 @@ describe("recordTransfer", () => {
     expect(mine[0]).toMatchObject({ kind: "matched", request: { id: req.id, paid_units: 250_000_000, status: "open" } });
     expect((await applyClaims(env.DB)).filter((o) => o.kind === "matched" && o.request.id === req.id)).toEqual([]);
     expect(await recordTransfer(env.DB, t)).toEqual({ kind: "duplicate" });
+  });
+});
+
+describe("notification bookkeeping", () => {
+  it("records how a transfer was credited and lists it until notified", async () => {
+    const { req } = await depositRequest(25750, [909]);
+    const t = transfer({ amountUnits: req.amount_units });
+    const r = await recordTransfer(env.DB, t);
+    expect(r.kind === "matched" && r.transfer.via).toBe("amount");
+    expect((await listUnnotified(env.DB)).some((x) => x.tx_hash === t.txHash.toLowerCase())).toBe(true);
+    await markNotified(env.DB, { tx_hash: t.txHash.toLowerCase(), log_index: 0 });
+    expect((await listUnnotified(env.DB)).some((x) => x.tx_hash === t.txHash.toLowerCase())).toBe(false);
+  });
+
+  it("marks a claim-credited transfer as via claim", async () => {
+    const { req } = await depositRequest(25750, [910]);
+    const t = transfer({ amountUnits: 250_000_000 });
+    await recordTransfer(env.DB, t);
+    await addClaim(env.DB, req.id, t.txHash);
+    const applied = await applyClaims(env.DB);
+    const mine = applied.find((o) => o.kind === "matched" && o.transfer.tx_hash === t.txHash.toLowerCase());
+    expect(mine?.kind === "matched" && mine.transfer.via).toBe("claim");
   });
 });
 

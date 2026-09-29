@@ -30,7 +30,7 @@ const hex = (n: number) => `0x${n.toString(16)}`;
 /** JSON-RPC over fetch; each call tries the URLs in order and throws the last error. */
 export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcClient {
   let id = 0;
-  const call = async (method: string, params: unknown[]): Promise<unknown> => {
+  const call = async (method: string, params: unknown[], check: (result: unknown) => boolean): Promise<unknown> => {
     let last: Error = new Error("no RPC URL configured");
     for (const url of urls) {
       try {
@@ -38,10 +38,12 @@ export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcC
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }),
+          signal: AbortSignal.timeout(15_000),
         });
         if (!res.ok) throw new Error(`${method}: HTTP ${res.status}`);
         const body = (await res.json()) as { result?: unknown; error?: { code?: number; message?: string } };
         if (body.error) throw new Error(`${method}: ${body.error.code} ${body.error.message}`);
+        if (!check(body.result)) throw new Error(`${method}: unexpected result`);
         return body.result;
       } catch (err) {
         last = err instanceof Error ? err : new Error(String(err));
@@ -51,11 +53,10 @@ export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcC
   };
   return {
     async blockNumber() {
-      return Number(BigInt(String(await call("eth_blockNumber", []))));
+      return Number(BigInt(String(await call("eth_blockNumber", [], (r) => typeof r === "string" && /^0x[0-9a-fA-F]+$/.test(r)))));
     },
     async getLogs(f) {
-      const result = await call("eth_getLogs", [{ fromBlock: hex(f.fromBlock), toBlock: hex(f.toBlock), address: f.address, topics: f.topics }]);
-      if (!Array.isArray(result)) throw new Error("eth_getLogs: result is not an array");
+      const result = await call("eth_getLogs", [{ fromBlock: hex(f.fromBlock), toBlock: hex(f.toBlock), address: f.address, topics: f.topics }], Array.isArray);
       return result as RawLog[];
     },
   };

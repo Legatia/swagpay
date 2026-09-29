@@ -52,6 +52,8 @@ CREATE TABLE transfers (
   from_address TEXT NOT NULL,
   amount_units INTEGER NOT NULL,
   request_id INTEGER REFERENCES payment_requests(id),
+  via TEXT,
+  notified_at TEXT,
   created_at TEXT NOT NULL,
   PRIMARY KEY (tx_hash, log_index)
 );

@@ -5,9 +5,9 @@ import type { OrderAgent } from "../src/agent/order-agent";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, type RawLog, type RpcClient } from "../src/arc";
 import { getOrderById, setOrderStatus } from "../src/db";
 import { listEscalations } from "../src/escalations";
-import { addClaim, createPaymentRequest } from "../src/payments";
+import { addClaim, createPaymentRequest, listUnnotified } from "../src/payments";
 import type { TelegramClient } from "../src/telegram";
-import { CHUNK_BLOCKS, runWatcher } from "../src/watcher";
+import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, runWatcher } from "../src/watcher";
 import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
 
 const TO = "0x1111111111111111111111111111111111111111";
@@ -35,12 +35,12 @@ async function setLastBlock(n: number) {
   await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('last_block', ?)").bind(String(n)).run();
 }
 
-async function pendingDeposit(tag: number) {
+async function pendingDeposit(tag: number, opts: { init?: boolean; pending?: boolean } = {}) {
   const { order } = await newOrderRow();
   const stub = await getAgentByName(env.OrderAgent, order.instance);
-  await stub.init(order.id, intakeFor());
+  if (opts.init !== false) await stub.init(order.id, intakeFor());
   const quoteId = await insertQuote(env.DB, order.id);
-  await setOrderStatus(env.DB, order.id, ["draft"], "deposit_pending");
+  if (opts.pending !== false) await setOrderStatus(env.DB, order.id, ["draft"], "deposit_pending");
   const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents: 25750 }, new Date(), () => tag);
   return { order, stub, req };
 }
@@ -51,12 +51,12 @@ describe("runWatcher", () => {
     const { rpc, calls } = fakeRpc(1_000_000);
     expect(await runWatcher(env, { rpc, telegram: silent })).toBeNull();
     expect(calls).toHaveLength(0);
-    expect((await env.DB.prepare("SELECT value FROM watcher_state WHERE key = 'last_block'").first<{ value: string }>())?.value).toBe("1000000");
+    expect((await env.DB.prepare("SELECT value FROM watcher_state WHERE key = 'last_block'").first<{ value: string }>())?.value).toBe(String(1_000_000 - HEAD_LAG_BLOCKS));
   });
 
   it("reads both emitters for the receiving address in 5,000-block chunks", async () => {
     await setLastBlock(0);
-    const { rpc, calls } = fakeRpc(12_000);
+    const { rpc, calls } = fakeRpc(12_005);
     const r = await runWatcher(env, { rpc, telegram: silent });
     expect(r).toMatchObject({ from: 1, to: 12_000 });
     expect(calls.map((c) => [c.fromBlock, c.toBlock])).toEqual([[1, 5000], [5001, 10_000], [10_001, 12_000]]);
@@ -115,6 +115,38 @@ describe("runWatcher", () => {
     await runWatcher(env, { rpc: fakeRpc(410, [big]).rpc, telegram: silent });
     const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.kind === "payment" && x.order_id === order.id && x.summary.includes("overpaid"));
     expect(e?.summary).toContain(`Order ${order.id} overpaid by 42.493839 USDC`);
+  });
+
+  it("retries notifications that failed", async () => {
+    const { order, stub, req } = await pendingDeposit(7171, { init: false });
+    await setLastBlock(600);
+    const paid = usdcLog(605, req.amount_units, 5);
+    await runWatcher(env, { rpc: fakeRpc(620, [paid]).rpc, telegram: silent });
+    expect((await env.DB.prepare("SELECT status FROM payment_requests WHERE id = ?").bind(req.id).first<{ status: string }>())?.status).toBe("paid");
+    expect((await listUnnotified(env.DB)).some((t) => t.tx_hash === paid.transactionHash)).toBe(true);
+    await stub.init(order.id, intakeFor());
+    await runWatcher(env, { rpc: fakeRpc(620).rpc, telegram: silent });
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_paid");
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text).join("\n");
+      expect(inbox).toContain("Payment received");
+    });
+    expect((await listUnnotified(env.DB)).some((t) => t.tx_hash === paid.transactionHash)).toBe(false);
+  });
+
+  it("completes an order still in quoted", async () => {
+    const { order, req } = await pendingDeposit(8181, { pending: false });
+    await setOrderStatus(env.DB, order.id, ["draft"], "quoted");
+    await setLastBlock(700);
+    await runWatcher(env, { rpc: fakeRpc(720, [usdcLog(705, req.amount_units, 6)]).rpc, telegram: silent });
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_paid");
+  });
+
+  it("does not escalate dust", async () => {
+    await setLastBlock(800);
+    await runWatcher(env, { rpc: fakeRpc(820, [usdcLog(805, 5_000, 7)]).rpc, telegram: silent });
+    const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.summary.includes("0.005000 USDC"));
+    expect(e).toBeUndefined();
   });
 
   it("does nothing without a receiving address, and keeps its place when the RPC fails", async () => {
