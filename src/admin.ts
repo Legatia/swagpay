@@ -4,7 +4,7 @@ import { listDecided, listEscalations, statusWord, type EscalationRow } from "./
 import { ratesFor } from "./fx";
 import { isAddress } from "./money";
 
-const esc = (s: string) =>
+export const esc = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 
 export interface AdminView {

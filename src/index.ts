@@ -1,6 +1,7 @@
 import { OrderAgent } from "./agent/order-agent";
 import { handleAdmin } from "./admin";
 import { handleApi } from "./api";
+import { computeMetrics, listPublicDecisions, renderLog } from "./public-log";
 import { handleScheduled } from "./scheduled";
 import { handleTelegram } from "./telegram-webhook";
 
@@ -25,6 +26,10 @@ export default {
         console.error("api error", err);
         return Response.json({ error: "Something went wrong. Please try again." }, { status: 500 });
       }
+    }
+    if (url.pathname === "/log" && request.method === "GET") {
+      const [decisions, metrics] = await Promise.all([listPublicDecisions(env.DB), computeMetrics(env.DB)]);
+      return new Response(renderLog(decisions, metrics), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" } });
     }
     if (url.pathname === "/admin" || url.pathname === "/admin/") return handleAdmin(request, env);
     if (/^\/o\/[A-Za-z0-9_-]{43}$/.test(url.pathname)) {

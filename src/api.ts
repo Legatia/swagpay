@@ -7,6 +7,7 @@ import type { ArtworkMeta } from "./agent/order-agent";
 import { sniffMediaType } from "./sniff";
 import { verifyTurnstile } from "./turnstile";
 import { ratesFor } from "./fx";
+import { computeMetrics, listPublicDecisions } from "./public-log";
 import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
 import { addClaim, createPaymentRequest, findPaymentRequest, getPaymentRequest, listPaymentRequests, type PaymentRequestRow } from "./payments";
 import { EMPTY_SPEC, itemsKey, type OrderSpec } from "./order-spec";
@@ -79,6 +80,9 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
   if (path === "/api/config" && request.method === "GET") {
     return json(200, { turnstileSiteKey: env.TURNSTILE_SITE_KEY || null });
   }
+
+  if (path === "/api/log" && request.method === "GET") return json(200, { decisions: await listPublicDecisions(env.DB) }, { "cache-control": "public, max-age=60" });
+  if (path === "/api/metrics" && request.method === "GET") return json(200, await computeMetrics(env.DB), { "cache-control": "public, max-age=60" });
 
   if (path === "/api/pricing" && request.method === "GET") {
     const now = new Date();
