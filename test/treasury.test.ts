@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
-  createObligation, getObligation, insertTreasuryDecision, listQueuedPayouts, loadTreasuryPolicy, orderMargin, payoutsLast24h,
+  createObligation, getObligation, insertObligation, insertTreasuryDecision, listQueuedPayouts, loadTreasuryPolicy, orderMargin, payoutsLast24h,
   printerCostUnits, queuePayout, queuedUnits, recordPayoutResult, setObligationStatus,
 } from "../src/treasury";
 import { newOrderRow } from "./fixtures";
@@ -38,6 +38,11 @@ describe("obligations and payouts", () => {
     const b = await createObligation(env.DB, { orderId: null, kind: "refund", token: "USDC", amountUnits: 9, destination: PAYOUT, chain: "ARC", dueAt: new Date(), sourceRef: "refund:dup" });
     expect(b.id).toBe(a.id);
     expect(b.amount_units).toBe(5);
+    const o = { orderId: null, kind: "reserve" as const, token: "USDC" as const, amountUnits: 7, destination: PAYOUT, chain: "ARC", dueAt: new Date(), sourceRef: `reserve:dup:${crypto.randomUUID()}` };
+    const first = await insertObligation(env.DB, o);
+    const second = await insertObligation(env.DB, { ...o, amountUnits: 7 });
+    expect([first.created, second.created]).toEqual([true, false]);
+    expect(second.obligation.id).toBe(first.obligation.id);
   });
 
   it("queues one payout per obligation, even when asked twice at once", async () => {
@@ -97,8 +102,15 @@ describe("obligations and payouts", () => {
     const q = await env.DB.prepare("SELECT id FROM quotes WHERE order_id = ?").bind(order.id).first<{ id: number }>();
     await env.DB.prepare("INSERT INTO payment_requests (order_id, quote_id, stage, token, amount_units, tag, paid_units, status, created_at, due_by) VALUES (?, ?, 'deposit', 'USDC', 257500001, 1, 300000000, 'paid', ?, ?)")
       .bind(order.id, q!.id, new Date().toISOString(), new Date().toISOString()).run();
-    await obligation({ orderId: order.id, amountUnits: 257_500_000 });
+    expect((await orderMargin(env.DB, order.id))?.printerCostUnits).toBe(0);
+    const cost = await obligation({ orderId: order.id, amountUnits: 257_500_000 });
     expect(await orderMargin(env.DB, order.id)).toEqual({ status: "draft", token: "USDC", receivedUnits: 257_500_001, printerCostUnits: 257_500_000 });
+    // The owner paid it by hand: the cost still comes out of the margin.
+    expect(await setObligationStatus(env.DB, cost.id, ["open"], "settled")).toBe(true);
+    expect((await orderMargin(env.DB, order.id))?.printerCostUnits).toBe(257_500_000);
+    // Whatever its status: a cost that exists was (or will be) paid, by the agent or the owner.
+    await env.DB.prepare("UPDATE obligations SET status = 'cancelled' WHERE id = ?").bind(cost.id).run();
+    expect((await orderMargin(env.DB, order.id))?.printerCostUnits).toBe(257_500_000);
     await insertTreasuryDecision(env.DB, { orderId: order.id, tool: "pay_obligation", reason: "deposit paid", input: {}, verdict: "allow", outcome: "done" });
     await insertTreasuryDecision(env.DB, { orderId: 999_999, tool: "escalate", reason: "odd", input: {}, verdict: "escalate", outcome: "escalated" });
     const rows = (await env.DB.prepare("SELECT order_id FROM treasury_decisions ORDER BY id DESC LIMIT 2").all<{ order_id: number | null }>()).results;

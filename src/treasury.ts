@@ -84,12 +84,11 @@ export function printerCostUnits(q: { cost_pln_grosze: number; pln_per_unit: num
   return Math.ceil((q.cost_pln_grosze * 10_000 * (1 + fxBuffer)) / q.pln_per_unit - 1e-6);
 }
 
-export async function createObligation(
-  db: D1Database,
-  o: { orderId: number | null; kind: ObligationKind; token: Token; amountUnits: number; destination: string; chain: string; dueAt: Date; sourceRef: string; status?: "open" | "escalated"; note?: string },
-  now: Date = new Date(),
-): Promise<ObligationRow> {
-  await db
+export type NewObligation = { orderId: number | null; kind: ObligationKind; token: Token; amountUnits: number; destination: string; chain: string; dueAt: Date; sourceRef: string; status?: "open" | "escalated"; note?: string };
+
+/** One obligation per source ref: `created` is false when the ref already existed (its row is returned unchanged). */
+export async function insertObligation(db: D1Database, o: NewObligation, now: Date = new Date()): Promise<{ obligation: ObligationRow; created: boolean }> {
+  const res = await db
     .prepare(
       `INSERT OR IGNORE INTO obligations (order_id, kind, token, amount_units, destination, chain, due_at, status, source_ref, note, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -98,7 +97,11 @@ export async function createObligation(
     .run();
   const row = await db.prepare("SELECT * FROM obligations WHERE source_ref = ?").bind(o.sourceRef).first<ObligationRow>();
   if (!row) throw new Error("obligation insert returned no row");
-  return row;
+  return { obligation: row, created: res.meta.changes === 1 };
+}
+
+export async function createObligation(db: D1Database, o: NewObligation, now: Date = new Date()): Promise<ObligationRow> {
+  return (await insertObligation(db, o, now)).obligation;
 }
 
 export async function getObligation(db: D1Database, id: number): Promise<ObligationRow | null> {
@@ -210,7 +213,7 @@ export async function queuedUnits(db: D1Database): Promise<number> {
   return (await db.prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM payouts WHERE status = 'queued'").first<{ n: number }>())?.n ?? 0;
 }
 
-/** What the order brought in (surplus excluded: it is refunded) and its printer cost obligation. */
+/** What the order brought in (surplus excluded: it is refunded) and its printer cost obligations, whatever their status (paid by the agent or by the owner). */
 export async function orderMargin(db: D1Database, orderId: number): Promise<{ status: string; token: Token; receivedUnits: number; printerCostUnits: number } | null> {
   const order = await db.prepare("SELECT status FROM orders WHERE id = ?").bind(orderId).first<{ status: string }>();
   if (!order) return null;
@@ -219,7 +222,7 @@ export async function orderMargin(db: D1Database, orderId: number): Promise<{ st
     .bind(orderId)
     .first<{ token: Token; n: number }>();
   const cost = await db
-    .prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM obligations WHERE order_id = ? AND kind = 'printer_cost' AND status != 'cancelled'")
+    .prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM obligations WHERE order_id = ? AND kind = 'printer_cost'")
     .bind(orderId)
     .first<{ n: number }>();
   return { status: order.status, token: received?.token ?? "USDC", receivedUnits: received?.n ?? 0, printerCostUnits: cost?.n ?? 0 };

@@ -15,7 +15,8 @@ export interface TreasuryContext extends DecisionLogger {
   markEscalated(id: number): Promise<void>;
   holdObligation(id: number, hours: number, note: string): Promise<void>;
   orderMargin(orderId: number): Promise<{ status: string; token: Token; receivedUnits: number; printerCostUnits: number } | null>;
-  createReserve(orderId: number, units: number, token: Token): Promise<ObligationRow>;
+  /** One reserve obligation per order: `created` is false when the order already had one. */
+  createReserve(orderId: number, units: number, token: Token): Promise<{ obligation: ObligationRow; created: boolean }>;
   escalateOnce(key: string, e: { orderId: number | null; kind: "approval" | "agent"; summary: string; payload: unknown }): Promise<{ id: number; created: boolean }>;
 }
 
@@ -86,12 +87,14 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
       if (!m) return no(`there is no order ${orderId}`);
       if (m.status !== "closed") return no(`order ${orderId} is ${m.status}, not closed`);
       if (m.token !== "USDC") return no("only USDC reserves are configured");
+      // Without a recorded cost the whole payment would look like margin.
+      if (m.printerCostUnits === 0) return no(`no printer cost is recorded for order ${orderId}; escalate`);
       if (bps < ctx.policy.reserveMinBps || bps > ctx.policy.reserveMaxBps) return no(`choose between ${ctx.policy.reserveMinBps} and ${ctx.policy.reserveMaxBps} bps`);
       const margin = m.receivedUnits - m.printerCostUnits;
       const units = Math.floor((margin * bps) / 10_000);
       if (units < 10_000) return no(`the order's margin (${formatUnits(Math.max(0, margin))} USDC) leaves nothing worth sweeping`);
-      const reserve = await ctx.createReserve(orderId, units, "USDC");
-      if (reserve.amount_units !== units) return no(`order ${orderId} was already swept (obligation #${reserve.id})`);
+      const { obligation: reserve, created } = await ctx.createReserve(orderId, units, "USDC");
+      if (!created) return no(`order ${orderId} was already swept (obligation #${reserve.id})`);
       return { verdict: "allow", outcome: "done", detail: `obligation #${reserve.id}`, result: { content: `Reserve obligation #${reserve.id}: ${formatUnits(units)} USDC to the reserve. Call pay_obligation to move it.` } };
     }),
 

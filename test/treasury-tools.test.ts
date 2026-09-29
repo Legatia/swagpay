@@ -23,7 +23,11 @@ function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null;
     async markEscalated(id) { state.escalated.push(id); },
     async holdObligation(id, hours) { state.held.push([id, hours]); },
     async orderMargin() { return o.margin === undefined ? { status: "closed", token: "USDC", receivedUnits: 380_000_000, printerCostUnits: 257_500_000 } : o.margin; },
-    async createReserve(orderId, units) { state.reserves.push([orderId, units]); return ob({ id: 50, kind: "reserve", amount_units: units, destination: RESERVE, chain: "ARC" }); },
+    async createReserve(orderId, units) {
+      // Like the ledger: one reserve per order; a repeat returns the first row.
+      state.reserves.push([orderId, units]);
+      return { obligation: ob({ id: 50, kind: "reserve", amount_units: state.reserves[0][1], destination: RESERVE, chain: "ARC" }), created: state.reserves.length === 1 };
+    },
     async escalateOnce(key, e) { state.escalations.push(e.summary); return { id: 9, created: state.escalations.length === 1 }; },
     async logDecision(d) { state.decisions.push(d as unknown as Record<string, unknown>); },
   };
@@ -93,6 +97,25 @@ describe("treasury tools", () => {
     expect(state.reserves).toEqual([[7, 24_500_000]]);
     const open = fake([], { margin: { status: "balance_paid", token: "USDC", receivedUnits: 380_000_000, printerCostUnits: 257_500_000 } });
     expect((await open.h.sweep_to_reserve({ orderId: 7, bps: 2000, reason: "too early" })).content).toContain("order 7 is balance_paid, not closed");
+  });
+
+  it("blocks a sweep when no printer cost is recorded for the order", async () => {
+    const { h, state } = fake([], { margin: { status: "closed", token: "USDC", receivedUnits: 380_000_000, printerCostUnits: 0 } });
+    const r = await h.sweep_to_reserve({ orderId: 7, bps: 2000, reason: "order closed" });
+    expect(r.isError).toBe(true);
+    expect(r.content).toBe("No sweep: no printer cost is recorded for order 7; escalate.");
+    expect(state.reserves).toEqual([]);
+  });
+
+  it("blocks a second sweep of the same order, whatever the amount", async () => {
+    const { h, state } = fake([]);
+    expect((await h.sweep_to_reserve({ orderId: 7, bps: 2000, reason: "order closed" })).content).toMatch(/^Reserve obligation #50/);
+    for (const bps of [2000, 3000]) {
+      const again = await h.sweep_to_reserve({ orderId: 7, bps, reason: "order closed" });
+      expect(again.isError).toBe(true);
+      expect(again.content).toBe("No sweep: order 7 was already swept (obligation #50).");
+    }
+    expect(state.decisions.slice(1).map((d) => d.verdict)).toEqual(["block", "block"]);
   });
 
   it("escalates once", async () => {

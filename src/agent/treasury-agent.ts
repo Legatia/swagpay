@@ -4,7 +4,7 @@ import { createEscalation } from "../escalations";
 import { formatUnits, isAddress } from "../money";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import {
-  createObligation, getObligation, insertTreasuryDecision, listObligations, loadTreasuryPolicy, orderMargin, payoutsLast24h, queuePayout,
+  getObligation, insertObligation, insertTreasuryDecision, listObligations, loadTreasuryPolicy, orderMargin, payoutsLast24h, queuePayout,
   queuedUnits, setObligationNote, setObligationStatus, type TreasuryPolicy,
 } from "../treasury";
 import { SqlR2ConversationStore, repairDanglingToolUse, trimToRecentTurns } from "./conversation";
@@ -148,7 +148,7 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
           await this.schedule(new Date(Date.now() + hours * 3_600_000), "recheck", { obligationId: id });
         },
         orderMargin: (orderId) => orderMargin(this.env.DB, orderId),
-        createReserve: (orderId, units, token) => createObligation(this.env.DB, {
+        createReserve: (orderId, units, token) => insertObligation(this.env.DB, {
           orderId, kind: "reserve", token, amountUnits: units, destination: p.reserveAddress ?? "", chain: "ARC", dueAt: new Date(), sourceRef: `reserve:order:${orderId}`,
         }),
         markEscalated: async (id) => { await setObligationStatus(this.env.DB, id, ["open"], "escalated"); },
