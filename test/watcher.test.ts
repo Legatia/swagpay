@@ -105,6 +105,19 @@ describe("runWatcher", () => {
     expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_pending");
     const flagged = (await listEscalations(env.DB, { status: "open" })).find((x) => x.order_id === order.id && x.summary.includes("because the payer pasted its hash"));
     expect(flagged?.kind).toBe("payment");
+    expect((await listEscalations(env.DB)).some((x) => x.order_id === order.id && x.summary.includes("Book the printer"))).toBe(false);
+  });
+
+  it("tells the owner once to book the printer when a transfer completes the deposit", async () => {
+    const { order, req } = await pendingDeposit(4343);
+    await setLastBlock(1300);
+    const paid = usdcLog(1305, req.amount_units, 14);
+    await runWatcher(env, { rpc: fakeRpc(1340, [paid]).rpc, telegram: silent });
+    await runWatcher(env, { rpc: fakeRpc(1340).rpc, telegram: silent });
+    const book = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.summary.includes("Book the printer"));
+    expect(book).toHaveLength(1);
+    expect(book[0].kind).toBe("payment");
+    expect(book[0].summary).toBe(`Order ${order.id}: deposit paid (257.504343 USDC, tx ${paid.transactionHash}). Book the printer: cost 1000.00 PLN gross (quote #${req.quote_id}).`);
   });
 
   it("escalates an overpayment", async () => {
