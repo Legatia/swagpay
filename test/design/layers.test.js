@@ -60,6 +60,9 @@ describe("export", () => {
   it("escapes text", () => {
     expect(escapeXml(`a<b>&"c'`)).toBe("a&lt;b&gt;&amp;&quot;c&apos;");
   });
+  it("escapeXml strips control characters", () => {
+    expect(escapeXml("a\u0000b\u001Fc")).toBe("abc");
+  });
   it("writes a real-size print SVG", () => {
     const svg = printSvg({ area, layers, assets });
     expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg"')).toBe(true);
@@ -69,11 +72,24 @@ describe("export", () => {
     expect(svg).toContain('rotate(15 60 106.25)');
     expect(svg).not.toContain("<3<");
   });
+  it("layerMarkup/printSvg coerces bad weight", () => {
+    const badWeightLayer = { ...layers[1], weight: '"><x' };
+    const svg = printSvg({ area, layers: [badWeightLayer], assets });
+    expect(svg).toContain('font-weight="400"');
+    expect(svg).not.toContain('"><x');
+  });
   it("writes a sticker SVG with a CutContour layer", () => {
     const svg = stickerSvg({ area: { widthMm: 69, heightMm: 69 }, layers: [layers[0]], assets, longestSideMm: 75, borderMm: 3, cutPathD: "M0 0Z" });
     expect(svg).toContain('width="75mm" height="75mm" viewBox="0 0 75 75"');
     expect(svg).toContain('<g id="CutContour"><path d="M0 0Z" fill="none" stroke="#ff00ff" stroke-width="0.1"/></g>');
     expect(svg).toContain('transform="translate(3 3)"');
+  });
+  it("stickerSvg coerces borderMm", () => {
+    const svg1 = stickerSvg({ area: { widthMm: 69, heightMm: 69 }, layers: [layers[0]], assets, longestSideMm: 75, borderMm: "3", cutPathD: "M0 0Z" });
+    expect(svg1).toContain('transform="translate(3 3)"');
+    const svg2 = stickerSvg({ area: { widthMm: 69, heightMm: 69 }, layers: [layers[0]], assets, longestSideMm: 75, borderMm: '"><x', cutPathD: "M0 0Z" });
+    expect(svg2).toContain('transform="translate(0 0)"');
+    expect(svg2).not.toContain('"><x');
   });
 });
 

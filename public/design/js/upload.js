@@ -20,8 +20,8 @@ function readDataUrl(file) {
 function naturalSize(dataUrl) {
   return new Promise((resolve) => {
     const img = new Image();
-    img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-    img.onerror = () => resolve({ w: 0, h: 0 });
+    img.onload = () => resolve({ ok: true, w: img.naturalWidth, h: img.naturalHeight });
+    img.onerror = () => resolve({ ok: false });
     img.src = dataUrl;
   });
 }
@@ -31,8 +31,10 @@ export async function readAsset(file) {
   const problem = validateUpload(file);
   if (problem) throw new Error(problem);
   const dataUrl = await readDataUrl(file);
-  const { w, h } = await naturalSize(dataUrl);
+  const result = await naturalSize(dataUrl);
   const vector = file.type === "image/svg+xml";
+  if (!result.ok) throw new Error("That file could not be opened. Try a PNG, JPEG or SVG.");
+  const { w, h } = result;
   if (!vector && (!w || !h)) throw new Error("That image could not be opened. Try a PNG or JPEG.");
   return {
     name: file.name.slice(0, 80),
