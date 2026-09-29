@@ -63,12 +63,14 @@ export function loadTreasuryPolicy(vars: Record<string, unknown>): TreasuryPolic
     return n;
   };
   const addr = (key: string): string | null => (isAddress(vars[key]) ? (vars[key] as string) : null);
+  const payoutChain = String(vars.PAYOUT_CHAIN || "ARC").trim().toUpperCase();
+  if (!/^[A-Z0-9-]{2,24}$/.test(payoutChain)) throw new Error(`PAYOUT_CHAIN is not a chain code, got "${String(vars.PAYOUT_CHAIN)}"`);
   const policy: TreasuryPolicy = {
     perTxUnits: usdc("TREASURY_PER_TX_USDC", 500),
     dailyUnits: usdc("TREASURY_DAILY_USDC", 1500),
     reserveMinBps: bps("TREASURY_RESERVE_MIN_BPS", 1000),
     reserveMaxBps: bps("TREASURY_RESERVE_MAX_BPS", 3000),
-    payoutChain: String(vars.PAYOUT_CHAIN || "ARC"),
+    payoutChain,
     payoutAddress: addr("PAYOUT_ADDRESS"),
     reserveAddress: addr("RESERVE_ADDRESS"),
   };
@@ -135,7 +137,8 @@ export async function queuePayout(db: D1Database, ob: ObligationRow, now: Date =
         .prepare(
           `INSERT INTO payouts (obligation_id, method, chain, token, amount_units, destination, idempotency_key, created_at, updated_at)
            SELECT id, CASE WHEN chain = 'ARC' THEN 'transfer' ELSE 'bridge' END, chain, token, amount_units, destination, ?, ?, ?
-           FROM obligations WHERE id = ? AND status = 'queued' RETURNING *`,
+           FROM obligations WHERE id = ? AND status = 'queued'
+             AND NOT EXISTS (SELECT 1 FROM payouts WHERE obligation_id = obligations.id AND status IN ('queued', 'sent')) RETURNING *`,
         )
         .bind(crypto.randomUUID(), at, at, ob.id),
     ]);
@@ -158,8 +161,9 @@ export async function recordPayoutResult(
     // Only the obligation of the payout that was just updated (same batch, same timestamp) moves.
     db.prepare(
       `UPDATE obligations SET status = ?, settled_at = CASE WHEN ? = 'paid' THEN ? ELSE settled_at END
-       WHERE status = 'queued' AND id = (SELECT obligation_id FROM payouts WHERE id = ? AND status = ? AND updated_at = ?)`,
-    ).bind(obligationStatus, obligationStatus, at, id, r.status, at),
+       WHERE status = 'queued' AND id = (SELECT obligation_id FROM payouts WHERE id = ? AND status = ? AND updated_at = ?)
+         AND NOT EXISTS (SELECT 1 FROM payouts p2 WHERE p2.obligation_id = obligations.id AND p2.id > ?)`,
+    ).bind(obligationStatus, obligationStatus, at, id, r.status, at, id),
   ]);
   const payout = results[0].results[0] as PayoutRow | undefined;
   if (!payout) return null;
@@ -171,11 +175,11 @@ export async function listQueuedPayouts(db: D1Database, limit = 20): Promise<Pay
   return (await db.prepare("SELECT * FROM payouts WHERE status = 'queued' ORDER BY id LIMIT ?").bind(limit).all<PayoutRow>()).results;
 }
 
-/** Units queued or sent in the 24 hours before `now`. */
+/** Units queued (any age) plus units sent in the 24 hours before `now`. */
 export async function payoutsLast24h(db: D1Database, now: Date = new Date()): Promise<number> {
   const since = new Date(now.getTime() - 24 * 3_600_000).toISOString();
   const row = await db
-    .prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM payouts WHERE status IN ('queued', 'sent') AND created_at >= ? AND created_at <= ?")
+    .prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM payouts WHERE status = 'queued' OR (status = 'sent' AND updated_at > ? AND updated_at <= ?)")
     .bind(since, now.toISOString())
     .first<{ n: number }>();
   return row?.n ?? 0;

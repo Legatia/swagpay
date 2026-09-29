@@ -75,6 +75,10 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
   }
   const surplus = paid > r.amount_units ? Math.min(t.amount_units, paid - r.amount_units) : 0;
   if (surplus > 0) text += ` Overpaid by ${formatUnits(surplus)} ${r.token}; the owner will refund it.`;
+  // Bad treasury config must throw before any side effect, so a retry never repeats the agent event or owner pings.
+  const quote = completedDeposit ? await getQuote(env.DB, r.quote_id) : null;
+  const treasury = quote ? loadTreasuryPolicy(env as unknown as Record<string, unknown>) : null;
+  const fxBuffer = quote ? loadPolicy(env as unknown as Record<string, unknown>).fxBuffer : 0;
   const agent = await getAgentByName(env.OrderAgent, order.instance);
   await agent.pushEvent(text, `Payment received: ${got}.`);
   // Owner escalations come last, so a failing agent call cannot repeat owner pings on every retry.
@@ -85,7 +89,7 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     });
     const e = await createEscalation(env.DB, {
       orderId: order.id, kind: "approval",
-      summary: `Order ${order.id} overpaid by ${formatUnits(surplus)} ${r.token} (tx ${t.tx_hash}). Refund it to ${t.from_address}? Approve to let the treasury agent send it (refund obligation #${refund.id}); reject if you'll handle it yourself. Exchanges and bridges send from shared addresses: check with the payer first.`,
+      summary: `Order ${order.id} overpaid by ${formatUnits(surplus)} ${r.token} (tx ${t.tx_hash}). Refund it to ${t.from_address}? ${r.token === "USDC" ? `Approve to let the treasury agent send it (refund obligation #${refund.id}); reject if you'll handle it yourself.` : `The treasury agent only sends USDC: approve once you've refunded it by hand from the wallet, or reject (refund obligation #${refund.id}).`} Exchanges and bridges send from shared addresses: check with the payer first.`,
       payload: { txHash: t.tx_hash, logIndex: t.log_index, surplus, obligationId: refund.id },
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
@@ -99,14 +103,11 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   }
-  const quote = await getQuote(env.DB, r.quote_id);
   if (completedDeposit) {
     const cost = quote ? `cost ${formatCents(quote.cost_pln_grosze)} PLN gross (quote #${quote.id})` : `quote #${r.quote_id} is missing; check the cost by hand`;
     let costOb: { id: number; amount_units: number; status: string } | null = null;
     let why = "";
-    if (quote) {
-      const treasury = loadTreasuryPolicy(env as unknown as Record<string, unknown>);
-      const fxBuffer = loadPolicy(env as unknown as Record<string, unknown>).fxBuffer;
+    if (quote && treasury) {
       if (!treasury.payoutAddress) why = "PAYOUT_ADDRESS is not set";
       else if (r.token !== "USDC") why = "only USDC payouts are configured";
       costOb = await createObligation(env.DB, {
@@ -125,9 +126,12 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
       await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
     } else {
       const manual = why ? ` The treasury agent can't move it (${why}): pay from the wallet by hand.` : "";
+      const head = late
+        ? `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Check printing is still possible, then book the printer: ${cost}.`
+        : `Order ${order.id}: deposit paid (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Book the printer: ${cost}.`;
       const e = await createEscalation(env.DB, {
         orderId: order.id, kind: "payment",
-        summary: `Order ${order.id}: deposit paid${late ? " LATE" : ""} (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Book the printer: ${cost}. ${move}${manual}`.trim(),
+        summary: `${head} ${move}${manual}`.trim(),
         payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, ...(costOb ? { obligationId: costOb.id } : {}) },
       });
       await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);

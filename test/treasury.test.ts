@@ -22,6 +22,8 @@ describe("treasury policy", () => {
     expect(() => loadTreasuryPolicy({ TREASURY_DAILY_USDC: "-1" })).toThrow();
     expect(() => loadTreasuryPolicy({ TREASURY_RESERVE_MIN_BPS: "4000", TREASURY_RESERVE_MAX_BPS: "3000" })).toThrow();
     expect(loadTreasuryPolicy({ PAYOUT_ADDRESS: "not-an-address" }).payoutAddress).toBeNull();
+    expect(loadTreasuryPolicy({ PAYOUT_CHAIN: "arc" }).payoutChain).toBe("ARC");
+    expect(() => loadTreasuryPolicy({ PAYOUT_CHAIN: "x y" })).toThrow();
   });
 
   it("converts the printer's PLN cost at the quote's rate plus the FX buffer, rounded up", () => {
@@ -77,7 +79,8 @@ describe("obligations and payouts", () => {
     await queuePayout(env.DB, ob);
     expect(await payoutsLast24h(env.DB)).toBe(before + 7_000_000);
     expect(await queuedUnits(env.DB)).toBe(queuedBefore + 7_000_000);
-    expect(await payoutsLast24h(env.DB, new Date(Date.now() + 25 * 3_600_000))).toBe(0);
+    // A queued payout still counts after 24 hours (a stalled runner); only sent money ages out.
+    expect(await payoutsLast24h(env.DB, new Date(Date.now() + 25 * 3_600_000))).toBe(await queuedUnits(env.DB));
   });
 
   it("moves status only from allowed states", async () => {

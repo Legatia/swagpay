@@ -7,7 +7,7 @@ import { getOrderById, setOrderStatus } from "../src/db";
 import { listEscalations } from "../src/escalations";
 import { addClaim, createPaymentRequest, listUnnotified } from "../src/payments";
 import { warsawTime } from "../src/quote-text";
-import { listObligations } from "../src/treasury";
+import type { ObligationRow } from "../src/treasury";
 import type { TelegramClient } from "../src/telegram";
 import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, MIN_ESCALATION_UNITS, runWatcher } from "../src/watcher";
 import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
@@ -121,6 +121,9 @@ describe("runWatcher", () => {
     expect(late).toHaveLength(1);
     expect(late[0].summary).toContain(`Order ${order.id}: deposit paid LATE (due ${warsawTime(due)} Warsaw time)`);
     expect(late[0].summary).toContain("cost 1000.00 PLN gross");
+    const ob = await env.DB.prepare("SELECT status FROM obligations WHERE order_id = ? AND kind = 'printer_cost'").bind(order.id).first<{ status: string }>();
+    expect(ob?.status).toBe("escalated");
+    expect((await listEscalations(env.DB)).some((x) => x.order_id === order.id && x.kind === "payment" && x.summary.includes("Book the printer"))).toBe(false);
   });
 
   it("opens an escalation without an order for a transfer that matches nothing", async () => {
@@ -166,7 +169,7 @@ describe("runWatcher", () => {
     await addClaim(env.DB, req.id, usdcLog(4105, 300_000_000, 9292).transactionHash);
     await setLastBlock(4100);
     await runWatcher(env, { rpc: fakeRpc(4140, [usdcLog(4105, 300_000_000, 9292)]).rpc, telegram: silent });
-    const obs = (await listObligations(env.DB, ["open", "escalated"], 200)).filter((o) => o.order_id === order.id);
+    const obs = (await env.DB.prepare("SELECT * FROM obligations WHERE order_id = ?").bind(order.id).all<ObligationRow>()).results;
     const cost = obs.find((o) => o.kind === "printer_cost")!;
     expect(cost).toMatchObject({ token: "USDC", amount_units: 257_500_000, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC", status: "open" });
     const refund = obs.find((o) => o.kind === "refund")!;
@@ -174,6 +177,30 @@ describe("runWatcher", () => {
     expect(refund.destination).toBe("0x2222222222222222222222222222222222222222");
     const approval = (await listEscalations(env.DB)).find((e) => e.order_id === order.id && e.kind === "approval");
     expect(JSON.parse(approval!.payload_json).obligationId).toBe(refund.id);
+  });
+
+  it("fails closed on bad treasury config before any side effect", async () => {
+    const { order, stub, req } = await pendingDeposit(9494);
+    await setLastBlock(4300);
+    const bad = ({ ...env, TREASURY_DAILY_USDC: "1,500" }) as Env;
+    const log = usdcLog(4305, req.amount_units, 9494);
+    await runWatcher(bad, { rpc: fakeRpc(4340, [log]).rpc, telegram: silent });
+    await runWatcher(bad, { rpc: fakeRpc(4340).rpc, telegram: silent });
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text).join("\n");
+      expect(inbox).not.toContain("Payment received on Arc");
+    });
+    expect((await listEscalations(env.DB)).filter((x) => x.order_id === order.id)).toHaveLength(0);
+  });
+
+  it("escalates the printer cost for manual payment when PAYOUT_ADDRESS is not set", async () => {
+    const { order, req } = await pendingDeposit(9595);
+    await setLastBlock(4400);
+    await runWatcher(({ ...env, PAYOUT_ADDRESS: "" }) as Env, { rpc: fakeRpc(4440, [usdcLog(4405, req.amount_units, 9595)]).rpc, telegram: silent });
+    const ob = await env.DB.prepare("SELECT * FROM obligations WHERE order_id = ? AND kind = 'printer_cost'").bind(order.id).first<ObligationRow>();
+    expect(ob).toMatchObject({ status: "escalated", note: "PAYOUT_ADDRESS is not set" });
+    const e = (await listEscalations(env.DB)).find((x) => x.order_id === order.id && x.kind === "payment" && x.summary.includes("Book the printer"));
+    expect(e?.summary).toContain("pay from the wallet by hand");
   });
 
   it("escalates an overpayment", async () => {

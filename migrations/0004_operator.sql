@@ -16,6 +16,7 @@ CREATE TABLE obligations (
   settled_at TEXT
 );
 CREATE INDEX obligations_by_status ON obligations(status, id);
+CREATE INDEX obligations_by_order ON obligations(order_id);
 
 CREATE TABLE payouts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +33,7 @@ CREATE TABLE payouts (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE INDEX payouts_by_status ON payouts(status, id);
 -- An obligation never has two live payouts.
 CREATE UNIQUE INDEX payouts_one_live ON payouts(obligation_id) WHERE status IN ('queued', 'sent');
 
