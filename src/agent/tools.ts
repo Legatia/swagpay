@@ -139,26 +139,32 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         const detail = problems.join("; ");
         return { verdict: "block", outcome: "blocked", detail, result: { content: `Not saved. ${detail}`, isError: true } };
       }
-      await ctx.saveSpec(spec);
+      // Ask the owner before saving: approvals are keyed on the items exactly as the owner saw them.
       const reasons = [...new Set(verdicts.filter((v): v is { kind: "escalate"; reason: string } => v.kind === "escalate").map((v) => v.reason))];
-      const lines = ["Saved."];
-      let waiting = false;
+      const decided: { r: string; e: { id: number; status: "open" | "approved" | "rejected"; created: boolean } }[] = [];
       for (const r of reasons) {
         const items = spec.items.filter((_, i) => verdicts[i].kind === "escalate" && (verdicts[i] as { reason: string }).reason === r);
-        const detail = items.map((it) => `${it.quantity} × ${it.description}`).join("; ");
-        const e = await ctx.escalateOnce(`approval:${r}`, "approval", `Approve: ${r}${detail ? ` (${detail})` : ""}`, { reason: r });
-        if (e.status === "approved") {
-          lines.push(`Approved by the owner (#${e.id}): ${r}.`);
-        } else if (e.status === "rejected") {
-          waiting = true;
-          lines.push(`Rejected by the owner (#${e.id}): ${r}. Remove it from the order and tell the host.`);
-        } else {
+        const detail = items.map((it) => `${it.quantity} × ${it.description.replace(/\s+/g, " ")}${it.method ? ` (${it.method})` : ""}`).join("; ");
+        const e = await ctx.escalateOnce(`approval:${r} [${detail}]`, "approval", `Approve: ${r} (${detail})`, { reason: r, items });
+        decided.push({ r, e });
+      }
+      const rejected = decided.filter((d) => d.e.status === "rejected");
+      if (rejected.length) {
+        const detail = rejected.map((d) => `the owner rejected ${d.r} (#${d.e.id})`).join("; ");
+        return { verdict: "block", outcome: "blocked", detail, result: { content: `Not saved: ${detail}. Remove it from the order and tell the host.`, isError: true } };
+      }
+      await ctx.saveSpec(spec);
+      const lines = ["Saved."];
+      let waiting = false;
+      for (const { r, e } of decided) {
+        if (e.status === "approved") lines.push(`Approved by the owner (#${e.id}): ${r}.`);
+        else {
           waiting = true;
           lines.push(`${e.created ? "Sent to the owner" : "Waiting for the owner"} (#${e.id}): ${r}. Tell the host a person will confirm it.`);
         }
       }
       const missing = missingInfo(spec);
-      lines.push(missing.length ? `Still missing: ${missing.join("; ")}` : "The order is complete.");
+      lines.push(missing.length ? `Still missing: ${missing.join("; ")}` : waiting ? "Everything else is complete; the order waits for the owner's decision." : "The order is complete.");
       return waiting
         ? { verdict: "escalate", outcome: "escalated", detail: reasons.join("; "), result: { content: lines.join(" ") } }
         : { verdict: "allow", outcome: "done", result: { content: lines.join(" ") } };

@@ -35,6 +35,9 @@ function fakeCtx(files: ArtworkFile[] = []) {
 
 const tee = { kind: "tshirt", description: "Black tee", method: "screen", quantity: 60, colour: "black",
   sizes: { S: 10, M: 20, L: 20, XL: 10 }, printAreas: ["front"] };
+const banner = { kind: "banner", description: "2 m banner", quantity: 1 };
+const BANNER_REASON = '"banner" is not on the item list; the owner must approve it';
+const BANNER_KEY = `approval:${BANNER_REASON} [1 × 2 m banner]`;
 
 describe("tool definitions", () => {
   it("defines the intake tools with object schemas that require a reason", () => {
@@ -115,22 +118,56 @@ describe("update_order", () => {
 
   it("sends an off-list item to the owner once, then reports the owner's decision", async () => {
     const { h, state, statuses } = fakeCtx();
-    const spec = { items: [tee, { kind: "banner", description: "2 m banner", quantity: 1 }], artwork: [] };
+    const spec = { items: [tee, banner], artwork: [] };
     const r = await h.update_order({ spec, reason: "host also wants a banner" });
     expect(r.isError).toBeFalsy();
     expect(state.spec.items).toHaveLength(2);
     expect(r.content).toContain("Sent to the owner (#1)");
-    expect(state.escalations).toEqual([{ key: 'approval:"banner" is not on the item list; the owner must approve it', kind: "approval", summary: 'Approve: "banner" is not on the item list; the owner must approve it (1 × 2 m banner)' }]);
+    expect(state.escalations).toEqual([{ key: 'approval:"banner" is not on the item list; the owner must approve it [1 × 2 m banner]', kind: "approval", summary: 'Approve: "banner" is not on the item list; the owner must approve it (1 × 2 m banner)' }]);
     expect(state.decisions[0]).toMatchObject({ verdict: "escalate", outcome: "escalated" });
 
     const again = await h.update_order({ spec, reason: "sizes updated" });
     expect(again.content).toContain("Waiting for the owner (#1)");
     expect(state.escalations).toHaveLength(1);
 
-    statuses.set('approval:"banner" is not on the item list; the owner must approve it', "approved");
+    statuses.set(BANNER_KEY, "approved");
     const approved = await h.update_order({ spec, reason: "owner approved the banner" });
     expect(approved.content).toContain("Approved by the owner (#1)");
     expect(state.decisions.at(-1)).toMatchObject({ verdict: "allow", outcome: "done" });
+  });
+
+  it("refuses to save an item the owner rejected", async () => {
+    const { h, state, statuses } = fakeCtx();
+    await h.update_order({ spec: { items: [tee, banner], artwork: [] }, reason: "host also wants a banner" });
+    const before = structuredClone(state.spec);
+    statuses.set(BANNER_KEY, "rejected");
+    const r = await h.update_order({ spec: { items: [tee, banner], artwork: [], notes: "rush" }, reason: "host added a note" });
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/^Not saved: the owner rejected /);
+    expect(r.content).toContain("(#1)");
+    expect(state.spec).toEqual(before);
+    expect(state.decisions.at(-1)).toMatchObject({ verdict: "block", outcome: "blocked" });
+  });
+
+  it("asks the owner again when an approved item changes", async () => {
+    const { h, state, statuses } = fakeCtx();
+    await h.update_order({ spec: { items: [tee, banner], artwork: [] }, reason: "host also wants a banner" });
+    statuses.set(BANNER_KEY, "approved");
+    const r = await h.update_order({ spec: { items: [tee, { ...banner, quantity: 2 }], artwork: [] }, reason: "host wants two banners" });
+    expect(state.escalations).toHaveLength(2);
+    expect(state.escalations[1].summary).toBe(`Approve: ${BANNER_REASON} (2 × 2 m banner)`);
+    expect(r.content).toContain("Sent to the owner (#2)");
+    expect(state.decisions.at(-1)).toMatchObject({ verdict: "escalate", outcome: "escalated" });
+  });
+
+  it("says the order waits for the owner when only an approval is open", async () => {
+    const f: ArtworkFile = { fileId: "f1", name: "logo.png", mediaType: "image/png", bytes: new Uint8Array(4) };
+    const { h } = fakeCtx([f]);
+    const spec = { items: [tee, { ...banner, method: "print" }], artwork: [{ fileId: "f1", printable: true, issues: [] }] };
+    const r = await h.update_order({ spec, reason: "artwork reviewed" });
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toMatch(/the order waits for the owner's decision\.$/);
+    expect(r.content).not.toContain("The order is complete");
   });
 
   it("rejects artwork reviews for files that don't exist", async () => {
