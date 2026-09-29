@@ -12,7 +12,13 @@ export interface EscalationRow {
   telegram_message_id: number | null;
   created_at: string;
   decided_at: string | null;
+  /** When the order's agent was told about the decision (or there was no agent to tell). */
+  delivered_at: string | null;
 }
+
+/** How the owner reads a decision: an approved notice was only acknowledged. */
+export const statusWord = (kind: string, status: string): string =>
+  (kind === "system" || kind === "payment") && status === "approved" ? "acknowledged" : status;
 
 export async function createEscalation(
   db: D1Database,
@@ -55,4 +61,16 @@ export async function decideEscalation(
 
 export async function setTelegramMessageId(db: D1Database, id: number, messageId: number): Promise<void> {
   await db.prepare("UPDATE escalations SET telegram_message_id = ? WHERE id = ?").bind(messageId, id).run();
+}
+
+export async function markDelivered(db: D1Database, id: number, now: Date = new Date()): Promise<void> {
+  await db.prepare("UPDATE escalations SET delivered_at = ? WHERE id = ?").bind(now.toISOString(), id).run();
+}
+
+/** Decided escalations whose agent has not been told yet, newest first. */
+export async function listUndelivered(db: D1Database, limit = 20): Promise<EscalationRow[]> {
+  return (await db
+    .prepare("SELECT * FROM escalations WHERE status != 'open' AND delivered_at IS NULL ORDER BY id DESC LIMIT ?")
+    .bind(limit)
+    .all<EscalationRow>()).results;
 }

@@ -16,7 +16,7 @@ function recorder(result: unknown = { message_id: 5 }) {
 
 const row = (o: Partial<EscalationRow>): EscalationRow => ({
   id: 7, order_id: 3, kind: "approval", summary: "Approve: banner", payload_json: "{}", status: "open",
-  decision_note: null, telegram_message_id: null, created_at: "2099-01-01T00:00:00.000Z", decided_at: null, ...o,
+  decision_note: null, telegram_message_id: null, created_at: "2099-01-01T00:00:00.000Z", decided_at: null, delivered_at: null, ...o,
 });
 
 describe("createTelegram", () => {

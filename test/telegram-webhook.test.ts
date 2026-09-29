@@ -75,6 +75,7 @@ describe("Telegram webhook", () => {
       expect(inbox).toContain(`Owner decision on escalation #${e.id} (summary: "Approve: banner"): approved.`);
       expect(inbox).toContain('Note from the owner: "fine for this event"');
     });
+    expect((await getEscalation(env.DB, e.id))?.delivered_at).toBeTruthy();
     await handleTelegram(update(fromOwner(`/reject ${e.id}`)), env, t);
     expect(t.sent[1]).toBe(`#${e.id} is already approved.`);
   });
@@ -85,14 +86,19 @@ describe("Telegram webhook", () => {
     await handleTelegram(update(fromOwner(`/resend ${e.id}`)), env, t);
     expect(t.sent[0]).toBe(`#${e.id} is still open.`);
     await handleTelegram(update(fromOwner(`/approve ${e.id}`)), env, t);
+    expect(t.sent[1]).toBe(`#${e.id} approved.`);
     await handleTelegram(update(fromOwner(`/resend ${e.id}`)), env, t);
-    expect(t.sent[2]).toBe(`#${e.id} re-sent to the agent (approved).`);
+    expect(t.sent[2]).toBe(`#${e.id} was already delivered to the agent.`);
+    await env.DB.prepare("UPDATE escalations SET delivered_at = NULL WHERE id = ?").bind(e.id).run();
+    await handleTelegram(update(fromOwner(`/resend ${e.id}`)), env, t);
+    expect(t.sent[3]).toBe(`#${e.id} re-sent to the agent (approved).`);
+    expect((await getEscalation(env.DB, e.id))?.delivered_at).toBeTruthy();
     await runInDurableObject(stub, async (agent: OrderAgent) => {
       const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
       expect(inbox.split(`Owner decision on escalation #${e.id}`).length - 1).toBe(2);
     });
     await handleTelegram(update(fromOwner("/approve 1e2")), env, t);
-    expect(t.sent[3]).toBe("Usage: /approve <id> [note]");
+    expect(t.sent[4]).toBe("Usage: /approve <id> [note]");
   });
 
   it("handles the Reject button", async () => {
@@ -101,6 +107,70 @@ describe("Telegram webhook", () => {
     await handleTelegram(update({ callback_query: { id: "cb9", data: `esc:${e.id}:reject`, message: { chat: { id: 42 } } } }), env, t);
     expect((await getEscalation(env.DB, e.id))?.status).toBe("rejected");
     expect(t.answered).toEqual([`cb9:#${e.id} rejected.`]);
+    expect(t.sent).toEqual([`#${e.id} rejected.`]);
+  });
+
+  it("says a system notice was acknowledged", async () => {
+    const { order } = await orderWithEscalation();
+    const e = await createEscalation(env.DB, { orderId: order.id, kind: "system", summary: "Order failed", payload: {} });
+    const t = fakeTelegram();
+    await handleTelegram(update({ callback_query: { id: "cb1", data: `esc:${e.id}:approve`, message: { chat: { id: 42 } } } }), env, t);
+    expect(t.answered).toEqual([`cb1:#${e.id} acknowledged.`]);
+    expect(t.sent).toEqual([`#${e.id} acknowledged.`]);
+    await handleTelegram(update(fromOwner(`/approve ${e.id}`)), env, t);
+    expect(t.sent[1]).toBe(`#${e.id} is already acknowledged.`);
+  });
+
+  it("ignores buttons from other chats and crafted button data", async () => {
+    const { e } = await orderWithEscalation();
+    const t = fakeTelegram();
+    const other = await handleTelegram(update({ callback_query: { id: "cb2", data: `esc:${e.id}:approve`, message: { chat: { id: 7 } } } }), env, t);
+    expect(other.status).toBe(200);
+    expect(t.answered).toEqual([]);
+    expect(t.sent).toEqual([]);
+    expect((await getEscalation(env.DB, e.id))?.status).toBe("open");
+    await handleTelegram(update({ callback_query: { id: "cb3", data: `esc:${e.id}:approved`, message: { chat: { id: 42 } } } }), env, t);
+    expect(t.answered).toEqual(["cb3:Unknown button."]);
+    expect((await getEscalation(env.DB, e.id))?.status).toBe("open");
+  });
+
+  it("lists decisions the agent hasn't heard under /open", async () => {
+    const { e } = await orderWithEscalation();
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/approve ${e.id}`)), env, t);
+    await env.DB.prepare("UPDATE escalations SET delivered_at = NULL WHERE id = ?").bind(e.id).run();
+    await handleTelegram(update(fromOwner("/open")), env, t);
+    expect(t.sent[1]).toContain(`#${e.id} approved — agent not told yet: /resend ${e.id}`);
+  });
+
+  it("keeps a decision the agent couldn't hear, and says how to retry", async () => {
+    const { stub, e } = await orderWithEscalation();
+    const t = fakeTelegram();
+    const unreachable = { idFromName() { throw new Error("agent unreachable"); } } as unknown as Env["OrderAgent"];
+    const down = ({ ...env, OrderAgent: unreachable }) as Env;
+    await handleTelegram(update(fromOwner(`/approve ${e.id}`)), down, t);
+    expect(t.sent[0]).toBe(`#${e.id} approved, but the agent could not be told. Send /resend ${e.id} to retry.`);
+    expect(await getEscalation(env.DB, e.id)).toMatchObject({ status: "approved", delivered_at: null });
+    await handleTelegram(update(fromOwner(`/reject ${e.id}`)), down, t);
+    expect(t.sent[1]).toBe(`#${e.id} is already approved. The agent has not been told yet: send /resend ${e.id}.`);
+    await handleTelegram(update(fromOwner(`/resend ${e.id}`)), down, t);
+    expect(t.sent[2]).toBe(`#${e.id}: the agent could not be told. Try /resend ${e.id} again later.`);
+    await handleTelegram(update(fromOwner(`/resend ${e.id}`)), env, t);
+    expect(t.sent[3]).toBe(`#${e.id} re-sent to the agent (approved).`);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
+      expect(inbox.split(`Owner decision on escalation #${e.id}`).length - 1).toBe(1);
+    });
+  });
+
+  it("answers a failing command instead of erroring", async () => {
+    const { order } = await orderWithEscalation();
+    const t = fakeTelegram();
+    const unreachable = { idFromName() { throw new Error("agent unreachable"); } } as unknown as Env["OrderAgent"];
+    const res = await handleTelegram(update(fromOwner(`/order ${order.id}`)), ({ ...env, OrderAgent: unreachable }) as Env, t);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    expect(t.sent).toEqual(["Something went wrong: agent unreachable"]);
   });
 
   it("shows an order's status and answers anything else with help", async () => {

@@ -1,6 +1,6 @@
 import { getAgentByName } from "agents";
 import { getOrderById } from "./db";
-import { decideEscalation, getEscalation, listEscalations } from "./escalations";
+import { decideEscalation, getEscalation, listEscalations, listUndelivered, markDelivered, statusWord as word, type EscalationRow } from "./escalations";
 import { createTelegram, type TelegramClient } from "./telegram";
 
 type Update = {
@@ -24,49 +24,57 @@ function sameSecret(given: string, expected: string): boolean {
   return a.byteLength === b.byteLength && crypto.subtle.timingSafeEqual(a, b);
 }
 
-/** Decides an escalation in D1, then tells the order's agent. Returns the reply for the owner. */
+/** Tells the order's agent about a decided escalation and records that it was told. Never throws. */
+async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
+  try {
+    if (row.order_id !== null) {
+      const order = await getOrderById(env.DB, row.order_id);
+      if (order) {
+        const agent = await getAgentByName(env.OrderAgent, order.instance);
+        await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, row.status as "approved" | "rejected", row.decision_note);
+      }
+    }
+    await markDelivered(env.DB, row.id);
+    return true;
+  } catch (err) {
+    console.error("decision delivery failed", row.id, err);
+    return false;
+  }
+}
+
+/** Decides an escalation in D1, then tells the order's agent. Returns the reply for the owner (short: button toasts stop at 200 characters). */
 export async function decide(env: Env, id: number, status: "approved" | "rejected", note: string | null): Promise<string> {
   const row = await decideEscalation(env.DB, id, status, note);
   if (!row) {
     const existing = await getEscalation(env.DB, id);
-    return existing ? `#${id} is already ${existing.status}.` : `#${id} doesn't exist.`;
+    if (!existing) return `#${id} doesn't exist.`;
+    const untold = existing.delivered_at === null && existing.order_id !== null ? ` The agent has not been told yet: send /resend ${id}.` : "";
+    return `#${id} is already ${word(existing.kind, existing.status)}.${untold}`;
   }
-  const order = row.order_id === null ? null : await getOrderById(env.DB, row.order_id);
-  if (order) {
-    try {
-      const agent = await getAgentByName(env.OrderAgent, order.instance);
-      await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, status, note);
-    } catch (err) {
-      console.error("ownerDecision failed", err);
-      return `#${id} ${status}, but the agent could not be told (${err instanceof Error ? err.message : String(err)}). Send /resend ${id} to retry.`;
-    }
-  }
-  return `#${id} ${status}.`;
+  const w = word(row.kind, row.status);
+  return (await deliver(env, row)) ? `#${id} ${w}.` : `#${id} ${w}, but the agent could not be told. Send /resend ${id} to retry.`;
 }
 
-/** Re-sends an already decided escalation to its order's agent (after "the agent could not be told"). */
+/** Re-sends a decided escalation the agent has not been told about. */
 export async function resend(env: Env, id: number): Promise<string> {
   const row = await getEscalation(env.DB, id);
   if (!row) return `#${id} doesn't exist.`;
   if (row.status === "open") return `#${id} is still open.`;
-  const order = row.order_id === null ? null : await getOrderById(env.DB, row.order_id);
-  if (!order) return `#${id} has no order to tell.`;
-  try {
-    const agent = await getAgentByName(env.OrderAgent, order.instance);
-    await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, row.status, row.decision_note);
-  } catch (err) {
-    console.error("resend failed", err);
-    return `#${id}: the agent could not be told: ${err instanceof Error ? err.message : String(err)}`;
-  }
-  return `#${id} re-sent to the agent (${row.status}).`;
+  if (row.delivered_at !== null) return `#${id} was already delivered to the agent.`;
+  return (await deliver(env, row))
+    ? `#${id} re-sent to the agent (${word(row.kind, row.status)}).`
+    : `#${id}: the agent could not be told. Try /resend ${id} again later.`;
 }
 
 const parseId = (arg: string | undefined): number | null => (arg !== undefined && /^\d{1,9}$/.test(arg) ? Number(arg) : null);
 
 async function openList(env: Env): Promise<string> {
-  const open = await listEscalations(env.DB, { status: "open", limit: 20 });
-  if (open.length === 0) return "No open escalations.";
-  return open.map((e) => `#${e.id} · ${e.order_id === null ? "no order" : `order ${e.order_id}`} · ${e.kind} · ${e.summary.slice(0, 120)}`).join("\n");
+  const [open, undelivered] = await Promise.all([listEscalations(env.DB, { status: "open", limit: 20 }), listUndelivered(env.DB)]);
+  if (open.length === 0 && undelivered.length === 0) return "No open escalations.";
+  return [
+    ...open.map((e) => `#${e.id} · ${e.order_id === null ? "no order" : `order ${e.order_id}`} · ${e.kind} · ${e.summary.slice(0, 120)}`),
+    ...undelivered.map((e) => `#${e.id} ${word(e.kind, e.status)} — agent not told yet: /resend ${e.id}`),
+  ].join("\n");
 }
 
 async function orderStatus(env: Env, n: number): Promise<string> {
@@ -125,6 +133,8 @@ export async function handleTelegram(request: Request, env: Env, deps: { telegra
         console.error("telegram answerCallback failed", err);
       }
     }
+    // The toast disappears; the chat keeps a record of every button press.
+    await reply(text);
     return new Response("ok");
   }
 
@@ -132,30 +142,35 @@ export async function handleTelegram(request: Request, env: Env, deps: { telegra
   const command = (words[0] ?? "").replace(/@\w+$/, "");
   const arg = words[1];
   const note = words.slice(2).join(" ").trim().slice(0, 1000) || null;
-  switch (command) {
-    case "/open":
-      await reply(await openList(env));
-      break;
-    case "/approve":
-    case "/reject": {
-      const id = parseId(arg);
-      await reply(id !== null && id > 0
-        ? await decide(env, id, command === "/approve" ? "approved" : "rejected", note)
-        : `Usage: ${command} <id> [note]`);
-      break;
+  try {
+    switch (command) {
+      case "/open":
+        await reply(await openList(env));
+        break;
+      case "/approve":
+      case "/reject": {
+        const id = parseId(arg);
+        await reply(id !== null && id > 0
+          ? await decide(env, id, command === "/approve" ? "approved" : "rejected", note)
+          : `Usage: ${command} <id> [note]`);
+        break;
+      }
+      case "/resend": {
+        const id = parseId(arg);
+        await reply(id !== null && id > 0 ? await resend(env, id) : "Usage: /resend <id>");
+        break;
+      }
+      case "/order": {
+        const n = parseId(arg);
+        await reply(n !== null && n > 0 ? await orderStatus(env, n) : "Usage: /order <number>");
+        break;
+      }
+      default:
+        await reply(HELP);
     }
-    case "/resend": {
-      const id = parseId(arg);
-      await reply(id !== null && id > 0 ? await resend(env, id) : "Usage: /resend <id>");
-      break;
-    }
-    case "/order": {
-      const n = parseId(arg);
-      await reply(n !== null && n > 0 ? await orderStatus(env, n) : "Usage: /order <number>");
-      break;
-    }
-    default:
-      await reply(HELP);
+  } catch (err) {
+    console.error("telegram command failed", command, err);
+    await reply(`Something went wrong: ${err instanceof Error ? err.message : String(err)}`);
   }
   return new Response("ok");
 }

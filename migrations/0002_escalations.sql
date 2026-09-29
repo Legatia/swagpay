@@ -8,7 +8,8 @@ CREATE TABLE escalations (
   decision_note TEXT,
   telegram_message_id INTEGER,
   created_at TEXT NOT NULL,
-  decided_at TEXT
+  decided_at TEXT,
+  delivered_at TEXT
 );
 
 CREATE INDEX escalations_by_status ON escalations(status, id);
