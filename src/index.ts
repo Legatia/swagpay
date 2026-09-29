@@ -1,4 +1,5 @@
 import { OrderAgent } from "./agent/order-agent";
+import { handleAdmin } from "./admin";
 import { handleApi } from "./api";
 import { handleTelegram } from "./telegram-webhook";
 
@@ -24,6 +25,7 @@ export default {
         return Response.json({ error: "Something went wrong. Please try again." }, { status: 500 });
       }
     }
+    if (url.pathname === "/admin" || url.pathname === "/admin/") return handleAdmin(request, env);
     if (/^\/o\/[A-Za-z0-9_-]{43}$/.test(url.pathname)) {
       return env.ASSETS.fetch(new Request(new URL("/order", url), request));
     }

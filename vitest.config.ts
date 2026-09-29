@@ -17,6 +17,8 @@ export default defineConfig(async () => {
             TELEGRAM_OWNER_CHAT_ID: "42",
             TELEGRAM_BOT_TOKEN: "",
             TELEGRAM_WEBHOOK_SECRET: "test-secret",
+            ACCESS_TEAM_DOMAIN: "https://test.cloudflareaccess.com",
+            ACCESS_AUD: "test-aud",
           },
         },
       }),
