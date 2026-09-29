@@ -102,6 +102,15 @@ export class OrderAgent extends Agent<Env, OrderState> {
     }
   }
 
+  /** Swagpay itself tells the agent something (payments, quote acceptance); optionally shows a line to the host. */
+  async pushEvent(text: string, threadNote?: string): Promise<void> {
+    this.ensureTables();
+    this.orderId();
+    this.addInbox({ kind: "event", text });
+    if (threadNote) this.addThread("system", threadNote);
+    await this.trigger();
+  }
+
   /** The owner answered a cost request; store the cost for the items it was asked for and wake the agent. */
   async setPrinterCost(escalationId: number, costPln: number, note: string | null): Promise<void> {
     this.ensureTables();

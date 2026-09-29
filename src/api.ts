@@ -1,10 +1,15 @@
 import { getAgentByName } from "agents";
-import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, type OrderRow } from "./db";
+import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, setOrderStatus, type OrderRow } from "./db";
 import { newFileId } from "./ids";
 import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
 import type { ArtworkMeta } from "./agent/order-agent";
 import { sniffMediaType } from "./sniff";
 import { verifyTurnstile } from "./turnstile";
+import { ratesFor } from "./fx";
+import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
+import { addClaim, createPaymentRequest, getPaymentRequest, listPaymentRequests, type PaymentRequestRow } from "./payments";
+import { loadPolicy, quoteStillValid } from "./policy";
+import { acceptQuote, expireQuote, getQuote, latestQuote, reopenQuote, type QuoteRow } from "./quotes";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -48,12 +53,41 @@ function publicOrder(o: OrderRow) {
   };
 }
 
+function publicQuote(q: QuoteRow | null) {
+  if (!q) return null;
+  return { id: q.id, currency: q.currency, price: formatCents(q.price_cents), deposit: formatCents(q.deposit_cents), validUntil: q.valid_until, status: q.status };
+}
+
+function publicPayment(p: PaymentRequestRow) {
+  return {
+    id: p.id, stage: p.stage, token: p.token, amount: formatUnits(p.amount_units), paid: formatUnits(p.paid_units),
+    due: formatUnits(Math.max(0, p.amount_units - p.paid_units)), status: p.status,
+  };
+}
+
+function payTo(env: Env) {
+  if (!isAddress(env.RECEIVING_ADDRESS)) return null;
+  return { address: env.RECEIVING_ADDRESS, network: "Arc", chainId: Number(env.ARC_CHAIN_ID) || 5042, tokens: { USDC: env.USDC_ADDRESS, EURC: env.EURC_ADDRESS } };
+}
+
 export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
 
   if (path === "/api/config" && request.method === "GET") {
     return json(200, { turnstileSiteKey: env.TURNSTILE_SITE_KEY || null });
+  }
+
+  if (path === "/api/pricing" && request.method === "GET") {
+    const now = new Date();
+    const [usd, eur] = await Promise.all([ratesFor(env.DB, "USD", now), ratesFor(env.DB, "EUR", now)]);
+    const policy = loadPolicy(env as unknown as Record<string, unknown>);
+    const fresh = usd && eur;
+    const at = fresh ? (await env.DB.prepare("SELECT MIN(fetched_at) AS at FROM fx_rates WHERE code IN ('USD', 'EUR')").first<{ at: string | null }>())?.at ?? null : null;
+    return json(200, {
+      plnPerUnit: fresh ? { USD: usd.plnPerUnit, EUR: eur.plnPerUnit } : null,
+      fetchedAt: at, markupMin: policy.markupMin, markupMax: policy.markupMax, fxBuffer: policy.fxBuffer, perOrderCapUsd: policy.perOrderCapUsd,
+    }, { "cache-control": "public, max-age=300" });
   }
 
   if (path === "/api/orders" && request.method === "POST") {
@@ -86,7 +120,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     return json(201, { token, url: `/o/${token}` }, NO_STORE);
   }
 
-  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork)?$/.exec(path);
+  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork|\/quote\/accept|\/payments\/(\d{1,9})\/claim)?$/.exec(path);
   if (!m) return fail(404, "not found");
   const order = await getOrderByToken(env.DB, m[1]);
   if (!order) return fail(404, "order not found");
@@ -94,7 +128,8 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
   const sub = m[2];
 
   if (!sub && request.method === "GET") {
-    return json(200, { order: publicOrder(order), view: await agent.getView() }, NO_STORE);
+    const [view, quote, payments] = await Promise.all([agent.getView(), latestQuote(env.DB, order.id), listPaymentRequests(env.DB, order.id)]);
+    return json(200, { order: publicOrder(order), view, quote: publicQuote(quote), payments: payments.map(publicPayment), payTo: payTo(env) }, NO_STORE);
   }
 
   if (sub === "/messages" && request.method === "POST") {
@@ -147,6 +182,50 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
       throw err;
     }
     return json(201, { fileId });
+  }
+
+  if (sub === "/quote/accept" && request.method === "POST") {
+    const body = (await readJson(request)) as { quoteId?: unknown } | undefined;
+    const quote = typeof body?.quoteId === "number" && Number.isInteger(body.quoteId) ? await getQuote(env.DB, body.quoteId) : null;
+    if (!quote || quote.order_id !== order.id) return fail(404, "quote not found");
+    if (quote.status !== "open") return fail(409, `This quote is ${quote.status}.`);
+    if (order.status !== "quoted") return fail(409, "This order already has an accepted quote.");
+    if (!isAddress(env.RECEIVING_ADDRESS)) return fail(503, "Payments are not open yet. Please try again later.");
+    const now = new Date();
+    const rates = await ratesFor(env.DB, quote.currency, now);
+    if (!rates) return fail(503, "Exchange rates are updating. Please try again in a few minutes.");
+    const policy = loadPolicy(env as unknown as Record<string, unknown>);
+    if (!quoteStillValid({ issuedAt: new Date(quote.issued_at), plnPerUnit: quote.pln_per_unit }, now, rates.plnPerUnit, policy)) {
+      await expireQuote(env.DB, quote.id);
+      await agent.pushEvent(`Quote #${quote.id} expired before the host accepted it: it is older than ${policy.quoteValidityHours} hours or the złoty moved more than the FX buffer. Send a new quote with send_quote.`);
+      return fail(409, "This quote has expired. The agent will send a new one shortly.");
+    }
+    const accepted = await acceptQuote(env.DB, quote.id, now);
+    if (!accepted) return fail(409, "This quote is no longer open.");
+    let payment: PaymentRequestRow;
+    try {
+      payment = await createPaymentRequest(env.DB, { orderId: order.id, quoteId: quote.id, stage: "deposit", token: TOKEN_FOR[quote.currency], cents: quote.deposit_cents }, now);
+    } catch (err) {
+      await reopenQuote(env.DB, quote.id);
+      throw err;
+    }
+    await setOrderStatus(env.DB, order.id, ["quoted"], "deposit_pending");
+    const amount = `${formatUnits(payment.amount_units)} ${payment.token}`;
+    await agent.pushEvent(
+      `The host accepted quote #${quote.id}. Deposit request #${payment.id}: ${amount} on Arc. Payments arrive as events.`,
+      `Quote #${quote.id} accepted. Deposit due: ${amount}.`,
+    );
+    return json(201, { requestId: payment.id }, NO_STORE);
+  }
+
+  if (m[3] && request.method === "POST") {
+    const body = (await readJson(request)) as { txHash?: unknown } | undefined;
+    const txHash = typeof body?.txHash === "string" ? body.txHash.trim().toLowerCase() : "";
+    if (!/^0x[0-9a-f]{64}$/.test(txHash)) return fail(400, "paste the transaction hash: 0x followed by 64 characters");
+    const payment = await getPaymentRequest(env.DB, Number(m[3]));
+    if (!payment || payment.order_id !== order.id) return fail(404, "payment request not found");
+    if ((await addClaim(env.DB, payment.id, txHash)) === "taken") return fail(409, "That transaction is already linked to another payment.");
+    return json(201, { ok: true });
   }
 
   return fail(405, "method not allowed");

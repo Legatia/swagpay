@@ -35,10 +35,34 @@ function renderThread(thread) {
   $("thread").replaceChildren(...thread.map((t) => el("div", `bubble ${t.from}`, t.text)));
 }
 
+let openQuoteId = null;
+let claimRequestId = null;
+
+function renderQuote(quote) {
+  $("quote-box").hidden = !quote;
+  if (!quote) return;
+  $("quote-text").textContent = `Quote #${quote.id}: ${quote.price} ${quote.currency} for the whole order. Deposit: ${quote.deposit} ${quote.currency}.`;
+  const until = new Date(quote.validUntil).toLocaleString("en-GB", { timeZone: "Europe/Warsaw", dateStyle: "medium", timeStyle: "short" });
+  $("quote-valid").textContent = quote.status === "open" ? `Valid until ${until} (Warsaw time).` : `This quote is ${quote.status}.`;
+  openQuoteId = quote.status === "open" ? quote.id : null;
+  $("accept").hidden = openQuoteId === null;
+}
+
+function renderPayments(payments, payTo) {
+  $("pay-box").hidden = payments.length === 0;
+  $("payments").replaceChildren(...payments.map((p) => {
+    const line = p.status === "paid" ? `${p.stage}: ${p.amount} ${p.token} — paid` : `${p.stage}: send ${p.due} ${p.token}${p.paid !== "0.000000" ? ` (received ${p.paid})` : ""}`;
+    return el("p", p.status === "paid" ? "muted" : "", line);
+  }));
+  $("pay-address").textContent = payTo ? `${payTo.address} · ${payTo.network} (chain ${payTo.chainId})` : "Payment details will appear here soon.";
+  claimRequestId = payments.find((p) => p.status === "open")?.id ?? null;
+  $("claim-form").hidden = claimRequestId === null;
+}
+
 async function refresh() {
   const res = await fetch(`/api/o/${token}`);
   if (res.status === 404) { $("event").textContent = "Order not found"; return; }
-  const { order, view } = await res.json();
+  const { order, view, quote, payments, payTo } = await res.json();
   $("job").textContent = `Job ${String(order.number).padStart(4, "0")}`;
   $("event").textContent = order.eventName;
   const deliverBy = new Date(order.deliverBy).toLocaleString("en-GB", { timeZone: "Europe/Warsaw", dateStyle: "medium", timeStyle: "short" });
@@ -46,6 +70,8 @@ async function refresh() {
   renderSpec(view.spec, view.missing);
   renderArtwork(view.artwork, view.spec.artwork);
   renderThread(view.thread);
+  renderQuote(quote);
+  renderPayments(payments, payTo);
   $("busy").hidden = !view.busy;
 }
 
@@ -81,6 +107,41 @@ $("file").addEventListener("change", async () => {
   if (!res.ok) $("error").textContent = data.error || "Could not upload the file.";
   $("file").value = "";
   await refresh();
+});
+
+$("accept").addEventListener("click", async () => {
+  if (openQuoteId === null) return;
+  $("error").textContent = "";
+  $("accept").disabled = true;
+  try {
+    const res = await fetch(`/api/o/${token}/quote/accept`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ quoteId: openQuoteId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not accept the quote.");
+    await refresh();
+  } catch (err) {
+    $("error").textContent = err.message;
+  } finally {
+    $("accept").disabled = false;
+  }
+});
+
+$("claim-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (claimRequestId === null) return;
+  $("error").textContent = "";
+  try {
+    const res = await fetch(`/api/o/${token}/payments/${claimRequestId}/claim`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ txHash: $("tx").value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not send the hash.");
+    $("tx").value = "";
+    $("error").textContent = "Thanks. We'll match it within a minute or two.";
+  } catch (err) {
+    $("error").textContent = err.message;
+  }
 });
 
 refresh();

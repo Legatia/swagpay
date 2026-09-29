@@ -1,5 +1,10 @@
-import { SELF, env } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { getAgentByName } from "agents";
+import type { OrderAgent } from "../src/agent/order-agent";
+import { getOrderByToken } from "../src/db";
+import { createQuote, getQuote } from "../src/quotes";
+import { handleApi } from "../src/api";
 
 const intake = {
   eventName: "Builders meetup", eventDate: "2099-10-08", deliverBy: "2099-10-08T17:00",
@@ -112,6 +117,92 @@ describe("API", () => {
     const r2 = await SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: empty });
     expect(r2.status).toBe(400);
     expect((await r2.json<{ error: string }>()).error).toContain("empty");
+  });
+
+  async function quotedOrder(issuedAt = new Date()) {
+    const token = await newOrder();
+    const order = (await getOrderByToken(env.DB, token))!;
+    await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?), ('EUR', 4.3, '2099-09-30', ?)")
+      .bind(new Date().toISOString(), new Date().toISOString()).run();
+    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757 }, issuedAt, 48);
+    return { token, order, quote };
+  }
+  const accept = (token: string, quoteId: unknown) =>
+    SELF.fetch(`${base}/api/o/${token}/quote/accept`, { method: "POST", body: JSON.stringify({ quoteId }) });
+
+  it("accepts a quote once, creates the tagged deposit request and tells the agent", async () => {
+    const { token, order, quote } = await quotedOrder();
+    const res = await accept(token, quote.id);
+    expect(res.status).toBe(201);
+    const { requestId } = await res.json<{ requestId: number }>();
+    expect((await accept(token, quote.id)).status).toBe(409);
+    const view = await (await SELF.fetch(`${base}/api/o/${token}`)).json<{
+      order: { status: string }; quote: { status: string; price: string; deposit: string };
+      payments: Array<{ id: number; stage: string; token: string; amount: string; due: string; status: string }>;
+      payTo: { address: string; network: string; chainId: number };
+    }>();
+    expect(view.order.status).toBe("deposit_pending");
+    expect(view.quote).toMatchObject({ status: "accepted", price: "380.00", deposit: "257.50" });
+    expect(view.payments).toHaveLength(1);
+    expect(view.payments[0]).toMatchObject({ id: requestId, stage: "deposit", token: "USDC", status: "open" });
+    expect(view.payments[0].amount).toMatch(/^257\.50\d{4}$/);
+    expect(view.payments[0].due).toBe(view.payments[0].amount);
+    expect(view.payTo).toMatchObject({ address: "0x1111111111111111111111111111111111111111", network: "Arc", chainId: 5042 });
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
+      expect(inbox).toContain(`The host accepted quote #${quote.id}. Deposit request #${requestId}: ${view.payments[0].amount} USDC on Arc.`);
+      expect((await agent.getView()).thread.at(-1)).toMatchObject({ from: "system", text: `Quote #${quote.id} accepted. Deposit due: ${view.payments[0].amount} USDC.` });
+    });
+  });
+
+  it("expires a quote that is too old and tells the agent to re-quote", async () => {
+    const { token, order, quote } = await quotedOrder(new Date(Date.now() - 49 * 3_600_000));
+    const res = await accept(token, quote.id);
+    expect(res.status).toBe(409);
+    expect((await res.json<{ error: string }>()).error).toContain("expired");
+    expect((await getQuote(env.DB, quote.id))?.status).toBe("expired");
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).toContain(`Quote #${quote.id} expired before the host accepted it`);
+    });
+  });
+
+  it("refuses to accept while payments are closed or for another order's quote", async () => {
+    const { token, quote } = await quotedOrder();
+    const other = await quotedOrder();
+    expect((await accept(token, other.quote.id)).status).toBe(404);
+    expect((await accept(token, "x")).status).toBe(404);
+    const closed = ({ ...env, RECEIVING_ADDRESS: "" }) as Env;
+    const res = await handleApi(new Request(`${base}/api/o/${token}/quote/accept`, { method: "POST", body: JSON.stringify({ quoteId: quote.id }) }), closed);
+    expect(res.status).toBe(503);
+    expect((await getQuote(env.DB, quote.id))?.status).toBe("open");
+  });
+
+  it("serves pricing inputs for the design editor", async () => {
+    await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?), ('EUR', 4.3, '2099-09-30', ?)")
+      .bind(new Date().toISOString(), new Date().toISOString()).run();
+    const res = await SELF.fetch(`${base}/api/pricing`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    const body = await res.json<{ plnPerUnit: { USD: number; EUR: number } | null; fetchedAt: string | null; markupMin: number; markupMax: number; fxBuffer: number; perOrderCapUsd: number }>();
+    expect(body).toMatchObject({ plnPerUnit: { USD: 4, EUR: 4.3 }, markupMin: 0.4, markupMax: 0.5, fxBuffer: 0.03, perOrderCapUsd: 1000 });
+    expect(body.fetchedAt).toBeTruthy();
+  });
+
+  it("stores a payer's transaction hash once", async () => {
+    const { token, quote } = await quotedOrder();
+    const { requestId } = await (await accept(token, quote.id)).json<{ requestId: number }>();
+    const claim = (id: number, txHash: unknown) =>
+      SELF.fetch(`${base}/api/o/${token}/payments/${id}/claim`, { method: "POST", body: JSON.stringify({ txHash }) });
+    const h = `0x${"ab".repeat(32)}`;
+    expect((await claim(requestId, "0x123")).status).toBe(400);
+    expect((await claim(requestId + 1000, h)).status).toBe(404);
+    expect((await claim(requestId, h)).status).toBe(201);
+    const second = await quotedOrder();
+    const { requestId: otherId } = await (await accept(second.token, second.quote.id)).json<{ requestId: number }>();
+    const taken = await SELF.fetch(`${base}/api/o/${second.token}/payments/${otherId}/claim`, { method: "POST", body: JSON.stringify({ txHash: h }) });
+    expect(taken.status).toBe(409);
   });
 
   it("caps new orders per day", async () => {

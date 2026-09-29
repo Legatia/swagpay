@@ -19,6 +19,7 @@ export default defineConfig(async () => {
             TELEGRAM_WEBHOOK_SECRET: "test-secret",
             ACCESS_TEAM_DOMAIN: "https://test.cloudflareaccess.com",
             ACCESS_AUD: "test-aud",
+            RECEIVING_ADDRESS: "0x1111111111111111111111111111111111111111",
           },
         },
       }),
