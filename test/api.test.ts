@@ -2,9 +2,11 @@ import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { OrderAgent } from "../src/agent/order-agent";
-import { getOrderByToken, setOrderStatus } from "../src/db";
+import { getOrderByToken, saveOrderSpec, setOrderStatus } from "../src/db";
+import { EMPTY_SPEC, itemsKey } from "../src/order-spec";
 import { createQuote, getQuote } from "../src/quotes";
 import { handleApi } from "../src/api";
+import { completeSpec } from "./fixtures";
 
 const intake = {
   eventName: "Builders meetup", eventDate: "2099-10-08", deliverBy: "2099-10-08T17:00",
@@ -124,7 +126,8 @@ describe("API", () => {
     const order = (await getOrderByToken(env.DB, token))!;
     await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?), ('EUR', 4.3, '2099-09-30', ?)")
       .bind(new Date().toISOString(), new Date().toISOString()).run();
-    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757 }, issuedAt, 48);
+    // The order has no saved spec yet, so the quote is for the empty item list.
+    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: await itemsKey(EMPTY_SPEC) }, issuedAt, 48);
     return { token, order, quote };
   }
   const accept = (token: string, quoteId: unknown) =>
@@ -153,6 +156,20 @@ describe("API", () => {
       const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
       expect(inbox).toContain(`The host accepted quote #${quote.id}. Deposit request #${requestId}: ${view.payments[0].amount} USDC on Arc.`);
       expect((await agent.getView()).thread.at(-1)).toMatchObject({ from: "system", text: `Quote #${quote.id} accepted. Deposit due: ${view.payments[0].amount} USDC.` });
+    });
+  });
+
+  it("refuses a quote whose items changed", async () => {
+    const { token, order, quote } = await quotedOrder();
+    await saveOrderSpec(env.DB, order.id, completeSpec);
+    const res = await accept(token, quote.id);
+    expect(res.status).toBe(409);
+    expect((await res.json<{ error: string }>()).error).toBe("The order changed since this quote. The agent will send a new one.");
+    expect((await getQuote(env.DB, quote.id))?.status).toBe("superseded");
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM payment_requests WHERE quote_id = ?").bind(quote.id).first<{ n: number }>())?.n).toBe(0);
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).toContain(`Quote #${quote.id} no longer matches the order's items; send a new quote.`);
     });
   });
 
@@ -209,7 +226,7 @@ describe("API", () => {
     const token = await newOrder();
     const order = (await getOrderByToken(env.DB, token))!;
     await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?)").bind(new Date().toISOString()).run();
-    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 0, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757 }, new Date(), 48);
+    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 0, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: await itemsKey(EMPTY_SPEC) }, new Date(), 48);
     expect((await accept(token, quote.id)).status).toBe(500);
     expect((await getQuote(env.DB, quote.id))?.status).toBe("open");
   });

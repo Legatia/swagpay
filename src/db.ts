@@ -51,8 +51,10 @@ export async function getOrderById(db: D1Database, id: number): Promise<OrderRow
   return db.prepare(`SELECT ${ORDER_COLUMNS} FROM orders WHERE id = ?`).bind(id).first<OrderRow>();
 }
 
+/** Saves the spec while the order can still change; after a quote is accepted the items are frozen. */
 export async function saveOrderSpec(db: D1Database, id: number, spec: OrderSpec): Promise<void> {
-  await db.prepare("UPDATE orders SET spec_json = ? WHERE id = ?").bind(JSON.stringify(spec), id).run();
+  const res = await db.prepare("UPDATE orders SET spec_json = ? WHERE id = ? AND status IN ('draft','quoted')").bind(JSON.stringify(spec), id).run();
+  if (res.meta.changes !== 1) throw new Error("items are frozen: a quote was already accepted");
 }
 
 export async function countOrdersSince(db: D1Database, since: Date): Promise<number> {

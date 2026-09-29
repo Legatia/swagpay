@@ -3,7 +3,7 @@ import { getAgentByName } from "agents";
 import { expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, type RpcClient } from "../src/arc";
-import { getOrderByToken } from "../src/db";
+import { getOrderByToken, saveOrderSpec } from "../src/db";
 import { listEscalations } from "../src/escalations";
 import type { TelegramClient } from "../src/telegram";
 import { handleTelegram } from "../src/telegram-webhook";
@@ -34,6 +34,7 @@ it("runs an order from a complete spec to a paid deposit", async () => {
   await runInDurableObject(stub, async (agent: OrderAgent) => {
     agent.telegramOverride = quiet;
     agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(completeSpec)})`;
+    await saveOrderSpec(env.DB, order.id, completeSpec);
     agent.modelOverride = scriptedModel([msg([toolUse("request_printer_cost", { reason: "order complete" })], "tool_use"), msg([], "end_turn")]);
     await agent.processTurn();
   });

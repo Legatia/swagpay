@@ -4,14 +4,14 @@ import { getOrderById, setOrderStatus } from "../src/db";
 import { acceptQuote, createQuote, expireQuote, getQuote, latestQuote, reopenQuote, type NewQuote } from "../src/quotes";
 import { newOrderRow } from "./fixtures";
 
-const q: NewQuote = { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757 };
+const q: NewQuote = { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: "k1" };
 
 describe("quotes", () => {
   it("creates a quote, supersedes the previous one and marks the order quoted", async () => {
     const { order } = await newOrderRow();
     const now = new Date("2099-10-01T10:00:00Z");
     const first = await createQuote(env.DB, order.id, q, now, 48);
-    expect(first).toMatchObject({ order_id: order.id, currency: "USD", price_cents: 38000, deposit_cents: 25750, cost_pln_grosze: 100000, status: "open", valid_until: "2099-10-03T10:00:00.000Z" });
+    expect(first).toMatchObject({ order_id: order.id, currency: "USD", price_cents: 38000, deposit_cents: 25750, cost_pln_grosze: 100000, items_key: "k1", status: "open", valid_until: "2099-10-03T10:00:00.000Z" });
     expect((await getOrderById(env.DB, order.id))?.status).toBe("quoted");
     const second = await createQuote(env.DB, order.id, { ...q, priceCents: 37000 }, now, 48);
     expect((await getQuote(env.DB, first.id))?.status).toBe("superseded");

@@ -33,6 +33,8 @@ export interface ToolContext {
   policy: Policy;
   getSpec(): Promise<OrderSpec>;
   saveSpec(spec: OrderSpec): Promise<void>;
+  /** Withdraws the order's open quote when it priced other items; returns its number, or null. */
+  withdrawStaleQuote(itemsKey: string): Promise<number | null>;
   postToHost(text: string): Promise<void>;
   loadArtwork(fileId: string): Promise<ArtworkFile | null>;
   hasArtwork(fileId: string): Promise<boolean>;
@@ -203,7 +205,11 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         return { verdict: "block", outcome: "blocked", detail, result: { content: `Not saved: ${detail}. Remove it from the order and tell the host.`, isError: true } };
       }
       await ctx.saveSpec(spec);
+      const withdrawn = await ctx.withdrawStaleQuote(await itemsKey(spec));
       const lines = ["Saved."];
+      if (withdrawn !== null) {
+        lines.push(`Quote #${withdrawn} was withdrawn because the items changed; tell the host a new price will follow, and call request_printer_cost for the new items.`);
+      }
       let waiting = false;
       for (const { r, e } of decided) {
         if (e.status === "approved") lines.push(`Approved by the owner (#${e.id}): ${r}.`);
@@ -263,7 +269,8 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
           result: { content: `Not sent yet: waiting for the owner's approval of ${list}. Tell the host a person is checking.` },
         };
       }
-      const costPln = await ctx.printerCost(await itemsKey(spec));
+      const key = await itemsKey(spec);
+      const costPln = await ctx.printerCost(key);
       if (costPln === null) return blocked("there is no printer cost for the order as it stands; call request_printer_cost");
       const rates = await ctx.rates(currency);
       if (!rates) return blocked("exchange rates are unavailable right now; try again later");
@@ -303,7 +310,7 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         };
       }
       const depositCents = Math.round(depositFor(q, ctx.policy) * 100);
-      const quote = await ctx.issueQuote({ currency, priceCents, depositCents, costPln, plnPerUnit: rates.plnPerUnit, usdPerUnit: rates.usdPerUnit, markup });
+      const quote = await ctx.issueQuote({ currency, priceCents, depositCents, costPln, plnPerUnit: rates.plnPerUnit, usdPerUnit: rates.usdPerUnit, markup, itemsKey: key });
       await ctx.postToHost(`${message}\n\n${quoteText(quote)}`);
       return {
         verdict: "allow", outcome: "done", detail: `quote #${quote.id}`,

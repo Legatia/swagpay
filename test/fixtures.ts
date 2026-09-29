@@ -24,15 +24,15 @@ export async function newOrderRow(now = new Date("2099-10-01T10:00:00Z")) {
 }
 
 /** A quote row straight in D1, for payment tests that don't need the agent. */
-export async function insertQuote(db: D1Database, orderId: number, o: Partial<{ currency: "USD" | "EUR"; priceCents: number; depositCents: number; issuedAt: Date; plnPerUnit: number }> = {}) {
+export async function insertQuote(db: D1Database, orderId: number, o: Partial<{ currency: "USD" | "EUR"; priceCents: number; depositCents: number; issuedAt: Date; plnPerUnit: number; itemsKey: string }> = {}) {
   const issuedAt = o.issuedAt ?? new Date();
   const row = await db
     .prepare(
-      `INSERT INTO quotes (order_id, currency, price_cents, deposit_cents, cost_pln_grosze, pln_per_unit, usd_per_unit, markup, issued_at, valid_until)
-       VALUES (?, ?, ?, ?, 100000, ?, ?, 0.45, ?, ?) RETURNING id`,
+      `INSERT INTO quotes (order_id, currency, price_cents, deposit_cents, cost_pln_grosze, pln_per_unit, usd_per_unit, markup, items_key, issued_at, valid_until)
+       VALUES (?, ?, ?, ?, 100000, ?, ?, 0.45, ?, ?, ?) RETURNING id`,
     )
     .bind(orderId, o.currency ?? "USD", o.priceCents ?? 38000, o.depositCents ?? 25750, o.plnPerUnit ?? 4, o.currency === "EUR" ? 1.075 : 1,
-      issuedAt.toISOString(), new Date(issuedAt.getTime() + 48 * 3_600_000).toISOString())
+      o.itemsKey ?? "test", issuedAt.toISOString(), new Date(issuedAt.getTime() + 48 * 3_600_000).toISOString())
     .first<{ id: number }>();
   return row!.id;
 }

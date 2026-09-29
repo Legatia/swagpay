@@ -8,8 +8,9 @@ import { verifyTurnstile } from "./turnstile";
 import { ratesFor } from "./fx";
 import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
 import { addClaim, createPaymentRequest, getPaymentRequest, listPaymentRequests, type PaymentRequestRow } from "./payments";
+import { EMPTY_SPEC, itemsKey, type OrderSpec } from "./order-spec";
 import { loadPolicy, quoteStillValid } from "./policy";
-import { acceptQuote, expireQuote, getQuote, latestQuote, reopenQuote, type QuoteRow } from "./quotes";
+import { acceptQuote, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -190,6 +191,16 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     if (!quote || quote.order_id !== order.id) return fail(404, "quote not found");
     if (quote.status !== "open") return fail(409, `This quote is ${quote.status}.`);
     if (order.status !== "quoted") return fail(409, "This order already has an accepted quote.");
+    const spec = order.spec_json ? (JSON.parse(order.spec_json) as OrderSpec) : EMPTY_SPEC;
+    if ((await itemsKey(spec)) !== quote.items_key) {
+      await supersedeQuote(env.DB, quote.id);
+      try {
+        await agent.pushEvent(`Quote #${quote.id} no longer matches the order's items; send a new quote.`);
+      } catch (err) {
+        console.error("could not tell the agent about the outdated quote", err);
+      }
+      return fail(409, "The order changed since this quote. The agent will send a new one.");
+    }
     if (!isAddress(env.RECEIVING_ADDRESS)) return fail(503, "Payments are not open yet. Please try again later.");
     const now = new Date();
     const rates = await ratesFor(env.DB, quote.currency, now);

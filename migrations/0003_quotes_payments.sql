@@ -15,6 +15,7 @@ CREATE TABLE quotes (
   pln_per_unit REAL NOT NULL,
   usd_per_unit REAL NOT NULL,
   markup REAL NOT NULL,
+  items_key TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open',
   issued_at TEXT NOT NULL,
   valid_until TEXT NOT NULL,

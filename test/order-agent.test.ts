@@ -2,9 +2,10 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
-import { createOrder, listDecisions } from "../src/db";
+import { createOrder, getOrderById, listDecisions } from "../src/db";
 import { getEscalation, listEscalations } from "../src/escalations";
 import { IntakeSchema } from "../src/intake";
+import { createQuote, getQuote } from "../src/quotes";
 import type { TelegramClient } from "../src/telegram";
 import { completeSpec } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
@@ -344,5 +345,25 @@ describe("OrderAgent", () => {
       expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(120050);
       await expect(agent.setPrinterCost(999_999, 10, null)).rejects.toThrow("not a cost request");
     });
+  });
+
+  it("withdraws an open quote when update_order changes the items", async () => {
+    const { order, stub } = await newAgent();
+    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: "old-items" }, new Date(), 48);
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("quoted");
+    const tee = { kind: "tshirt", description: "Black tee", method: "screen", quantity: 80, colour: "black", sizes: { M: 80 }, printAreas: ["front"] };
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.init(order.id, intake);
+      const model = scriptedModel([
+        msg([toolUse("update_order", { spec: { items: [tee], artwork: [] }, reason: "host wants 80 shirts" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      agent.modelOverride = model;
+      await agent.processTurn();
+      expect(JSON.stringify(model.requests[1].messages.at(-1))).toContain(`Quote #${quote.id} was withdrawn because the items changed`);
+      expect((await agent.getView()).thread.map((t) => t.text)).toContain(`Quote #${quote.id} was withdrawn because the order changed. A new price will follow.`);
+    });
+    expect((await getQuote(env.DB, quote.id))?.status).toBe("superseded");
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("draft");
   });
 });

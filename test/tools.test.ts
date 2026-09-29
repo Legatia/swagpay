@@ -11,7 +11,8 @@ import type { NewQuote, QuoteRow } from "../src/quotes";
 function fakeCtx(files: ArtworkFile[] = []) {
   const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[], costs: new Map<string, number>(),
     rates: { USD: { plnPerUnit: 4, usdPerUnit: 1 }, EUR: { plnPerUnit: 4.3, usdPerUnit: 1.075 } } as Record<string, { plnPerUnit: number; usdPerUnit: number } | null>,
-    quotes: [] as NewQuote[], status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z") };
+    quotes: [] as NewQuote[], status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"),
+    withdrawn: null as number | null, withdrawCalls: [] as string[] };
   const statuses = new Map<string, "open" | "approved" | "rejected">();
   const previews = new Map<string, number>();
   const state2 = { loads: 0 };
@@ -19,6 +20,7 @@ function fakeCtx(files: ArtworkFile[] = []) {
     policy: DEFAULT_POLICY,
     async getSpec() { return structuredClone(state.spec); },
     async saveSpec(s) { state.spec = structuredClone(s); },
+    async withdrawStaleQuote(key) { state.withdrawCalls.push(key); return state.withdrawn; },
     async postToHost(t) { state.posted.push(t); },
     async loadArtwork(id) { state2.loads++; return files.find((f) => f.fileId === id) ?? null; },
     async hasArtwork(id) { return files.some((f) => f.fileId === id); },
@@ -37,7 +39,7 @@ function fakeCtx(files: ArtworkFile[] = []) {
     async issueQuote(q) {
       state.quotes.push(q);
       return { id: state.quotes.length, order_id: 7, currency: q.currency, price_cents: q.priceCents, deposit_cents: q.depositCents,
-        cost_pln_grosze: Math.round(q.costPln * 100), pln_per_unit: q.plnPerUnit, usd_per_unit: q.usdPerUnit, markup: q.markup,
+        cost_pln_grosze: Math.round(q.costPln * 100), pln_per_unit: q.plnPerUnit, usd_per_unit: q.usdPerUnit, markup: q.markup, items_key: q.itemsKey,
         status: "open", issued_at: "2099-10-01T10:00:00.000Z", valid_until: "2099-10-03T10:00:00.000Z", accepted_at: null } as QuoteRow;
     },
     now() { return new Date("2099-10-01T10:00:00Z"); },
@@ -88,6 +90,7 @@ describe("ask_host", () => {
       policy: DEFAULT_POLICY,
       async getSpec() { return structuredClone(state.spec); },
       async saveSpec(s) { state.spec = structuredClone(s); },
+      async withdrawStaleQuote() { return null; },
       async postToHost() { throw new Error("db down"); },
       async loadArtwork() { return null; },
       async hasArtwork() { return false; },
@@ -118,6 +121,18 @@ describe("update_order", () => {
     expect(state.spec.items).toHaveLength(1);
     expect(r.content).toContain("Still missing: printable artwork");
     expect(state.decisions[0]).toMatchObject({ verdict: "allow", outcome: "done" });
+  });
+
+  it("withdraws an open quote for other items and says so", async () => {
+    const { h, state } = fakeCtx();
+    state.withdrawn = 7;
+    const spec = { items: [tee], artwork: [] };
+    const r = await h.update_order({ spec, reason: "host wants different shirts" });
+    expect(r.isError).toBeFalsy();
+    expect(state.withdrawCalls).toEqual([await itemsKey(spec)]);
+    expect(r.content).toContain("Quote #7 was withdrawn because the items changed; tell the host a new price will follow, and call request_printer_cost for the new items.");
+    state.withdrawn = null;
+    expect((await h.update_order({ spec, reason: "notes" })).content).not.toContain("withdrawn");
   });
 
   it("does not save a spec whose sizes don't add up", async () => {
@@ -417,7 +432,7 @@ describe("send_quote", () => {
     const r = await h.send_quote(ask);
     expect(r.isError).toBeFalsy();
     expect(r.content).toBe("Quote #1 sent: 380.00 USD, deposit 257.50 USD.");
-    expect(state.quotes[0]).toMatchObject({ currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1 });
+    expect(state.quotes[0]).toMatchObject({ currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, itemsKey: await itemsKey(completeSpec) });
     expect(state.posted[0]).toMatch(/^Here is your price for the tees and stickers\.\n\nQuote #1: 380\.00 USD for the whole order/);
     expect(state.decisions[0]).toMatchObject({ tool: "send_quote", verdict: "allow", outcome: "done", detail: "quote #1" });
   });

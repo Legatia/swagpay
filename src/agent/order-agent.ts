@@ -6,7 +6,7 @@ import type { Intake } from "../intake";
 import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
 import { priceBand } from "../quote-text";
-import { createQuote } from "../quotes";
+import { createQuote, withdrawStaleQuote } from "../quotes";
 import { SqlR2ConversationStore } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
 import { runTurn, type ConversationStore, type TurnResult } from "./loop";
@@ -293,8 +293,14 @@ export class OrderAgent extends Agent<Env, OrderState> {
         policy,
         getSpec: async () => this.readSpec(),
         saveSpec: async (spec) => {
-          this.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(spec)})`;
+          // D1 refuses once a quote was accepted, so the Durable Object copy never runs ahead of it.
           await saveOrderSpec(this.env.DB, orderId, spec);
+          this.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(spec)})`;
+        },
+        withdrawStaleQuote: async (key) => {
+          const n = await withdrawStaleQuote(this.env.DB, orderId, key);
+          if (n !== null) this.addThread("system", `Quote #${n} was withdrawn because the order changed. A new price will follow.`);
+          return n;
         },
         postToHost: async (text) => { this.addThread("agent", text); },
         loadArtwork: async (fileId): Promise<ArtworkFile | null> => {
