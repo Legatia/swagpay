@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
@@ -33,6 +33,8 @@ describe("OrderAgent", () => {
       const first = model.requests[0].messages[0];
       expect(first.role).toBe("user");
       expect(JSON.stringify(first.content)).toContain("<event>New order");
+      expect(JSON.stringify(first.content)).toContain('Event name (from the host): \\"Builders meetup\\"');
+      expect(JSON.stringify(first.content)).toContain('Host\'s first name (from the host): \\"Ana\\"');
       expect(JSON.stringify(first.content)).toContain("<host_message>60 black tees");
       const view = await agent.getView();
       expect(view.thread.map((t) => [t.from, t.text])).toEqual([
@@ -43,6 +45,23 @@ describe("OrderAgent", () => {
     });
     const decisions = await listDecisions(env.DB, order.id);
     expect(decisions.map((d) => d.tool)).toEqual(["ask_host"]);
+  });
+
+  it("runs the queued turn from the Durable Object alarm", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.modelOverride = scriptedModel([
+        msg([toolUse("ask_host", { message: "Which sizes do you need?", reason: "size split missing" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      await agent.init(order.id, intake);
+      await agent.queue("processTurn", null, { id: "turn" });
+    });
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const view = await agent.getView();
+      expect(view.thread.map((t) => t.text)).toContain("Which sizes do you need?");
+    });
   });
 
   it("returns null when there is nothing new", async () => {

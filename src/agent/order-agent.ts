@@ -63,6 +63,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.sql`CREATE TABLE IF NOT EXISTS conversation (id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS thread (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, text TEXT NOT NULL, at TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS artwork (file_id TEXT PRIMARY KEY, name TEXT NOT NULL, media_type TEXT NOT NULL, size INTEGER NOT NULL, r2_key TEXT NOT NULL, at TEXT NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS previews (file_id TEXT PRIMARY KEY, bytes INTEGER NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS spec (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
     this.tablesReady = true;
@@ -108,7 +109,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(EMPTY_SPEC)})`;
     this.addInbox({
       kind: "event",
-      text: `New order. Event: ${intake.eventName} on ${intake.eventDate}. Deliver to: ${intake.deliveryPlace}, by ${intake.deliverBy} Warsaw time. Host's first name: ${intake.contactName.split(" ")[0]}.`,
+      text: `New order. Event name (from the host): ${JSON.stringify(intake.eventName)}. Event date (from the host): ${JSON.stringify(intake.eventDate)}. Deliver to (from the host): ${JSON.stringify(intake.deliveryPlace)}. Deliver by (from the host, Warsaw time): ${JSON.stringify(intake.deliverBy)}. Host's first name (from the host): ${JSON.stringify(intake.contactName.split(" ")[0])}.`,
     });
     this.addInbox({ kind: "host", text: intake.request });
     this.addThread("host", intake.request);
@@ -131,7 +132,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.ensureTables();
     this.orderId();
     this.sql`INSERT INTO artwork (file_id, name, media_type, size, r2_key, at) VALUES (${meta.fileId}, ${meta.name}, ${meta.mediaType}, ${meta.size}, ${meta.key}, ${meta.at})`;
-    this.addInbox({ kind: "event", text: `Artwork uploaded. fileId: ${meta.fileId}, name: ${meta.name}, type: ${meta.mediaType}, size: ${meta.size} bytes.` });
+    this.addInbox({ kind: "event", text: `Artwork uploaded. fileId: ${meta.fileId}. File name (from the host): ${JSON.stringify(meta.name)}. Type: ${meta.mediaType}. Size: ${meta.size} bytes.` });
     this.addThread("system", `File uploaded: ${meta.name}`);
     await this.trigger();
   }
@@ -217,6 +218,10 @@ export class OrderAgent extends Agent<Env, OrderState> {
           if (!obj) return null;
           return { fileId, name: row.name, mediaType: row.media_type, bytes: new Uint8Array(await obj.arrayBuffer()) };
         },
+        hasArtwork: async (fileId) => this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM artwork WHERE file_id = ${fileId}`[0].n > 0,
+        previewedBytes: async () => this.sql<{ n: number }>`SELECT COALESCE(SUM(bytes), 0) AS n FROM previews`[0].n,
+        wasPreviewed: async (fileId) => this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM previews WHERE file_id = ${fileId}`[0].n > 0,
+        recordPreview: async (fileId, bytes) => { this.sql`INSERT OR REPLACE INTO previews (file_id, bytes) VALUES (${fileId}, ${bytes})`; },
         logDecision: (d) => log({ orderId, ...d }),
       });
     } catch (err) {
@@ -275,8 +280,8 @@ export class OrderAgent extends Agent<Env, OrderState> {
       }
       return null;
     } finally {
-      this.setMeta("turn_pending", "0");
       this.turnRunning = false;
+      this.setMeta("turn_pending", "0");
       if (this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM inbox`[0].n > 0) await this.trigger();
     }
   }

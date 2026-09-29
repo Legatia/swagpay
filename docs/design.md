@@ -28,7 +28,6 @@ reasons, payments are detected on Arc without a human, and the code is in a publ
 
 ## Out of scope
 
-- REGI in any form, and anything to do with Registrai's markets.
 - Printing APIs (Gelato, Printful) and browser automation of printer websites.
 - Currencies other than USDC and EURC (partner stablecoins such as GBPA and JPYC come later).
 - Paying printers in crypto, and automated USDC-to-złoty conversion (the owner's card pays).

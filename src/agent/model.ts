@@ -22,6 +22,7 @@ export function createAnthropicModel(env: { ANTHROPIC_API_KEY: string; MODEL: st
       client.beta.messages.create({
         model: env.MODEL,
         max_tokens: 16000,
+        cache_control: { type: "ephemeral" },
         system: [{ type: "text", text: req.system, cache_control: { type: "ephemeral" } }],
         tools: req.tools,
         messages: req.messages,
