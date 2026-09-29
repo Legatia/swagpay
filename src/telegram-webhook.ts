@@ -13,6 +13,7 @@ export const HELP = [
   "/open — open escalations",
   "/approve <id> [note]",
   "/reject <id> [note]",
+  "/resend <id> — re-send a decision the agent missed",
   "/order <number> — order status",
 ].join("\n");
 
@@ -37,11 +38,30 @@ export async function decide(env: Env, id: number, status: "approved" | "rejecte
       await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, status, note);
     } catch (err) {
       console.error("ownerDecision failed", err);
-      return `#${id} ${status}, but the agent could not be told: ${err instanceof Error ? err.message : String(err)}`;
+      return `#${id} ${status}, but the agent could not be told (${err instanceof Error ? err.message : String(err)}). Send /resend ${id} to retry.`;
     }
   }
   return `#${id} ${status}.`;
 }
+
+/** Re-sends an already decided escalation to its order's agent (after "the agent could not be told"). */
+export async function resend(env: Env, id: number): Promise<string> {
+  const row = await getEscalation(env.DB, id);
+  if (!row) return `#${id} doesn't exist.`;
+  if (row.status === "open") return `#${id} is still open.`;
+  const order = row.order_id === null ? null : await getOrderById(env.DB, row.order_id);
+  if (!order) return `#${id} has no order to tell.`;
+  try {
+    const agent = await getAgentByName(env.OrderAgent, order.instance);
+    await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, row.status, row.decision_note);
+  } catch (err) {
+    console.error("resend failed", err);
+    return `#${id}: the agent could not be told: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  return `#${id} re-sent to the agent (${row.status}).`;
+}
+
+const parseId = (arg: string | undefined): number | null => (arg !== undefined && /^\d{1,9}$/.test(arg) ? Number(arg) : null);
 
 async function openList(env: Env): Promise<string> {
   const open = await listEscalations(env.DB, { status: "open", limit: 20 });
@@ -89,7 +109,15 @@ export async function handleTelegram(request: Request, env: Env, deps: { telegra
   const cb = update.callback_query;
   if (cb?.data) {
     const m = /^esc:(\d+):(approve|reject)$/.exec(cb.data);
-    const text = m ? await decide(env, Number(m[1]), m[2] === "approve" ? "approved" : "rejected", null) : "Unknown button.";
+    let text = "Unknown button.";
+    if (m) {
+      try {
+        text = await decide(env, Number(m[1]), m[2] === "approve" ? "approved" : "rejected", null);
+      } catch (err) {
+        console.error("telegram button failed", err);
+        text = "Something went wrong; try /approve or /reject.";
+      }
+    }
     if (cb.id) {
       try {
         await telegram.answerCallback(cb.id, text);
@@ -110,15 +138,20 @@ export async function handleTelegram(request: Request, env: Env, deps: { telegra
       break;
     case "/approve":
     case "/reject": {
-      const id = Number(arg);
-      await reply(Number.isInteger(id) && id > 0
+      const id = parseId(arg);
+      await reply(id !== null && id > 0
         ? await decide(env, id, command === "/approve" ? "approved" : "rejected", note)
         : `Usage: ${command} <id> [note]`);
       break;
     }
+    case "/resend": {
+      const id = parseId(arg);
+      await reply(id !== null && id > 0 ? await resend(env, id) : "Usage: /resend <id>");
+      break;
+    }
     case "/order": {
-      const n = Number(arg);
-      await reply(Number.isInteger(n) && n > 0 ? await orderStatus(env, n) : "Usage: /order <number>");
+      const n = parseId(arg);
+      await reply(n !== null && n > 0 ? await orderStatus(env, n) : "Usage: /order <number>");
       break;
     }
     default:

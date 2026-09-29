@@ -79,6 +79,22 @@ describe("Telegram webhook", () => {
     expect(t.sent[1]).toBe(`#${e.id} is already approved.`);
   });
 
+  it("re-sends a decision, and refuses strict-id violations", async () => {
+    const { stub, e } = await orderWithEscalation();
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/resend ${e.id}`)), env, t);
+    expect(t.sent[0]).toBe(`#${e.id} is still open.`);
+    await handleTelegram(update(fromOwner(`/approve ${e.id}`)), env, t);
+    await handleTelegram(update(fromOwner(`/resend ${e.id}`)), env, t);
+    expect(t.sent[2]).toBe(`#${e.id} re-sent to the agent (approved).`);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
+      expect(inbox.split(`Owner decision on escalation #${e.id}`).length - 1).toBe(2);
+    });
+    await handleTelegram(update(fromOwner("/approve 1e2")), env, t);
+    expect(t.sent[3]).toBe("Usage: /approve <id> [note]");
+  });
+
   it("handles the Reject button", async () => {
     const { e } = await orderWithEscalation();
     const t = fakeTelegram();
