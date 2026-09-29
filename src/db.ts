@@ -98,7 +98,12 @@ export async function listDecisions(db: D1Database, orderId: number): Promise<De
 
 export async function deleteOrder(db: D1Database, id: number): Promise<void> {
   await db.batch([
+    db.prepare("DELETE FROM escalations WHERE order_id = ?").bind(id),
     db.prepare("DELETE FROM decisions WHERE order_id = ?").bind(id),
     db.prepare("DELETE FROM orders WHERE id = ?").bind(id),
   ]);
+}
+
+export async function listRecentOrders(db: D1Database, limit: number): Promise<OrderRow[]> {
+  return (await db.prepare(`SELECT ${ORDER_COLUMNS} FROM orders ORDER BY id DESC LIMIT ?`).bind(limit).all<OrderRow>()).results;
 }
