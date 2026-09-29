@@ -182,7 +182,7 @@ describe("runWatcher", () => {
   it("fails closed on bad treasury config before any side effect", async () => {
     const { order, stub, req } = await pendingDeposit(9494);
     await setLastBlock(4300);
-    const bad = ({ ...env, TREASURY_DAILY_USDC: "1,500" }) as Env;
+    const bad = ({ ...env, TREASURY_DAILY_USDC: "1,500" as string }) as unknown as Env;
     const log = usdcLog(4305, req.amount_units, 9494);
     await runWatcher(bad, { rpc: fakeRpc(4340, [log]).rpc, telegram: silent });
     await runWatcher(bad, { rpc: fakeRpc(4340).rpc, telegram: silent });
