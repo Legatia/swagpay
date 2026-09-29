@@ -34,6 +34,17 @@ describe("store", () => {
     expect(s.redo()).toBe(true);
     expect(s.get().n).toBe(2);
   });
+  it("keeps the listed keys when undoing and redoing", () => {
+    const s = createStore({ initial: { n: 0, step: "design", sizes: {} }, keep: ["step", "sizes"] });
+    s.set({ n: 1 });
+    s.set({ step: "details", sizes: { M: "20" } }, { record: false });
+    s.set({ step: "design" }, { record: false });
+    expect(s.undo()).toBe(true);
+    expect(s.get()).toEqual({ n: 0, step: "design", sizes: { M: "20" } });
+    s.set({ step: "review", sizes: { M: "30" } }, { record: false });
+    expect(s.redo()).toBe(true);
+    expect(s.get()).toEqual({ n: 1, step: "review", sizes: { M: "30" } });
+  });
   it("treats a gesture as one undo step through checkpoint", () => {
     const s = createStore({ initial: { x: 0 } });
     s.checkpoint();

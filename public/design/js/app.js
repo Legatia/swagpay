@@ -76,7 +76,7 @@ function dropUnsavedImages(draft) {
 const { storage, writable: storageWritable } = probeStorage();
 const loaded = dropUnsavedImages(loadDraft(storage));
 const draft = loaded.draft;
-export const store = createStore({ initial: draft ? { ...initial, ...draft } : initial, storage });
+export const store = createStore({ initial: draft ? { ...initial, ...draft } : initial, storage, keep: ["step", "sizes", "quantity", "currency"] });
 
 export function area() {
   const s = store.get();
@@ -146,7 +146,7 @@ export function pickProduct(key) {
       cutPathD: keep ? s.cutPathD : null,
       step: "design",
     },
-    { record: false },
+    { record: s.product !== null && s.product !== key },
   );
 }
 
@@ -296,6 +296,7 @@ function init() {
   $("redo").addEventListener("click", () => store.redo());
   document.addEventListener("keydown", (e) => {
     if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z" || e.target.closest?.("input, textarea, select")) return;
+    if (store.get().step !== "design") return;
     e.preventDefault();
     if (e.shiftKey) store.redo();
     else store.undo();

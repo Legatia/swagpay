@@ -11,7 +11,7 @@ export function loadDraft(storage, key = DRAFT_KEY) {
   }
 }
 
-export function createStore({ initial, storage = null, key = DRAFT_KEY, limit = 50 }) {
+export function createStore({ initial, storage = null, key = DRAFT_KEY, limit = 50, keep = [] }) {
   let state = initial;
   const past = [];
   const future = [];
@@ -31,6 +31,13 @@ export function createStore({ initial, storage = null, key = DRAFT_KEY, limit = 
         problem = "all";
       }
     }
+  }
+
+  // Undo and redo restore the design but leave these keys as they are now (step, details).
+  function kept() {
+    const out = {};
+    for (const k of keep) if (k in state) out[k] = state[k];
+    return out;
   }
 
   function remember() {
@@ -57,7 +64,7 @@ export function createStore({ initial, storage = null, key = DRAFT_KEY, limit = 
     undo() {
       if (!past.length) return false;
       future.push(state);
-      state = past.pop();
+      state = { ...past.pop(), ...kept() };
       save();
       emit();
       return true;
@@ -65,7 +72,7 @@ export function createStore({ initial, storage = null, key = DRAFT_KEY, limit = 
     redo() {
       if (!future.length) return false;
       past.push(state);
-      state = future.pop();
+      state = { ...future.pop(), ...kept() };
       save();
       emit();
       return true;
