@@ -37,6 +37,10 @@ describe("public log and metrics", () => {
     expect(redactReason("pay the 257.50 USDC printer cost")).toBe("pay the [amount] printer cost");
     expect(redactReason("257.500000 USDC")).toBe("[amount]");
     expect(redactReason("1,000.50 USDC in")).toBe("[amount] in");
+    expect(redactReason("USDC 257.50")).toBe("[amount]");
+    expect(redactReason("€12")).toBe("[amount]");
+    expect(redactReason("a $1,000.50 fee, EUR 12 and usd9")).toBe("a [amount] fee, [amount] and [amount]");
+    expect(redactReason(`USD 0x${"1".repeat(40)}`)).toBe("USD [address]");
     expect(redactReason("cost 1000,50 PLN, or 1000 zł, or 380 usd and 12EURC; sweep 20% of it")).toBe("cost [amount], or [amount], or [amount] and [amount]; sweep 20% of it");
     expect(redactReason("Order 12 is paid")).toBe("Order 12 is paid");
     for (const keep of ["2026-10-08", "1500.000000", "USDC only", "20 USDCx"]) expect(redactReason(keep)).toBe(keep);
