@@ -7,7 +7,8 @@ import { getEscalation, listEscalations } from "../src/escalations";
 import { IntakeSchema } from "../src/intake";
 import { createQuote, getQuote } from "../src/quotes";
 import type { TelegramClient } from "../src/telegram";
-import { completeSpec } from "./fixtures";
+import { createPaymentRequest } from "../src/payments";
+import { completeSpec, insertQuote } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
 const intake = IntakeSchema.parse({
@@ -374,5 +375,35 @@ describe("OrderAgent", () => {
     });
     expect((await getQuote(env.DB, quote.id))?.status).toBe("superseded");
     expect((await getOrderById(env.DB, order.id))?.status).toBe("draft");
+  });
+
+  it("reminds about an open quote and an unpaid request, and stays quiet otherwise", async () => {
+    const { order, stub } = await newAgent();
+    const quoteId = await insertQuote(env.DB, order.id);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.init(order.id, intake);
+      agent.sql`DELETE FROM inbox`;
+      await agent.remind({ kind: "quote", id: quoteId });
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`[0].text).toContain(`Reminder: quote #${quoteId} expires`);
+      agent.sql`DELETE FROM inbox`;
+      await env.DB.prepare("UPDATE quotes SET status = 'accepted' WHERE id = ?").bind(quoteId).run();
+      await agent.remind({ kind: "quote", id: quoteId });
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM inbox`[0].n).toBe(0);
+      const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents: 25750, dueBy: new Date(Date.now() + 86_400_000) });
+      await agent.remind({ kind: "payment", id: req.id });
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`[0].text).toContain(`Reminder: deposit request #${req.id}`);
+    });
+  });
+
+  it("schedules reminders in the future only", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.init(order.id, intake);
+      await agent.remindLater(new Date(Date.now() - 1000).toISOString(), { kind: "quote", id: 1 });
+      expect((await agent.listSchedules()).filter((s) => s.callback === "remind")).toHaveLength(0);
+      await agent.remindLater(new Date(Date.now() + 3_600_000).toISOString(), { kind: "quote", id: 1 });
+      await agent.remindLater(new Date(Date.now() + 3_600_000).toISOString(), { kind: "quote", id: 1 });
+      expect((await agent.listSchedules()).filter((s) => s.callback === "remind")).toHaveLength(1);
+    });
   });
 });

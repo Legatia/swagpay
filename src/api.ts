@@ -255,6 +255,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
         `The host accepted quote #${quote.id}. Deposit request #${payment.id}: ${amount} on Arc. Payments arrive as events.`,
         `Quote #${quote.id} accepted. Deposit due: ${amount}.`,
       );
+      await agent.remindLater(new Date(Date.parse(payment.due_by) - 12 * 3_600_000).toISOString(), { kind: "payment", id: payment.id });
     } catch (err) {
       console.error("acceptance committed but follow-up failed", err);
     }

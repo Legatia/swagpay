@@ -132,6 +132,7 @@ export async function markPrinted(env: Env, n: number, now: Date = new Date()): 
     `The owner reports the job is printed. Balance request #${request.id}: ${amount} on Arc, due by ${warsawTime(new Date(request.due_by))} (Warsaw time). Tell the host the balance is on the order page.`,
     `Printing done. Balance due: ${amount}.`,
   );
+  await agent.remindLater(new Date(Date.parse(request.due_by) - 12 * 3_600_000).toISOString(), { kind: "payment", id: request.id });
   return `Order ${n}: printed; balance request #${request.id} for ${amount} is on the order page.`;
 }
 

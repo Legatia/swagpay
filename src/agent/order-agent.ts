@@ -6,8 +6,10 @@ import type { Intake } from "../intake";
 import { designSummary, type DesignSpec, type FileRole } from "../design-spec";
 import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
-import { priceBand } from "../quote-text";
-import { createQuote, withdrawStaleQuote } from "../quotes";
+import { formatUnits } from "../money";
+import { getPaymentRequest } from "../payments";
+import { priceBand, warsawTime } from "../quote-text";
+import { createQuote, getQuote, withdrawStaleQuote } from "../quotes";
 import { SqlR2ConversationStore, repairDanglingToolUse } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
 import { runTurn, type ConversationStore, type TurnResult } from "./loop";
@@ -57,6 +59,8 @@ export interface OrderView {
   artwork: ArtworkMeta[];
   busy: boolean;
 }
+
+export type Reminder = { kind: "quote" | "payment"; id: number };
 
 export class OrderAgent extends Agent<Env, OrderState> {
   initialState: OrderState = { orderId: null };
@@ -111,6 +115,32 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.orderId();
     this.addInbox({ kind: "event", text });
     if (threadNote) this.addThread("system", threadNote);
+    await this.trigger();
+  }
+
+  /** Swagpay asks this order to remind the host later; past times are ignored and repeats deduped. */
+  async remindLater(at: string, reminder: Reminder): Promise<void> {
+    this.ensureTables();
+    this.orderId();
+    const when = new Date(at);
+    if (!(when.getTime() > Date.now())) return;
+    await this.schedule(when, "remind", reminder, { idempotent: true });
+  }
+
+  /** Schedule callback: nudge the agent only while the quote is open or the request unpaid. */
+  async remind(reminder: Reminder): Promise<void> {
+    this.ensureTables();
+    this.orderId();
+    let text: string | null = null;
+    if (reminder.kind === "quote") {
+      const q = await getQuote(this.env.DB, reminder.id);
+      if (q && q.status === "open") text = `Reminder: quote #${q.id} expires at ${warsawTime(new Date(q.valid_until))} (Warsaw time) and hasn't been accepted. Send the host one short reminder unless you already reminded them today.`;
+    } else {
+      const r = await getPaymentRequest(this.env.DB, reminder.id);
+      if (r && r.status === "open") text = `Reminder: ${r.stage} request #${r.id} still has ${formatUnits(r.amount_units - r.paid_units)} ${r.token} due by ${warsawTime(new Date(r.due_by))} (Warsaw time). Send the host one short reminder unless you already reminded them today.`;
+    }
+    if (!text) return;
+    this.addInbox({ kind: "event", text });
     await this.trigger();
   }
 
@@ -328,7 +358,11 @@ export class OrderAgent extends Agent<Env, OrderState> {
           }
           return ratesFor(this.env.DB, currency, new Date());
         },
-        issueQuote: (q, validUntil) => createQuote(this.env.DB, orderId, q, new Date(), validUntil),
+        issueQuote: async (q, validUntil) => {
+          const quote = await createQuote(this.env.DB, orderId, q, new Date(), validUntil);
+          await this.remindLater(new Date(Date.parse(quote.valid_until) - 12 * 3_600_000).toISOString(), { kind: "quote", id: quote.id });
+          return quote;
+        },
         now: () => new Date(),
       });
     } catch (err) {
