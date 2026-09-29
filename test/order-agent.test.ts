@@ -142,4 +142,85 @@ describe("OrderAgent", () => {
       expect(JSON.stringify(sent[i + 2].content)).toContain("<host_message>60 black tees");
     });
   });
+
+  it("ignores an overlapping turn and keeps one tool_result per tool_use", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      let first = true;
+      const base = scriptedModel([
+        msg([toolUse("ask_host", { message: "Sizes?", reason: "sizes missing" }, "t1")], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      agent.modelOverride = { async create(req) { if (first) { first = false; await gate; } return base.create(req); } };
+      await agent.init(order.id, intake);
+      const p1 = agent.processTurn();
+      expect(await agent.processTurn()).toBeNull();
+      expect((await agent.getView()).busy).toBe(true);
+      release();
+      await p1;
+      expect((await agent.getView()).busy).toBe(false);
+      const rows = agent.sql<{ message: string }>`SELECT message FROM conversation ORDER BY id`.map((r) => JSON.parse(r.message));
+      const uses = rows.flatMap((m) => (m.role === "assistant" ? m.content : [])).filter((b: { type: string }) => b.type === "tool_use");
+      const results = rows.flatMap((m) => (m.role === "user" && Array.isArray(m.content) ? m.content : [])).filter((b: { type: string }) => b.type === "tool_result");
+      expect(uses).toHaveLength(1);
+      expect(results).toHaveLength(1);
+    });
+  });
+
+  it("resumes a turn that was cut off after the inbox was drained", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.modelOverride = { async create() { throw new Error("boom"); } };
+      await agent.init(order.id, intake);
+      expect(await agent.processTurn()).toBeNull();
+      agent.sql`INSERT OR REPLACE INTO meta (key, value) VALUES ('turn_pending', '1')`;
+      const model = scriptedModel([msg([], "end_turn")]);
+      agent.modelOverride = model;
+      expect(await agent.processTurn()).not.toBeNull();
+      const last = model.requests[0].messages.at(-1)!;
+      expect(last.role).toBe("user");
+      expect(JSON.stringify(last.content)).toContain("<host_message>60 black tees");
+      expect(model.requests[0].messages).toHaveLength(1);
+      expect(agent.sql<{ value: string }>`SELECT value FROM meta WHERE key = 'turn_pending'`[0].value).toBe("0");
+    });
+  });
+
+  it("counts every model call and stops exactly at the budget", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.init(order.id, intake);
+      agent.sql`INSERT OR REPLACE INTO meta (key, value) VALUES ('model_calls', '79')`;
+      const model = scriptedModel([
+        msg([toolUse("ask_host", { message: "Sizes?", reason: "sizes missing" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      agent.modelOverride = model;
+      await agent.processTurn();
+      expect(model.requests).toHaveLength(1);
+      expect(agent.sql<{ value: string }>`SELECT value FROM meta WHERE key = 'model_calls'`[0].value).toBe("80");
+      expect((await agent.getView()).thread.at(-1)).toMatchObject({ from: "system", text: expect.stringContaining("limit") });
+    });
+    const decisions = await listDecisions(env.DB, order.id);
+    expect(decisions.some((d) => d.reason === "per-order model call budget spent")).toBe(true);
+  });
+
+  it("keeps the inbox when the policy fails to load", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.init(order.id, intake);
+      const proto = agent as unknown as { loadTurnPolicy: () => unknown };
+      const original = proto.loadTurnPolicy;
+      proto.loadTurnPolicy = () => { throw new Error("bad POLICY_FX_BUFFER"); };
+      expect(await agent.processTurn()).toBeNull();
+      proto.loadTurnPolicy = original;
+      const model = scriptedModel([msg([], "end_turn")]);
+      agent.modelOverride = model;
+      await agent.processTurn();
+      expect(JSON.stringify(model.requests[0].messages)).toContain("60 black tees");
+    });
+    const decisions = await listDecisions(env.DB, order.id);
+    expect(decisions.at(-1)).toMatchObject({ tool: "agent_run", reason: "policy configuration invalid", outcome: "error" });
+  });
 });

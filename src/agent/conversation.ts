@@ -14,14 +14,21 @@ async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Walks any JSON value and rewrites every { type: "base64", data } source with `fn`. */
+/** Rewrites the base64 `source` of image and document blocks only; model-written inputs are never touched. */
 async function mapBase64Sources(value: unknown, fn: (data: string) => Promise<string>): Promise<unknown> {
   if (Array.isArray(value)) return Promise.all(value.map((v) => mapBase64Sources(v, fn)));
   if (value && typeof value === "object") {
     const obj = value as Record<string, unknown>;
+    const isMedia = obj.type === "image" || obj.type === "document";
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj)) out[k] = await mapBase64Sources(v, fn);
-    if (obj.type === "base64" && typeof obj.data === "string") out.data = await fn(obj.data);
+    for (const [k, v] of Object.entries(obj)) {
+      const src = v as Record<string, unknown> | null;
+      if (isMedia && k === "source" && src && typeof src === "object" && src.type === "base64" && typeof src.data === "string") {
+        out[k] = { ...src, data: await fn(src.data) };
+      } else {
+        out[k] = await mapBase64Sources(v, fn);
+      }
+    }
     return out;
   }
   return value;
@@ -36,7 +43,7 @@ export class SqlR2ConversationStore implements ConversationStore {
     return Promise.all(
       rows.map(async (r) =>
         (await mapBase64Sources(JSON.parse(r.message), async (data) => {
-          if (!data.startsWith(BLOB_MARK)) return data;
+          if (!data.startsWith(BLOB_MARK + this.prefix)) return data;
           const obj = await this.bucket.get(data.slice(BLOB_MARK.length));
           if (!obj) throw new Error(`conversation blob missing: ${data}`);
           return obj.text();

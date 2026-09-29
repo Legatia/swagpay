@@ -15,6 +15,12 @@ export const MAX_MODEL_CALLS = 80;
 export const MAX_TOOL_CALLS_PER_TURN = 12;
 export const MAX_MESSAGE_CHARS = 4000;
 
+class BudgetExhaustedError extends Error {
+  constructor(readonly calls: number) {
+    super("per-order model call budget spent");
+  }
+}
+
 export interface OrderState {
   orderId: number | null;
 }
@@ -49,6 +55,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
   /** Tests set this to a scripted model; production uses Claude. */
   modelOverride: ModelClient | null = null;
   private tablesReady = false;
+  private turnRunning = false;
 
   private ensureTables(): void {
     if (this.tablesReady) return;
@@ -140,7 +147,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
         .map((r) => ({ id: r.id, from: r.sender, text: r.text, at: r.at })),
       artwork: this.sql<{ file_id: string; name: string; media_type: string; size: number; r2_key: string; at: string }>`SELECT * FROM artwork ORDER BY at`
         .map((r) => ({ fileId: r.file_id, name: r.name, mediaType: r.media_type, size: r.size, key: r.r2_key, at: r.at })),
-      busy: this.meta("busy") === "1",
+      busy: this.turnRunning,
     };
   }
 
@@ -165,56 +172,90 @@ export class OrderAgent extends Agent<Env, OrderState> {
     });
   }
 
+  /** Tests override this to simulate a bad policy configuration. */
+  protected loadTurnPolicy(): ReturnType<typeof loadPolicy> {
+    return loadPolicy(this.env as unknown as Record<string, unknown>);
+  }
+
   async processTurn(): Promise<TurnResult | null> {
+    if (this.turnRunning) return null;
     this.ensureTables();
     const orderId = this.orderId();
     const pending = this.sql<{ id: number; kind: InboxItem["kind"]; text: string }>`SELECT id, kind, text FROM inbox ORDER BY id`;
-    if (pending.length === 0) return null;
+    const resume = this.meta("turn_pending") === "1";
+    if (pending.length === 0 && !resume) return null;
 
     const log = (d: Parameters<typeof insertDecision>[1]) => insertDecision(this.env.DB, d);
-    const calls = Number(this.meta("model_calls") ?? "0");
-    if (calls >= MAX_MODEL_CALLS) {
+    const budgetSpent = async (calls: number) => {
       this.addThread("system", "This order has reached the agent's limit. The owner will continue it personally.");
       await log({ orderId, tool: "agent_run", reason: "per-order model call budget spent", input: { calls }, verdict: "none", outcome: "error" });
-      this.sql`DELETE FROM inbox WHERE id <= ${pending.at(-1)!.id}`;
+    };
+    const calls = Number(this.meta("model_calls") ?? "0");
+    if (calls >= MAX_MODEL_CALLS) {
+      await budgetSpent(calls);
+      if (pending.length > 0) this.sql`DELETE FROM inbox WHERE id <= ${pending.at(-1)!.id}`;
+      this.setMeta("turn_pending", "0");
       return null;
     }
 
-    const store = new SqlR2ConversationStore(this.sql.bind(this), this.env.ARTWORK, `conv/${this.name}/`);
-    await this.repairDanglingToolUse(store);
-    // Move the inbox into the conversation as one user message, then clear it.
-    await store.append({ role: "user", content: formatInbox(pending.map((p) => ({ kind: p.kind, text: p.text }))) });
-    this.sql`DELETE FROM inbox WHERE id <= ${pending.at(-1)!.id}`;
-
-    const handlers = makeHandlers({
-      policy: loadPolicy(this.env as unknown as Record<string, unknown>),
-      getSpec: async () => this.readSpec(),
-      saveSpec: async (spec) => {
-        this.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(spec)})`;
-        await saveOrderSpec(this.env.DB, orderId, spec);
-      },
-      postToHost: async (text) => { this.addThread("agent", text); },
-      loadArtwork: async (fileId): Promise<ArtworkFile | null> => {
-        const row = this.sql<{ name: string; media_type: string; r2_key: string }>`SELECT name, media_type, r2_key FROM artwork WHERE file_id = ${fileId}`[0];
-        if (!row) return null;
-        const obj = await this.env.ARTWORK.get(row.r2_key);
-        if (!obj) return null;
-        return { fileId, name: row.name, mediaType: row.media_type, bytes: new Uint8Array(await obj.arrayBuffer()) };
-      },
-      logDecision: (d) => log({ orderId, ...d }),
-    });
-
-    this.setMeta("busy", "1");
+    // Build the policy and handlers before draining, so a bad config loses nothing.
+    let handlers: ReturnType<typeof makeHandlers>;
     try {
+      const policy = this.loadTurnPolicy();
+      handlers = makeHandlers({
+        policy,
+        getSpec: async () => this.readSpec(),
+        saveSpec: async (spec) => {
+          this.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(spec)})`;
+          await saveOrderSpec(this.env.DB, orderId, spec);
+        },
+        postToHost: async (text) => { this.addThread("agent", text); },
+        loadArtwork: async (fileId): Promise<ArtworkFile | null> => {
+          const row = this.sql<{ name: string; media_type: string; r2_key: string }>`SELECT name, media_type, r2_key FROM artwork WHERE file_id = ${fileId}`[0];
+          if (!row) return null;
+          const obj = await this.env.ARTWORK.get(row.r2_key);
+          if (!obj) return null;
+          return { fileId, name: row.name, mediaType: row.media_type, bytes: new Uint8Array(await obj.arrayBuffer()) };
+        },
+        logDecision: (d) => log({ orderId, ...d }),
+      });
+    } catch (err) {
+      this.addThread("system", "Something went wrong on our side. Your message is saved and the agent will pick it up.");
+      await log({
+        orderId, tool: "agent_run", reason: "policy configuration invalid", verdict: "none", outcome: "error",
+        input: null, detail: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+
+    this.turnRunning = true;
+    try {
+      const store = new SqlR2ConversationStore(this.sql.bind(this), this.env.ARTWORK, `conv/${this.name}/`);
+      await this.repairDanglingToolUse(store);
+      if (pending.length > 0) {
+        // Move the inbox into the conversation as one user message, then clear it.
+        await store.append({ role: "user", content: formatInbox(pending.map((p) => ({ kind: p.kind, text: p.text }))) });
+        this.sql`DELETE FROM inbox WHERE id <= ${pending.at(-1)!.id}`;
+        this.setMeta("turn_pending", "1");
+      }
+
+      const real = this.modelOverride ?? createAnthropicModel(this.env);
+      const model: ModelClient = {
+        create: async (req) => {
+          const n = Number(this.meta("model_calls") ?? "0");
+          if (n >= MAX_MODEL_CALLS) throw new BudgetExhaustedError(n);
+          this.setMeta("model_calls", String(n + 1));
+          return real.create(req);
+        },
+      };
       const result = await runTurn({
-        model: this.modelOverride ?? createAnthropicModel(this.env),
+        model,
         system: SYSTEM_PROMPT,
         tools: TOOL_DEFINITIONS,
         handlers,
         store,
         maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
       });
-      this.setMeta("model_calls", String(calls + result.modelCalls));
       if (result.status === "refused") {
         this.addThread("system", "The agent could not handle the last message. The owner will follow up.");
         await log({ orderId, tool: "agent_run", reason: "model declined the request", input: null, verdict: "none", outcome: "error" });
@@ -223,15 +264,20 @@ export class OrderAgent extends Agent<Env, OrderState> {
       }
       return result;
     } catch (err) {
-      this.setMeta("model_calls", String(calls + 1));
-      this.addThread("system", "Something went wrong on our side. Your message is saved and the agent will pick it up.");
-      await log({
-        orderId, tool: "agent_run", reason: "model call failed", input: null, verdict: "none", outcome: "error",
-        detail: err instanceof Error ? err.message : String(err),
-      });
+      if (err instanceof BudgetExhaustedError) {
+        await budgetSpent(err.calls);
+      } else {
+        this.addThread("system", "Something went wrong on our side. Your message is saved and the agent will pick it up.");
+        await log({
+          orderId, tool: "agent_run", reason: "model call failed", input: null, verdict: "none", outcome: "error",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
       return null;
     } finally {
-      this.setMeta("busy", "0");
+      this.setMeta("turn_pending", "0");
+      this.turnRunning = false;
+      if (this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM inbox`[0].n > 0) await this.trigger();
     }
   }
 }

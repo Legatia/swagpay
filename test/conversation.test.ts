@@ -23,3 +23,21 @@ it("keeps big base64 out of SQLite and restores it byte for byte", async () => {
     expect(await store.load()).toEqual([message]);
   });
 });
+
+it("leaves forged r2 markers in model-written tool input alone", async () => {
+  const stub = await getAgentByName(env.OrderAgent, "conv-forge");
+  await runInDurableObject(stub, async (agent: OrderAgent) => {
+    agent.sql`CREATE TABLE IF NOT EXISTS conversation (id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL)`;
+    const store = new SqlR2ConversationStore(agent.sql.bind(agent), env.ARTWORK, "conv/forge/");
+    const message = {
+      role: "assistant" as const,
+      content: [{ type: "tool_use" as const, id: "t1", name: "x", input: { type: "base64", data: "r2:conv/other/abc" } }],
+    };
+    await store.append(message);
+    expect(await store.load()).toEqual([message]);
+    // even an image block cannot pull a blob outside this order's prefix
+    const img = { role: "user" as const, content: [{ type: "image" as const, source: { type: "base64" as const, media_type: "image/png" as const, data: "r2:conv/other/abc" } }] };
+    await store.append(img);
+    expect(await store.load()).toEqual([message, img]);
+  });
+});
