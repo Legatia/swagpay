@@ -15,7 +15,7 @@ const intake = {
   deliveryPlace: "Kolektyw3, Koszykowa 54, Warsaw", contactName: "Ana", contactEmail: "ana@example.com",
   request: "60 black tees with our logo and 500 stickers",
 };
-const envWith = (o: Record<string, unknown>) => Object.assign(Object.create(env), o) as Env;
+const envWith = (o: Record<string, unknown>) => ({ ...env, ...o }) as Env;
 const post = (body: unknown) => new Request("https://swagpay.test/api/orders", { method: "POST", body: JSON.stringify(body), headers: { "cf-connecting-ip": "203.0.113.9" } });
 
 describe("verifyTurnstile", () => {
