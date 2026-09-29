@@ -53,3 +53,15 @@ Once the custom domain serves the Worker, set `"workers_dev": false` in `wrangle
 
 Telegram commands: `/open`, `/approve <id> [note]`, `/reject <id> [note]`, `/resend <id>` (re-send a decision the agent missed), `/order <number>`.
 Apply the new migration remotely before deploying: `npx wrangler d1 migrations apply swagpay --remote`.
+
+## Payments and quotes (plan 3)
+
+- `RECEIVING_ADDRESS`: the Arc address of the owner's Circle agent wallet. While it is empty, hosts cannot accept quotes and the watcher does nothing.
+- `ARC_RPC_URL` defaults to Blockdaemon's keyless endpoint. The official RPC rate-limits `eth_getLogs` from Cloudflare. `ARC_RPC_FALLBACK_URL` is optional; an Alchemy Arc URL with a key is a good choice.
+- `ARC_CHAIN_ID`, `USDC_ADDRESS`, `EURC_ADDRESS`: mainnet values are set. For the testnet rehearsal, use chain `5042002` and EURC `0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a`.
+- Crons:
+  - `* * * * *` runs the payment watcher. It stays 30 blocks (about 20 seconds) behind the chain head, and only one run works at a time. The first run only records where to start: let it run once before any host accepts a quote. Notifications (the agent event, order status, owner notices) retry every minute until they succeed.
+  - `17 * * * *` refreshes the NBP złoty rates. Quotes are refused while the rates are older than 6 hours.
+- Printer cost: when an order is complete, the agent asks you in Telegram. Reply `/cost <#> <PLN gross, delivery included> [printer]`. The agent then quotes inside the markup band.
+- Payments: the watcher matches USDC (native, from Arc's system emitter) and EURC transfers to `RECEIVING_ADDRESS`. It matches in this order: a hash the payer pasted, then the exact amount still due, then the 4-digit tag. A transfer that matches nothing, and an overpayment, open a payment escalation in Telegram.
+- Apply the migrations before deploying: `npx wrangler d1 migrations apply swagpay --remote`.
