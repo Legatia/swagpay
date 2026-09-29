@@ -77,7 +77,7 @@ describe("/admin", () => {
   it("refuses without a valid token, and is off when Access isn't configured", async () => {
     expect((await SELF.fetch("https://swagpay.test/admin")).status).toBe(403);
     expect((await SELF.fetch("https://swagpay.test/admin/")).status).toBe(403);
-    const off = ({ ...env, ACCESS_AUD: "" }) as Env;
+    const off = ({ ...env, ACCESS_AUD: "" }) as unknown as Env;
     expect((await handleAdmin(new Request("https://swagpay.test/admin"), off)).status).toBe(503);
   });
 });
