@@ -1,5 +1,6 @@
 import { OrderAgent } from "./agent/order-agent";
 import { handleApi } from "./api";
+import { handleTelegram } from "./telegram-webhook";
 
 export { OrderAgent };
 
@@ -7,6 +8,14 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/api/health") return Response.json({ ok: true });
+    if (url.pathname === "/api/telegram" && request.method === "POST") {
+      try {
+        return await handleTelegram(request, env);
+      } catch (err) {
+        console.error("telegram webhook error", err);
+        return new Response("ok");
+      }
+    }
     if (url.pathname.startsWith("/api/")) {
       try {
         return await handleApi(request, env);

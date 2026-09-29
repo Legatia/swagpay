@@ -16,6 +16,7 @@ export default defineConfig(async () => {
             REQUIRE_TURNSTILE: "0",
             TELEGRAM_OWNER_CHAT_ID: "42",
             TELEGRAM_BOT_TOKEN: "",
+            TELEGRAM_WEBHOOK_SECRET: "test-secret",
           },
         },
       }),
