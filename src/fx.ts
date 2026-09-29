@@ -5,7 +5,7 @@ export const NBP_BASE = "https://api.nbp.pl/api/exchangerates/rates/a";
 export const RATE_MAX_AGE_HOURS = 6;
 
 export async function fetchNbpRate(code: Currency, fetchImpl: typeof fetch = fetch): Promise<{ plnPerUnit: number; effectiveDate: string }> {
-  const res = await fetchImpl(`${NBP_BASE}/${code.toLowerCase()}/?format=json`, { headers: { accept: "application/json" } });
+  const res = await fetchImpl(`${NBP_BASE}/${code.toLowerCase()}/?format=json`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) });
   if (!res.ok) throw new Error(`NBP ${code}: HTTP ${res.status}`);
   const body = (await res.json()) as { rates?: { mid?: unknown; effectiveDate?: unknown }[] };
   const rate = body.rates?.[0];

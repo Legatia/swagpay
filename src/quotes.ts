@@ -28,19 +28,20 @@ export interface NewQuote {
 
 export async function createQuote(db: D1Database, orderId: number, q: NewQuote, now: Date, validityHours: number): Promise<QuoteRow> {
   const validUntil = new Date(now.getTime() + validityHours * 3_600_000);
+  const quotable = "EXISTS (SELECT 1 FROM orders WHERE id = ? AND status IN ('draft', 'quoted'))";
   const results = await db.batch([
-    db.prepare("UPDATE quotes SET status = 'superseded' WHERE order_id = ? AND status = 'open'").bind(orderId),
+    db.prepare(`UPDATE quotes SET status = 'superseded' WHERE order_id = ? AND status = 'open' AND ${quotable}`).bind(orderId, orderId),
     db
       .prepare(
         `INSERT INTO quotes (order_id, currency, price_cents, deposit_cents, cost_pln_grosze, pln_per_unit, usd_per_unit, markup, issued_at, valid_until)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${quotable} RETURNING *`,
       )
       .bind(orderId, q.currency, q.priceCents, q.depositCents, Math.round(q.costPln * 100), q.plnPerUnit, q.usdPerUnit, q.markup,
-        now.toISOString(), validUntil.toISOString()),
+        now.toISOString(), validUntil.toISOString(), orderId),
     db.prepare("UPDATE orders SET status = 'quoted' WHERE id = ? AND status IN ('draft', 'quoted')").bind(orderId),
   ]);
   const row = results[1].results[0] as QuoteRow | undefined;
-  if (!row) throw new Error("quote insert returned no row");
+  if (!row) throw new Error("the order can no longer be quoted");
   return row;
 }
 

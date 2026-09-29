@@ -465,8 +465,8 @@ describe("send_quote", () => {
     state.spec = { ...structuredClone(completeSpec), items: [...structuredClone(completeSpec.items), { kind: "banner", description: "2 m banner", method: "uv", quantity: 1 }] };
     state.costs.set(await itemsKey(state.spec), 1000);
     const r = await h.send_quote(ask);
-    expect(r.isError).toBe(true);
-    expect(r.content).toContain('the owner has not approved "banner" is not on the item list');
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toContain('Not sent yet: waiting for the owner\'s approval of "banner" is not on the item list');
     statuses.set('approval:"banner" is not on the item list; the owner must approve it [1 × 2 m banner]', "approved");
     expect((await h.send_quote(ask)).content).toMatch(/^Quote #1 sent/);
   });
@@ -484,5 +484,63 @@ describe("send_quote", () => {
     const r = await h.send_quote({ ...ask, currency: "EUR", price: 350 });
     expect(r.content).toBe("Quote #1 sent: 350.00 EUR, deposit 239.54 EUR.");
     expect(state.quotes[0]).toMatchObject({ currency: "EUR", plnPerUnit: 4.3, usdPerUnit: 1.075 });
+  });
+
+  it("blocks a quote after the deadline", async () => {
+    const { h, state } = await priced();
+    state.deliverBy = new Date("2099-09-30T10:00:00Z");
+    const r = await h.send_quote(ask);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("the delivery deadline has passed");
+    expect(state.quotes).toHaveLength(0);
+  });
+
+  it("escalates a close deadline for an order with only off-list items", async () => {
+    const { h, state, statuses } = await priced();
+    state.spec = { ...structuredClone(completeSpec), items: [{ kind: "banner", description: "2 m banner", method: "uv", quantity: 1 }] };
+    state.costs.set(await itemsKey(state.spec), 1000);
+    state.deliverBy = new Date("2099-10-05T15:00:00Z");
+    await h.send_quote(ask);
+    statuses.set('approval:"banner" is not on the item list; the owner must approve it [1 × 2 m banner]', "approved");
+    const r = await h.send_quote(ask);
+    expect(r.content).toContain("only 1 business days before the deadline for banner; standard jobs need up to 4");
+    expect(state.quotes).toHaveLength(0);
+  });
+
+  it("blocks when the order is not complete", async () => {
+    const { h, state } = await priced();
+    state.spec = structuredClone(EMPTY_SPEC) as OrderSpec;
+    const r = await h.send_quote(ask);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("the order is not complete");
+  });
+
+  it("blocks a price above the band with the range", async () => {
+    const { h } = await priced();
+    const r = await h.send_quote({ ...ask, price: 500 });
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("price it between 360.50 and 386.25 USD");
+  });
+
+  it("blocks when the owner rejects the cap approval", async () => {
+    const { h, state, statuses } = await priced(3000);
+    await h.send_quote({ ...ask, price: 1100 });
+    statuses.set("approval:1100.00 USD is above the 1000 USD per-order cap", "rejected");
+    const r = await h.send_quote({ ...ask, price: 1100 });
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("the owner rejected");
+    expect(state.quotes).toHaveLength(0);
+  });
+});
+
+describe("update_order after acceptance", () => {
+  it("is blocked and leaves the spec unchanged", async () => {
+    const { h, state } = await fakeCtx();
+    state.status = "deposit_pending";
+    const before = structuredClone(state.spec);
+    const r = await h.update_order({ spec: structuredClone(completeSpec), reason: "host changed the order" });
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("a quote was already accepted");
+    expect(state.spec).toEqual(before);
   });
 });

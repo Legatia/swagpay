@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { getOrderById } from "../src/db";
+import { getOrderById, setOrderStatus } from "../src/db";
 import { acceptQuote, createQuote, expireQuote, getQuote, latestQuote, reopenQuote, type NewQuote } from "../src/quotes";
 import { newOrderRow } from "./fixtures";
 
@@ -32,5 +32,13 @@ describe("quotes", () => {
     await expireQuote(env.DB, quote.id);
     expect((await getQuote(env.DB, quote.id))?.status).toBe("expired");
     expect((await latestQuote(env.DB, order.id))?.status).toBe("expired");
+  });
+
+  it("refuses to quote an order that is no longer quotable and leaves the open quote alone", async () => {
+    const { order } = await newOrderRow();
+    const first = await createQuote(env.DB, order.id, q, new Date(), 48);
+    expect(await setOrderStatus(env.DB, order.id, ["quoted"], "deposit_pending")).toBe(true);
+    await expect(createQuote(env.DB, order.id, q, new Date(), 48)).rejects.toThrow("can no longer be quoted");
+    expect((await getQuote(env.DB, first.id))?.status).toBe("open");
   });
 });

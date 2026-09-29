@@ -6,6 +6,7 @@ import { OrderSpecSchema, itemsKey, missingInfo, specErrors, type OrderSpec } fr
 import type { Rates } from "../fx";
 import { formatCents, type Currency } from "../money";
 import { checkItem, checkLeadTime, checkQuote, depositFor, type Policy, type PrintMethod, type Verdict } from "../policy";
+import { businessDaysBetween } from "../time";
 import type { NewQuote, QuoteRow } from "../quotes";
 import { countPdfPages, imageSize, sniffMediaType } from "../sniff";
 import { costRequestText, priceBand, quoteText } from "../quote-text";
@@ -44,7 +45,8 @@ export interface ToolContext {
   escalateOnce(key: string, kind: "approval" | "agent" | "cost", summary: string, payload: unknown): Promise<{ id: number; status: "open" | "approved" | "rejected"; created: boolean }>;
   rates(currency: Currency): Promise<Rates | null>;
   issueQuote(q: NewQuote): Promise<QuoteRow>;
-  now(): Date;}
+  now(): Date;
+}
 
 const reason = z.string().trim().min(3).max(500).describe("One sentence on why, for the public decision log");
 
@@ -57,7 +59,7 @@ const RequestCostInput = z.object({ note: z.string().trim().max(500).optional().
 const SendQuoteInput = z.object({
   currency: z.enum(["USD", "EUR"]).describe("USD (paid in USDC) or EUR (paid in EURC); follow the host's preference, USD if none"),
   price: z.number().positive().max(100_000).describe("Total for the whole order in that currency, delivery included"),
-  message: z.string().trim().min(1).max(2000).describe("What the host reads above the quote; Swagpay adds the exact price, deposit and validity"),
+  message: z.string().trim().min(1).max(2000).describe("What the host reads above the quote: what the price covers, with no amounts, percentages or dates; Swagpay adds those."),
   reason,
 });
 function inputSchema(schema: z.ZodType): BetaTool.InputSchema {
@@ -178,6 +180,11 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
     }),
 
     update_order: logged(ctx, "update_order", UpdateOrderInput, async ({ spec }) => {
+      const order = await ctx.orderSummary();
+      if (order.status !== "draft" && order.status !== "quoted") {
+        const detail = "a quote was already accepted; send item changes to the owner with escalate";
+        return { verdict: "block", outcome: "blocked", detail, result: { content: `Not saved. ${detail}`, isError: true } };
+      }
       const problems = specErrors(spec);
       const verdicts = spec.items.map((item) => checkItem(item, ctx.policy));
       for (const v of verdicts) if (v.kind === "block") problems.push(v.reason);
@@ -242,8 +249,20 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
       const missing = missingInfo(spec);
       if (missing.length) return blocked(`the order is not complete: ${missing.join("; ")}`);
       // Off-list items need the owner's approval for the items exactly as they stand (plan 2's itemApprovals).
-      const unapproved = (await itemApprovals(ctx, spec, spec.items.map((item) => checkItem(item, ctx.policy)))).filter((a) => a.e.status !== "approved");
-      if (unapproved.length) return blocked(`the owner has not approved ${unapproved.map((a) => `${a.r} (#${a.e.id}, ${a.e.status})`).join("; ")}`);
+      const itemVerdicts = spec.items.map((item) => checkItem(item, ctx.policy));
+      const itemBlock = itemVerdicts.find((v): v is { kind: "block"; reason: string } => v.kind === "block");
+      if (itemBlock) return blocked(itemBlock.reason);
+      const approvals = await itemApprovals(ctx, spec, itemVerdicts);
+      const rejectedItem = approvals.find((a) => a.e.status === "rejected");
+      if (rejectedItem) return blocked(`the owner rejected ${rejectedItem.r} (#${rejectedItem.e.id}); remove it from the order and tell the host`);
+      const openItems = approvals.filter((a) => a.e.status === "open");
+      if (openItems.length) {
+        const list = openItems.map((a) => `${a.r} (#${a.e.id})`).join("; ");
+        return {
+          verdict: "escalate", outcome: "escalated", detail: list,
+          result: { content: `Not sent yet: waiting for the owner's approval of ${list}. Tell the host a person is checking.` },
+        };
+      }
       const costPln = await ctx.printerCost(await itemsKey(spec));
       if (costPln === null) return blocked("there is no printer cost for the order as it stands; call request_printer_cost");
       const rates = await ctx.rates(currency);
@@ -255,11 +274,17 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         const { lo, hi } = priceBand(costPln, rates.plnPerUnit, ctx.policy);
         return blocked(`${verdict.reason}; price it between ${lo.toFixed(2)} and ${hi.toFixed(2)} ${currency}`);
       }
+      const now = ctx.now();
+      if (order.deliverBy.getTime() <= now.getTime()) return blocked("the delivery deadline has passed; ask the host for a new date and escalate");
       const verdicts: Verdict[] = [verdict];
+      const strictest = Math.max(...Object.values(ctx.policy.minLeadBusinessDays));
       for (const item of spec.items) {
-        // Owner-approved off-list items have no lead-time rule; the owner checked them.
         if (Object.hasOwn(ctx.policy.allowedItems, item.kind)) {
-          verdicts.push(checkLeadTime(ctx.now(), order.deliverBy, item.method as PrintMethod, ctx.policy));
+          verdicts.push(checkLeadTime(now, order.deliverBy, item.method as PrintMethod, ctx.policy));
+        } else {
+          // Owner-approved off-list items have no lead-time rule of their own: hold them to the strictest standard one.
+          const days = businessDaysBetween(now, order.deliverBy);
+          if (days < strictest) verdicts.push({ kind: "escalate", reason: `only ${days} business days before the deadline for ${item.kind}; standard jobs need up to ${strictest}` });
         }
       }
       const block = verdicts.find((v): v is { kind: "block"; reason: string } => v.kind === "block");
