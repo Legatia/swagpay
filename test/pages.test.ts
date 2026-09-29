@@ -27,5 +27,7 @@ it("tells the payer exactly what to send, and the agent to repeat amounts exactl
   const script = await (await SELF.fetch(`${base}/order.js`)).text();
   expect(script).toContain("send exactly ${p.due} ${p.token} (the rest of this payment)");
   expect(script).toContain("Token: ${payTo.tokens[open.token]}");
+  // "We received it" closes the order: the host confirms first.
+  expect(script).toContain('if (!confirm("Confirm the swag arrived? This closes the order.")) return;');
   expect(SYSTEM_PROMPT).toContain("Payment events give exact amounts; repeat them exactly, with all six decimals, or not at all.");
 });

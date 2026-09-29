@@ -153,6 +153,7 @@ $("claim-form").addEventListener("submit", async (event) => {
 });
 
 $("received").addEventListener("click", async () => {
+  if (!confirm("Confirm the swag arrived? This closes the order.")) return;
   $("error").textContent = "";
   $("received").disabled = true;
   try {
