@@ -1,11 +1,12 @@
 import { Agent } from "agents";
 import { getOrderById, insertDecision, saveOrderSpec } from "../db";
 import { createEscalation, type EscalationKind } from "../escalations";
-import { ratesFor } from "../fx";
+import { ratesFor, refreshRates } from "../fx";
 import type { Intake } from "../intake";
 import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
 import { priceBand } from "../quote-text";
+import { createQuote } from "../quotes";
 import { SqlR2ConversationStore } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
 import { runTurn, type ConversationStore, type TurnResult } from "./loop";
@@ -308,6 +309,20 @@ export class OrderAgent extends Agent<Env, OrderState> {
           const row = this.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs WHERE spec_key = ${key}`[0];
           return row ? row.cost_grosze / 100 : null;
         },
+        rates: async (currency) => {
+          const now = new Date();
+          const cached = await ratesFor(this.env.DB, currency, now);
+          if (cached) return cached;
+          try {
+            await refreshRates(this.env.DB);
+          } catch (err) {
+            console.error("rate refresh failed", err);
+            return null;
+          }
+          return ratesFor(this.env.DB, currency, new Date());
+        },
+        issueQuote: (q) => createQuote(this.env.DB, orderId, q, new Date(), policy.quoteValidityHours),
+        now: () => new Date(),
       });
     } catch (err) {
       this.addThread("system", "Something went wrong on our side. Your message is saved and the agent will pick it up.");

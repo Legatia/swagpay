@@ -6,9 +6,12 @@ import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile, type ToolContext } fr
 import { previewsIn } from "../src/agent/previews";
 import type { NewDecision } from "../src/db";
 import { toBase64 } from "../src/ids";
+import type { NewQuote, QuoteRow } from "../src/quotes";
 
 function fakeCtx(files: ArtworkFile[] = []) {
-  const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[], costs: new Map<string, number>() };
+  const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[], costs: new Map<string, number>(),
+    rates: { USD: { plnPerUnit: 4, usdPerUnit: 1 }, EUR: { plnPerUnit: 4.3, usdPerUnit: 1.075 } } as Record<string, { plnPerUnit: number; usdPerUnit: number } | null>,
+    quotes: [] as NewQuote[], status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z") };
   const statuses = new Map<string, "open" | "approved" | "rejected">();
   const previews = new Map<string, number>();
   const state2 = { loads: 0 };
@@ -28,8 +31,16 @@ function fakeCtx(files: ArtworkFile[] = []) {
       state.escalations.push({ key, kind, summary });
       return { id: state.escalations.length, status: "open", created: true };
     },
-    async orderSummary() { return { number: 7, status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"), deliveryPlace: "Kolektyw3" }; },
+    async orderSummary() { return { number: 7, status: state.status, deliverBy: state.deliverBy, deliveryPlace: "Kolektyw3" }; },
     async printerCost(key) { return state.costs.get(key) ?? null; },
+    async rates(c) { return state.rates[c] ?? null; },
+    async issueQuote(q) {
+      state.quotes.push(q);
+      return { id: state.quotes.length, order_id: 7, currency: q.currency, price_cents: q.priceCents, deposit_cents: q.depositCents,
+        cost_pln_grosze: Math.round(q.costPln * 100), pln_per_unit: q.plnPerUnit, usd_per_unit: q.usdPerUnit, markup: q.markup,
+        status: "open", issued_at: "2099-10-01T10:00:00.000Z", valid_until: "2099-10-03T10:00:00.000Z", accepted_at: null } as QuoteRow;
+    },
+    now() { return new Date("2099-10-01T10:00:00Z"); },
   };
   const save = (r: { content: unknown }) => {
     for (const p of previewsIn({ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: r.content as never }] })) previews.set(p.fileId, p.bytes);
@@ -45,7 +56,7 @@ const BANNER_KEY = `approval:${BANNER_REASON} [1 × 2 m banner]`;
 
 describe("tool definitions", () => {
   it("defines the intake tools with object schemas that require a reason", () => {
-    expect(TOOL_DEFINITIONS.map((t) => t.name)).toEqual(["ask_host", "update_order", "check_artwork", "escalate", "request_printer_cost"]);
+    expect(TOOL_DEFINITIONS.map((t) => t.name)).toEqual(["ask_host", "update_order", "check_artwork", "escalate", "request_printer_cost", "send_quote"]);
     for (const t of TOOL_DEFINITIONS) {
       expect(t.input_schema.type).toBe("object");
       expect(t.input_schema.required).toContain("reason");
@@ -86,6 +97,9 @@ describe("ask_host", () => {
       async escalateOnce() { return { id: 1, status: "open" as const, created: true }; },
       async orderSummary() { return { number: 7, status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"), deliveryPlace: "Kolektyw3" }; },
       async printerCost() { return null; },
+      async rates() { return null; },
+      async issueQuote() { throw new Error("no quotes here"); },
+      now() { return new Date("2099-10-01T10:00:00Z"); },
     };
     const h = makeHandlers(ctx);
     const r = await h.ask_host({ message: "Hi", reason: "greeting the host" });
@@ -386,5 +400,89 @@ describe("request_printer_cost", () => {
     await h.request_printer_cost({ reason: "need a price" });
     const r = await h.request_printer_cost({ reason: "need a price again" });
     expect(r.content).toContain("The owner declined to price this order (#1)");
+  });
+});
+
+describe("send_quote", () => {
+  async function priced(cost = 1000) {
+    const f = fakeCtx();
+    f.state.spec = structuredClone(completeSpec);
+    f.state.costs.set(await itemsKey(completeSpec), cost);
+    return f;
+  }
+  const ask = { currency: "USD", price: 380, message: "Here is your price for the tees and stickers.", reason: "cost arrived, pricing inside the band" };
+
+  it("sends a quote inside the band with the code-written price, deposit and validity", async () => {
+    const { h, state } = await priced();
+    const r = await h.send_quote(ask);
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toBe("Quote #1 sent: 380.00 USD, deposit 257.50 USD.");
+    expect(state.quotes[0]).toMatchObject({ currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1 });
+    expect(state.posted[0]).toMatch(/^Here is your price for the tees and stickers\.\n\nQuote #1: 380\.00 USD for the whole order/);
+    expect(state.decisions[0]).toMatchObject({ tool: "send_quote", verdict: "allow", outcome: "done", detail: "quote #1" });
+  });
+
+  it("blocks a price outside the band and gives the allowed range", async () => {
+    const { h, state } = await priced();
+    const r = await h.send_quote({ ...ask, price: 300 });
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("price it between 360.50 and 386.25 USD");
+    expect(state.quotes).toHaveLength(0);
+    expect(state.posted).toHaveLength(0);
+  });
+
+  it("blocks without a cost for the items as they stand, and without rates", async () => {
+    const { h, state } = await priced();
+    state.spec.items[0].quantity = 61;
+    state.spec.items[0].sizes = { S: 11, M: 20, L: 20, XL: 10 };
+    expect((await h.send_quote(ask)).content).toContain("no printer cost for the order as it stands");
+    const other = await priced();
+    other.state.rates.USD = null;
+    expect((await other.h.send_quote(ask)).content).toContain("exchange rates are unavailable");
+  });
+
+  it("waits for the owner above the cap, then sends once approved", async () => {
+    const { h, state, statuses } = await priced(3000);
+    const first = await h.send_quote({ ...ask, price: 1100 });
+    expect(first.content).toContain("Not sent yet. Sent to the owner (#1): 1100.00 USD is above the 1000 USD per-order cap");
+    expect(state.quotes).toHaveLength(0);
+    expect(state.decisions[0]).toMatchObject({ verdict: "escalate", outcome: "escalated" });
+    statuses.set("approval:1100.00 USD is above the 1000 USD per-order cap", "approved");
+    const second = await h.send_quote({ ...ask, price: 1100 });
+    expect(second.content).toBe("Quote #1 sent: 1100.00 USD, deposit 772.50 USD.");
+  });
+
+  it("escalates a deadline too close for the print method", async () => {
+    const { h, state } = await priced();
+    state.deliverBy = new Date("2099-10-05T15:00:00Z");
+    const r = await h.send_quote(ask);
+    expect(r.content).toContain("only 1 business days before the deadline; screen needs 4");
+    expect(state.quotes).toHaveLength(0);
+  });
+
+  it("refuses while an off-list item is not approved", async () => {
+    const { h, state, statuses } = await priced();
+    state.spec = { ...structuredClone(completeSpec), items: [...structuredClone(completeSpec.items), { kind: "banner", description: "2 m banner", method: "uv", quantity: 1 }] };
+    state.costs.set(await itemsKey(state.spec), 1000);
+    const r = await h.send_quote(ask);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain('the owner has not approved "banner" is not on the item list');
+    statuses.set('approval:"banner" is not on the item list; the owner must approve it [1 × 2 m banner]', "approved");
+    expect((await h.send_quote(ask)).content).toMatch(/^Quote #1 sent/);
+  });
+
+  it("refuses once a quote was accepted", async () => {
+    const { h, state } = await priced();
+    state.status = "deposit_pending";
+    const r = await h.send_quote(ask);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("already accepted");
+  });
+
+  it("quotes in EUR with EUR rates", async () => {
+    const { h, state } = await priced();
+    const r = await h.send_quote({ ...ask, currency: "EUR", price: 350 });
+    expect(r.content).toBe("Quote #1 sent: 350.00 EUR, deposit 239.54 EUR.");
+    expect(state.quotes[0]).toMatchObject({ currency: "EUR", plnPerUnit: 4.3, usdPerUnit: 1.075 });
   });
 });

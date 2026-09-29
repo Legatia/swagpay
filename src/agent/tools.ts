@@ -3,9 +3,12 @@ import type { BetaTool } from "@anthropic-ai/sdk/resources/beta/messages/message
 import type { NewDecision } from "../db";
 import { toBase64 } from "../ids";
 import { OrderSpecSchema, itemsKey, missingInfo, specErrors, type OrderSpec } from "../order-spec";
-import { checkItem, type Policy, type Verdict } from "../policy";
+import type { Rates } from "../fx";
+import { formatCents, type Currency } from "../money";
+import { checkItem, checkLeadTime, checkQuote, depositFor, type Policy, type PrintMethod, type Verdict } from "../policy";
+import type { NewQuote, QuoteRow } from "../quotes";
 import { countPdfPages, imageSize, sniffMediaType } from "../sniff";
-import { costRequestText } from "../quote-text";
+import { costRequestText, priceBand, quoteText } from "../quote-text";
 import { sanitize } from "./inbox";
 import type { ToolHandler, ToolOutcome } from "./loop";
 
@@ -39,7 +42,9 @@ export interface ToolContext {
   /** PLN gross (delivery included) the owner gave for these items, or null. */
   printerCost(specKey: string): Promise<number | null>;
   escalateOnce(key: string, kind: "approval" | "agent" | "cost", summary: string, payload: unknown): Promise<{ id: number; status: "open" | "approved" | "rejected"; created: boolean }>;
-}
+  rates(currency: Currency): Promise<Rates | null>;
+  issueQuote(q: NewQuote): Promise<QuoteRow>;
+  now(): Date;}
 
 const reason = z.string().trim().min(3).max(500).describe("One sentence on why, for the public decision log");
 
@@ -49,6 +54,12 @@ const CheckArtworkInput = z.object({ fileId: z.string().min(1).max(64), reason }
 const EscalateInput = z.object({ summary: z.string().trim().min(3).max(500).describe("What the owner needs to decide or know"), reason });
 const RequestCostInput = z.object({ note: z.string().trim().max(500).optional().describe("Anything the printer needs to know, e.g. ink colours"), reason });
 
+const SendQuoteInput = z.object({
+  currency: z.enum(["USD", "EUR"]).describe("USD (paid in USDC) or EUR (paid in EURC); follow the host's preference, USD if none"),
+  price: z.number().positive().max(100_000).describe("Total for the whole order in that currency, delivery included"),
+  message: z.string().trim().min(1).max(2000).describe("What the host reads above the quote; Swagpay adds the exact price, deposit and validity"),
+  reason,
+});
 function inputSchema(schema: z.ZodType): BetaTool.InputSchema {
   const json = z.toJSONSchema(schema) as Record<string, unknown>;
   delete json.$schema;
@@ -80,6 +91,11 @@ export const TOOL_DEFINITIONS: BetaTool[] = [
     name: "request_printer_cost",
     description: "Ask the owner for the printer's cost of the complete order. The cost arrives later as an event.",
     input_schema: inputSchema(RequestCostInput),
+  },
+  {
+    name: "send_quote",
+    description: "Send the host a price for the whole order. Checked against the owner's markup band, per-order cap and lead times; the deposit is computed for you.",
+    input_schema: inputSchema(SendQuoteInput),
   },
 ];
 
@@ -216,6 +232,58 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
           ? `Asked the owner for the printer cost (#${e.id}). It arrives as an event; tell the host you are getting the price.`
           : `Still waiting for the owner's printer cost (#${e.id}).`;
       return { verdict: "escalate", outcome: "escalated", detail: `#${e.id}`, result: { content } };
+    }),
+
+    send_quote: logged(ctx, "send_quote", SendQuoteInput, async ({ currency, price, message }) => {
+      const blocked = (detail: string): Logged => ({ verdict: "block", outcome: "blocked", detail, result: { content: `Not sent. ${detail}`, isError: true } });
+      const order = await ctx.orderSummary();
+      if (order.status !== "draft" && order.status !== "quoted") return blocked("a quote was already accepted; changes now go to the owner with escalate");
+      const spec = await ctx.getSpec();
+      const missing = missingInfo(spec);
+      if (missing.length) return blocked(`the order is not complete: ${missing.join("; ")}`);
+      // Off-list items need the owner's approval for the items exactly as they stand (plan 2's itemApprovals).
+      const unapproved = (await itemApprovals(ctx, spec, spec.items.map((item) => checkItem(item, ctx.policy)))).filter((a) => a.e.status !== "approved");
+      if (unapproved.length) return blocked(`the owner has not approved ${unapproved.map((a) => `${a.r} (#${a.e.id}, ${a.e.status})`).join("; ")}`);
+      const costPln = await ctx.printerCost(await itemsKey(spec));
+      if (costPln === null) return blocked("there is no printer cost for the order as it stands; call request_printer_cost");
+      const rates = await ctx.rates(currency);
+      if (!rates) return blocked("exchange rates are unavailable right now; try again later");
+      const priceCents = Math.round(price * 100);
+      const q = { price: priceCents / 100, currency, costPln, plnPerUnit: rates.plnPerUnit, usdPerUnit: rates.usdPerUnit };
+      const { verdict, markup } = checkQuote(q, ctx.policy);
+      if (verdict.kind === "block") {
+        const { lo, hi } = priceBand(costPln, rates.plnPerUnit, ctx.policy);
+        return blocked(`${verdict.reason}; price it between ${lo.toFixed(2)} and ${hi.toFixed(2)} ${currency}`);
+      }
+      const verdicts: Verdict[] = [verdict];
+      for (const item of spec.items) {
+        // Owner-approved off-list items have no lead-time rule; the owner checked them.
+        if (Object.hasOwn(ctx.policy.allowedItems, item.kind)) {
+          verdicts.push(checkLeadTime(ctx.now(), order.deliverBy, item.method as PrintMethod, ctx.policy));
+        }
+      }
+      const block = verdicts.find((v): v is { kind: "block"; reason: string } => v.kind === "block");
+      if (block) return blocked(block.reason);
+      const reasons = [...new Set(verdicts.filter((v): v is { kind: "escalate"; reason: string } => v.kind === "escalate").map((v) => v.reason))];
+      const waiting: string[] = [];
+      for (const r of reasons) {
+        const e = await ctx.escalateOnce(`approval:${r}`, "approval", `Approve: ${r}`, { reason: r });
+        if (e.status === "rejected") return blocked(`the owner rejected: ${r} (#${e.id})`);
+        if (e.status === "open") waiting.push(`${e.created ? "Sent to the owner" : "Waiting for the owner"} (#${e.id}): ${r}`);
+      }
+      if (waiting.length) {
+        return {
+          verdict: "escalate", outcome: "escalated", detail: reasons.join("; "),
+          result: { content: `Not sent yet. ${waiting.join(". ")}. Tell the host a person is checking, then wait for the decision event.` },
+        };
+      }
+      const depositCents = Math.round(depositFor(q, ctx.policy) * 100);
+      const quote = await ctx.issueQuote({ currency, priceCents, depositCents, costPln, plnPerUnit: rates.plnPerUnit, usdPerUnit: rates.usdPerUnit, markup });
+      await ctx.postToHost(`${message}\n\n${quoteText(quote)}`);
+      return {
+        verdict: "allow", outcome: "done", detail: `quote #${quote.id}`,
+        result: { content: `Quote #${quote.id} sent: ${formatCents(priceCents)} ${currency}, deposit ${formatCents(depositCents)} ${currency}.` },
+      };
     }),
 
     escalate: logged(ctx, "escalate", EscalateInput, async ({ summary: raw }) => {
