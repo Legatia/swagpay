@@ -90,11 +90,15 @@ The workflow:
 7. The treasury agent sweeps part of the margin to the reserve.
 
 Setup:
+- **Migration first.** Apply migration 0004 remotely BEFORE `wrangler deploy`: `npx wrangler d1 migrations apply swagpay --remote`. The new code reads tables that don't exist until then.
 - **Receiving address.** `RECEIVING_ADDRESS` is your Circle agent wallet on Arc (`circle wallet list --type agent --chain ARC`).
 - **Spending limits.** Set them with an email OTP, so the agent can never exceed them:
 
       circle wallet limit set --address <wallet> --chain ARC --policy-type stablecoin --per-tx 500 --daily 1500
 
+  - This transfer limit is the backstop the treasury relies on.
+  - Circle allows only ONE stablecoin policy per wallet and chain (`circle wallet limit set --help`: "If a policy already exists for the same wallet/chain/policy-type, the request will fail"). A recipient allowlist (`--rule-type recipient-allowlist --targets [addr1,addr2]`) would replace the transfer limit, not add to it, so don't set one.
+  - Spending limits only exist on mainnet; the CLI refuses testnet chains.
 - **Payout account.**
   - `PAYOUT_ADDRESS` and `PAYOUT_CHAIN` are where printer costs go. For example, your Revolut USDC deposit address on Polygon with `PAYOUT_CHAIN=MATIC`: payouts then bridge with CCTP's forwarding service, with no gas needed on Polygon.
   - Use `ARC` for an Arc address.
@@ -106,8 +110,13 @@ Setup:
       SWAGPAY_URL=https://<your-domain> TREASURY_RUNNER_TOKEN=<token> AGENT_WALLET_ADDRESS=<wallet> DRY_RUN=1 node scripts/treasury-runner.mjs
 
   - Drop `DRY_RUN=1` once the printed commands look right.
+  - Run exactly one runner.
+  - `AGENT_WALLET_ADDRESS` must be the same wallet as `RECEIVING_ADDRESS`: the treasury reads that balance.
   - When Circle's limit refuses a payout, you get an approval request in Telegram.
+  - When the `circle` login session expires (about four weeks), every payout comes back failed: log in again.
 - **Refunds.** Refunds always wait for your approval.
+- **EUR (EURC) orders.** The treasury only pays USDC; printer costs for EUR orders come to you to pay by hand.
+- **Approve or reject.** On a payout question in Telegram, approve lets the treasury agent pay it (USDC only); reject means you handle it yourself, and the obligation is marked settled.
 
 ### Before real money
 
@@ -127,4 +136,4 @@ Setup:
 3. **Fee.** A bridge payout burns the amount plus Circle's forwarding fee: `--amount` is what the recipient gets. Check the fee with `circle bridge get-fee MATIC --chain ARC`. Keep a little extra USDC in the wallet: the treasury's balance check counts only the amount.
 4. **"Sent".** It means Circle accepted the transfer. Check the first real payouts in the wallet history.
 5. **Failures.** A failed or denied payout never retries by itself. It comes to you in Telegram. Check the wallet history before you approve a retry.
-6. **Migration.** Apply migration 0004 remotely: `npx wrangler d1 migrations apply swagpay --remote`.
+6. **Mainnet limit check.** Spending limits only exist on mainnet. Before real orders, set a tiny limit, let one payout go above it, and confirm it comes back as denied in Telegram (not as sent). Then `circle wallet limit reset` and set the real limit: a second `set` on the same wallet and chain fails.
