@@ -44,8 +44,12 @@ describe("/admin", () => {
     expect(html).toMatch(new RegExp(`<td>#${n.id}</td>.*?<td>acknowledged</td>`));
   });
 
+  const setUsdRate = (fetchedAt: Date) =>
+    env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?)").bind(fetchedAt.toISOString()).run();
+
   it("warns about missing Telegram and Turnstile config", async () => {
     // The test env has no bot token and doesn't require Turnstile.
+    await setUsdRate(new Date());
     const html = await (await admin(env)).text();
     expect(html).toContain('<p class="error">Telegram is not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_OWNER_CHAT_ID).</p>');
     expect(html).not.toContain("Turnstile secret is missing");
@@ -53,6 +57,21 @@ describe("/admin", () => {
     expect(strict).toContain('<p class="error">Turnstile secret is missing: new orders are refused.</p>');
     const configured = await (await admin(({ ...env, TELEGRAM_BOT_TOKEN: "t", REQUIRE_TURNSTILE: "1", TURNSTILE_SECRET: "s" }) as Env)).text();
     expect(configured).not.toContain('class="error"');
+  });
+
+  it("warns when hosts can't accept quotes or quotes are paused", async () => {
+    await setUsdRate(new Date());
+    const address = '<p class="error">RECEIVING_ADDRESS is missing or malformed: hosts can&#39;t accept quotes.</p>';
+    const rates = '<p class="error">Exchange rates are stale or missing: quotes are paused.</p>';
+    expect(await (await admin(env)).text()).not.toContain(address);
+    expect(await (await admin(({ ...env, RECEIVING_ADDRESS: "" }) as Env)).text()).toContain(address);
+    expect(await (await admin(({ ...env, RECEIVING_ADDRESS: "0x1234" as string }) as Env)).text()).toContain(address);
+    expect(await (await admin(env)).text()).not.toContain(rates);
+    await setUsdRate(new Date(Date.now() - 7 * 3_600_000));
+    expect(await (await admin(env)).text()).toContain(rates);
+    await env.DB.prepare("DELETE FROM fx_rates").run();
+    expect(await (await admin(env)).text()).toContain(rates);
+    await setUsdRate(new Date());
   });
 
   it("refuses without a valid token, and is off when Access isn't configured", async () => {

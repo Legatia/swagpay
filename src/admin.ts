@@ -1,6 +1,8 @@
 import { verifyAccessJwt } from "./access";
 import { listRecentOrders, type OrderRow } from "./db";
 import { listDecided, listEscalations, statusWord, type EscalationRow } from "./escalations";
+import { ratesFor } from "./fx";
+import { isAddress } from "./money";
 
 const esc = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
@@ -18,6 +20,14 @@ export function configWarnings(env: Env): string[] {
   const warnings: string[] = [];
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_OWNER_CHAT_ID) warnings.push("Telegram is not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_OWNER_CHAT_ID).");
   if (String(env.REQUIRE_TURNSTILE) !== "0" && !env.TURNSTILE_SECRET) warnings.push("Turnstile secret is missing: new orders are refused.");
+  if (!isAddress(env.RECEIVING_ADDRESS)) warnings.push("RECEIVING_ADDRESS is missing or malformed: hosts can't accept quotes.");
+  return warnings;
+}
+
+/** Configuration warnings plus state the owner should know about. */
+export async function adminWarnings(env: Env): Promise<string[]> {
+  const warnings = configWarnings(env);
+  if (!(await ratesFor(env.DB, "USD"))) warnings.push("Exchange rates are stale or missing: quotes are paused.");
   return warnings;
 }
 
@@ -52,12 +62,13 @@ export async function handleAdmin(request: Request, env: Env, deps: { fetch?: ty
   if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return new Response("Admin is not configured.", { status: 503 });
   const who = await verifyAccessJwt(request.headers.get("cf-access-jwt-assertion"), env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, deps.fetch);
   if (!who) return new Response("Forbidden", { status: 403 });
-  const [open, decided, orders] = await Promise.all([
+  const [open, decided, orders, warnings] = await Promise.all([
     listEscalations(env.DB, { status: "open", limit: 100 }),
     listDecided(env.DB, 50),
     listRecentOrders(env.DB, 50),
+    adminWarnings(env),
   ]);
-  return new Response(renderAdmin({ open, decided, orders, email: who.email, warnings: configWarnings(env) }), {
+  return new Response(renderAdmin({ open, decided, orders, email: who.email, warnings }), {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
