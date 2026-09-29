@@ -2,12 +2,14 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
+import type { TreasuryAgent } from "../src/agent/treasury-agent";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, type RawLog, type RpcClient } from "../src/arc";
 import { getOrderById, setOrderStatus } from "../src/db";
 import { listEscalations } from "../src/escalations";
 import { addClaim, createPaymentRequest, listUnnotified } from "../src/payments";
+import { handleTelegram } from "../src/telegram-webhook";
 import { warsawTime } from "../src/quote-text";
-import type { ObligationRow } from "../src/treasury";
+import { getObligation, type ObligationRow } from "../src/treasury";
 import type { TelegramClient } from "../src/telegram";
 import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, MIN_ESCALATION_UNITS, runWatcher } from "../src/watcher";
 import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
@@ -162,6 +164,33 @@ describe("runWatcher", () => {
     expect(book[0].kind).toBe("payment");
     expect(book[0].summary).toContain(`Order ${order.id}: deposit paid (257.504343 USDC, tx ${paid.transactionHash}). Book the printer: cost 1000.00 PLN gross (quote #${req.quote_id}).`);
     expect(book[0].summary).toMatch(/ Printer cost obligation #\d+: 257\.500000 USDC to the payout account\.$/);
+    // The treasury pays this one: acknowledging the notice must not settle it.
+    expect(JSON.parse(book[0].payload_json).manual).toBeUndefined();
+  });
+
+  it("settles a printer cost the owner pays by hand once they acknowledge its notice", async () => {
+    const { order, req } = await pendingDeposit(4848, { currency: "EUR" });
+    await setLastBlock(1600);
+    const eurc: RawLog = {
+      address: env.EURC_ADDRESS, topics: [TRANSFER_TOPIC, addressTopic("0x2222222222222222222222222222222222222222"), addressTopic(TO)],
+      data: "0x" + BigInt(req.amount_units).toString(16).padStart(64, "0"),
+      blockNumber: "0x" + (1605).toString(16), transactionHash: "0x" + (26).toString(16).padStart(64, "0"), logIndex: "0x1",
+    };
+    await runWatcher(env, { rpc: fakeRpc(1640, [eurc]).rpc, telegram: silent });
+    const ob = (await env.DB.prepare("SELECT * FROM obligations WHERE order_id = ? AND kind = 'printer_cost'").bind(order.id).first<ObligationRow>())!;
+    expect(ob).toMatchObject({ status: "escalated", token: "EURC", note: "only USDC payouts are configured" });
+    const notice = (await listEscalations(env.DB)).find((x) => x.order_id === order.id && x.kind === "payment" && x.summary.includes("Book the printer"))!;
+    expect(JSON.parse(notice.payload_json)).toMatchObject({ obligationId: ob.id, manual: true });
+    const ack = new Request("https://swagpay.test/api/telegram", {
+      method: "POST", headers: { "x-telegram-bot-api-secret-token": "test-secret" },
+      body: JSON.stringify({ message: { chat: { id: 42 }, text: `/approve ${notice.id}` } }),
+    });
+    expect((await handleTelegram(ack, env, { telegram: silent })).status).toBe(200);
+    expect(await getObligation(env.DB, ob.id)).toMatchObject({ status: "settled", approved_by: "owner" });
+    // Nothing for the treasury to do: it isn't told.
+    await runInDurableObject(await getAgentByName(env.TreasuryAgent, "treasury"), async (agent: TreasuryAgent) => {
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).not.toContain(`escalation #${notice.id} `);
+    });
   });
 
   it("opens a printer-cost obligation when a USDC deposit completes, and a refund obligation for a surplus", async () => {

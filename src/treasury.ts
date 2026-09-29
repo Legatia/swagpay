@@ -128,7 +128,8 @@ export async function setObligationStatus(
 /**
  * The owner's decision on an obligation's approval escalation. Approve moves a USDC obligation to approved (the treasury pays it)
  * and any other token to settled (the treasury can't pay it); reject means the owner handles it, so it is settled too.
- * A failed obligation moves only for the escalation of its latest payout, so a stale /resend can't reopen a newer failure.
+ * A failed obligation moves only for the escalation of its latest payout, and an escalation without a payoutId moves nothing once
+ * a payout exists, so a stale /resend can't reopen a newer failure or re-approve after a newer denial.
  */
 export async function decideObligation(
   db: D1Database, id: number, decision: "approved" | "rejected", payoutId: number | null,
@@ -136,7 +137,10 @@ export async function decideObligation(
   const ob = await getObligation(db, id);
   if (!ob) return null;
   const from: ObligationStatus[] = ["escalated", "open"];
-  if (payoutId !== null) {
+  if (payoutId === null) {
+    // Every approval without a payoutId comes before any payout: once one exists, only a payout's own escalation decides.
+    if (await db.prepare("SELECT 1 AS n FROM payouts WHERE obligation_id = ? LIMIT 1").bind(id).first()) return ob;
+  } else {
     const newer = await db.prepare("SELECT 1 AS n FROM payouts WHERE obligation_id = ? AND id > ? LIMIT 1").bind(id, payoutId).first();
     if (!newer) from.push("failed");
   }
@@ -215,12 +219,13 @@ export async function staleQueuedPayouts(db: D1Database, now: Date = new Date(),
   return (await db.prepare("SELECT * FROM payouts WHERE status = 'queued' AND created_at < ? ORDER BY id LIMIT ?").bind(before, limit).all<PayoutRow>()).results;
 }
 
-/** Closed orders with no reserve obligation yet, newest first. */
+/** Closed orders a sweep can succeed on (a USDC printer cost is recorded) with no reserve obligation yet, newest first. */
 export async function unsweptClosedOrders(db: D1Database, limit = 10): Promise<number[]> {
   return (await db
     .prepare(
       `SELECT id FROM orders WHERE status = 'closed'
          AND NOT EXISTS (SELECT 1 FROM obligations WHERE order_id = orders.id AND kind = 'reserve')
+         AND EXISTS (SELECT 1 FROM obligations c WHERE c.order_id = orders.id AND c.kind = 'printer_cost' AND c.token = 'USDC')
        ORDER BY id DESC LIMIT ?`,
     )
     .bind(limit)

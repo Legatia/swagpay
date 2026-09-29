@@ -201,6 +201,19 @@ describe("Telegram webhook", () => {
     });
   });
 
+  it("offers /resend for an undelivered decision that has no order (a treasury escalation)", async () => {
+    const e = await createEscalation(env.DB, { orderId: null, kind: "agent", summary: "Treasury: wallet low", payload: { treasury: true } });
+    const t = fakeTelegram();
+    const unreachable = { idFromName() { throw new Error("agent unreachable"); } } as unknown as Env["TreasuryAgent"];
+    const down = ({ ...env, TreasuryAgent: unreachable }) as Env;
+    await handleTelegram(update(fromOwner(`/approve ${e.id}`)), down, t);
+    expect(t.sent[0]).toBe(`#${e.id} approved, but the agent could not be told. Send /resend ${e.id} to retry.`);
+    await handleTelegram(update(fromOwner(`/reject ${e.id}`)), down, t);
+    expect(t.sent[1]).toBe(`#${e.id} is already approved. The agent has not been told yet: send /resend ${e.id}.`);
+    await handleTelegram(update(fromOwner(`/resend ${e.id}`)), env, t);
+    expect(t.sent[2]).toBe(`#${e.id} re-sent to the agent (approved).`);
+  });
+
   it("answers a failing command instead of erroring", async () => {
     const { order } = await orderWithEscalation();
     const t = fakeTelegram();

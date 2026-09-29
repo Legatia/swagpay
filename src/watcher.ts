@@ -146,7 +146,8 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
       const e = await createEscalation(env.DB, {
         orderId: order.id, kind: "payment",
         summary: `${head} ${move}${manual}`.trim(),
-        payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, ...(costOb ? { obligationId: costOb.id } : {}) },
+        // manual: the owner pays this cost by hand, so acknowledging the notice settles the obligation (deliver()).
+        payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, ...(costOb ? { obligationId: costOb.id, ...(why ? { manual: true } : {}) } : {}) },
       });
       await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
     }

@@ -137,6 +137,19 @@ describe("TreasuryAgent", () => {
     expect(await getObligation(env.DB, ob.id)).toMatchObject({ status: "approved", approved_by: "owner" });
   });
 
+  it("an approval without a payoutId can't move an obligation that already has a payout", async () => {
+    const ob = await createObligation(env.DB, { orderId: null, kind: "printer_cost", token: "USDC", amountUnits: 5_000_000, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC", dueAt: new Date(), sourceRef: `n:${crypto.randomUUID()}` });
+    const stale = await createEscalation(env.DB, { orderId: null, kind: "approval", summary: "over the limit", payload: { obligationId: ob.id } });
+    const p = (await queuePayout(env.DB, ob))!;
+    await recordPayoutResult(env.DB, p.id, { status: "denied", error: "exceeds daily limit" });
+    expect((await getObligation(env.DB, ob.id))?.status).toBe("escalated");
+    await SELF.fetch(fromOwner(`/approve ${stale.id}`));
+    expect(await getObligation(env.DB, ob.id)).toMatchObject({ status: "escalated", approved_by: null });
+    const denial = await createEscalation(env.DB, { orderId: null, kind: "approval", summary: "denied", payload: { obligationId: ob.id, payoutId: p.id } });
+    await SELF.fetch(fromOwner(`/approve ${denial.id}`));
+    expect(await getObligation(env.DB, ob.id)).toMatchObject({ status: "approved", approved_by: "owner" });
+  });
+
   async function snapshotLines(): Promise<string[]> {
     const stub = await getAgentByName(env.TreasuryAgent, "treasury");
     return runInDurableObject(stub, async (agent: TreasuryAgent) => {
@@ -153,9 +166,12 @@ describe("TreasuryAgent", () => {
 
   it("the snapshot lists closed orders not yet swept, newest first, and leaves settled obligations out", async () => {
     const orders = [];
-    for (let i = 0; i < 3; i++) orders.push((await newOrderRow()).order);
-    const [swept, older, newer] = orders;
-    await env.DB.prepare("UPDATE orders SET status = 'closed' WHERE id IN (?, ?, ?)").bind(swept.id, older.id, newer.id).run();
+    for (let i = 0; i < 5; i++) orders.push((await newOrderRow()).order);
+    const [swept, older, newer, eurc, noCost] = orders;
+    await env.DB.prepare("UPDATE orders SET status = 'closed' WHERE id IN (?, ?, ?, ?, ?)").bind(...orders.map((o) => o.id)).run();
+    const cost = (orderId: number, token: "USDC" | "EURC") => createObligation(env.DB, { orderId, kind: "printer_cost", token, amountUnits: 1_000_000, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC", dueAt: new Date(), sourceRef: `c:${crypto.randomUUID()}` });
+    for (const o of [swept, older, newer]) await cost(o.id, "USDC");
+    await cost(eurc.id, "EURC");
     await createObligation(env.DB, { orderId: swept.id, kind: "reserve", token: "USDC", amountUnits: 1_000_000, destination: "0x4444444444444444444444444444444444444444", chain: "ARC", dueAt: new Date(), sourceRef: `reserve:order:${swept.id}` });
     const settled = await createObligation(env.DB, { orderId: null, kind: "refund", token: "EURC", amountUnits: 1_000_000, destination: "0x2222222222222222222222222222222222222222", chain: "ARC", dueAt: new Date(), sourceRef: `x:${crypto.randomUUID()}`, status: "escalated" });
     await setObligationStatus(env.DB, settled.id, ["escalated"], "settled");
@@ -163,7 +179,8 @@ describe("TreasuryAgent", () => {
     const unswept = lines.find((l) => l.startsWith("Closed orders not yet swept: "))!;
     const ids = unswept.slice("Closed orders not yet swept: ".length).split(", ");
     expect(ids.slice(0, 2)).toEqual([`#${newer.id}`, `#${older.id}`]);
-    expect(ids).not.toContain(`#${swept.id}`);
+    // Only orders a sweep can succeed on: an EURC order or one with no recorded printer cost would be blocked every time.
+    for (const out of [swept, eurc, noCost]) expect(ids).not.toContain(`#${out.id}`);
     expect(ids.length).toBeLessThanOrEqual(10);
     expect(lines.some((l) => l.startsWith(`- #${settled.id} `))).toBe(false);
   });

@@ -7,7 +7,7 @@ import { createPaymentRequest } from "./payments";
 import { warsawTime } from "./quote-text";
 import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
-import { decideObligation } from "./treasury";
+import { decideObligation, setObligationStatus } from "./treasury";
 
 type Update = {
   message?: { chat?: { id?: number }; text?: string };
@@ -37,7 +37,7 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
   try {
     // First: a failure here delivers nothing, so /resend repeats it (both steps are idempotent).
     // Only real approvals decide an obligation: a payment notice's Acknowledge button must not approve a payout.
-    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown; payoutId?: unknown; treasury?: unknown } | null; } catch { return null; } })();
+    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown; payoutId?: unknown; treasury?: unknown; manual?: unknown } | null; } catch { return null; } })();
     const decision = row.status as "approved" | "rejected";
     if (row.kind === "approval" && typeof payload?.obligationId === "number") {
       const obligationId = payload.obligationId;
@@ -49,6 +49,9 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
     } else if (payload?.treasury === true) {
       const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
       await treasury.ownerDecision({ id: row.id, summary: row.summary }, decision, row.decision_note);
+    } else if (row.kind === "payment" && typeof payload?.obligationId === "number" && payload.manual === true && decision === "approved") {
+      // A printer cost the treasury can't move: the owner acknowledged paying it by hand. Nothing for the treasury to do.
+      await setObligationStatus(env.DB, payload.obligationId, ["escalated"], "settled", { approvedBy: "owner" });
     }
     if (row.order_id !== null) {
       const order = await getOrderById(env.DB, row.order_id);
@@ -77,7 +80,8 @@ export async function decide(env: Env, id: number, status: "approved" | "rejecte
   if (!row) {
     const existing = await getEscalation(env.DB, id);
     if (!existing) return `#${id} doesn't exist.`;
-    const untold = existing.delivered_at === null && existing.order_id !== null ? ` The agent has not been told yet: send /resend ${id}.` : "";
+    // Orderless escalations (the treasury's, payout results) need delivery too.
+    const untold = existing.delivered_at === null ? ` The agent has not been told yet: send /resend ${id}.` : "";
     return `#${id} is already ${word(existing.kind, existing.status)}.${untold}`;
   }
   const w = word(row.kind, row.status);
