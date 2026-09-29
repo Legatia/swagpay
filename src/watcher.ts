@@ -4,9 +4,11 @@ import { getOrderById, setOrderStatus } from "./db";
 import { createEscalation } from "./escalations";
 import { formatCents, formatUnits, isAddress } from "./money";
 import { applyClaims, depositPaid, getPaymentRequest, listUnnotified, markNotified, recordTransfer, type NewTransfer, type PaymentRequestRow, type TransferOutcome, type TransferRow } from "./payments";
+import { loadPolicy } from "./policy";
 import { warsawTime } from "./quote-text";
 import { getQuote } from "./quotes";
 import { createTelegram, notifyOwner, type TelegramClient } from "./telegram";
+import { createObligation, loadTreasuryPolicy, printerCostUnits } from "./treasury";
 
 export const CHUNK_BLOCKS = 5000;
 export const MAX_CHUNKS_PER_RUN = 20;
@@ -67,7 +69,7 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
   }
   let completedBalance = false;
   if (r.stage === "balance" && completed) {
-    await setOrderStatus(env.DB, order.id, ["balance_pending"], "balance_paid");
+    await setOrderStatus(env.DB, order.id, ["deposit_paid", "balance_pending"], "balance_paid");
     completedBalance = true;
     text += ' The balance is fully paid. When the swag arrives, ask the host to press "We received it" on the order page.';
   }
@@ -77,10 +79,14 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
   await agent.pushEvent(text, `Payment received: ${got}.`);
   // Owner escalations come last, so a failing agent call cannot repeat owner pings on every retry.
   if (surplus > 0) {
+    const refund = await createObligation(env.DB, {
+      orderId: order.id, kind: "refund", token: r.token, amountUnits: surplus, destination: t.from_address, chain: "ARC",
+      dueAt: new Date(), sourceRef: `refund:${t.tx_hash}:${t.log_index}`, status: "escalated",
+    });
     const e = await createEscalation(env.DB, {
-      orderId: order.id, kind: "payment",
-      summary: `Order ${order.id} overpaid by ${formatUnits(surplus)} ${r.token} (tx ${t.tx_hash}). Surplus sent from ${t.from_address}; confirm the refund address with the payer (exchanges and bridges send from shared addresses).`,
-      payload: { txHash: t.tx_hash, logIndex: t.log_index, surplus },
+      orderId: order.id, kind: "approval",
+      summary: `Order ${order.id} overpaid by ${formatUnits(surplus)} ${r.token} (tx ${t.tx_hash}). Refund it to ${t.from_address}? Approve to let the treasury agent send it (refund obligation #${refund.id}); reject if you'll handle it yourself. Exchanges and bridges send from shared addresses: check with the payer first.`,
+      payload: { txHash: t.tx_hash, logIndex: t.log_index, surplus, obligationId: refund.id },
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   }
@@ -93,19 +99,39 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   }
+  const quote = await getQuote(env.DB, r.quote_id);
   if (completedDeposit) {
-    // Last: the owner books the printer only after everything above has been recorded.
-    const quote = await getQuote(env.DB, r.quote_id);
     const cost = quote ? `cost ${formatCents(quote.cost_pln_grosze)} PLN gross (quote #${quote.id})` : `quote #${r.quote_id} is missing; check the cost by hand`;
-    const summary = late
-      ? `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Check printing is still possible, then book the printer: ${cost}.`
-      : `Order ${order.id}: deposit paid (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Book the printer: ${cost}.`;
-    const e = await createEscalation(env.DB, {
-      orderId: order.id, kind: "payment",
-      summary,
-      payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id },
-    });
-    await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+    let costOb: { id: number; amount_units: number; status: string } | null = null;
+    let why = "";
+    if (quote) {
+      const treasury = loadTreasuryPolicy(env as unknown as Record<string, unknown>);
+      const fxBuffer = loadPolicy(env as unknown as Record<string, unknown>).fxBuffer;
+      if (!treasury.payoutAddress) why = "PAYOUT_ADDRESS is not set";
+      else if (r.token !== "USDC") why = "only USDC payouts are configured";
+      costOb = await createObligation(env.DB, {
+        orderId: order.id, kind: "printer_cost", token: r.token, amountUnits: printerCostUnits(quote, fxBuffer),
+        destination: treasury.payoutAddress ?? "", chain: treasury.payoutChain, dueAt: new Date(),
+        sourceRef: `printer_cost:quote:${quote.id}`, status: why || late ? "escalated" : "open", ...(why ? { note: why } : {}),
+      });
+    }
+    const move = costOb ? `Printer cost obligation #${costOb.id}: ${formatUnits(costOb.amount_units)} ${r.token} to the payout account.` : "";
+    if (late && costOb && !why) {
+      const e = await createEscalation(env.DB, {
+        orderId: order.id, kind: "approval",
+        summary: `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Approve if printing is still possible: the treasury agent then moves the printer's money and you book the printer (${cost}). ${move} Reject to handle it yourself.`,
+        payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, obligationId: costOb.id },
+      });
+      await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+    } else {
+      const manual = why ? ` The treasury agent can't move it (${why}): pay from the wallet by hand.` : "";
+      const e = await createEscalation(env.DB, {
+        orderId: order.id, kind: "payment",
+        summary: `Order ${order.id}: deposit paid${late ? " LATE" : ""} (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Book the printer: ${cost}. ${move}${manual}`.trim(),
+        payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, ...(costOb ? { obligationId: costOb.id } : {}) },
+      });
+      await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+    }
   }
   if (completedBalance) {
     const e = await createEscalation(env.DB, {

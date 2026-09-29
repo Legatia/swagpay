@@ -7,6 +7,7 @@ import { getOrderById, setOrderStatus } from "../src/db";
 import { listEscalations } from "../src/escalations";
 import { addClaim, createPaymentRequest, listUnnotified } from "../src/payments";
 import { warsawTime } from "../src/quote-text";
+import { listObligations } from "../src/treasury";
 import type { TelegramClient } from "../src/telegram";
 import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, MIN_ESCALATION_UNITS, runWatcher } from "../src/watcher";
 import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
@@ -116,7 +117,7 @@ describe("runWatcher", () => {
       expect(inbox).toContain("The deposit arrived after it was due; the owner will confirm whether printing is still possible before anything is booked.");
       expect(inbox).not.toContain("The deposit is fully paid.");
     });
-    const late = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.kind === "payment");
+    const late = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.kind === "approval");
     expect(late).toHaveLength(1);
     expect(late[0].summary).toContain(`Order ${order.id}: deposit paid LATE (due ${warsawTime(due)} Warsaw time)`);
     expect(late[0].summary).toContain("cost 1000.00 PLN gross");
@@ -156,7 +157,23 @@ describe("runWatcher", () => {
     const book = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.summary.includes("Book the printer"));
     expect(book).toHaveLength(1);
     expect(book[0].kind).toBe("payment");
-    expect(book[0].summary).toBe(`Order ${order.id}: deposit paid (257.504343 USDC, tx ${paid.transactionHash}). Book the printer: cost 1000.00 PLN gross (quote #${req.quote_id}).`);
+    expect(book[0].summary).toContain(`Order ${order.id}: deposit paid (257.504343 USDC, tx ${paid.transactionHash}). Book the printer: cost 1000.00 PLN gross (quote #${req.quote_id}).`);
+    expect(book[0].summary).toMatch(/ Printer cost obligation #\d+: 257\.500000 USDC to the payout account\.$/);
+  });
+
+  it("opens a printer-cost obligation when a USDC deposit completes, and a refund obligation for a surplus", async () => {
+    const { order, req } = await pendingDeposit(9292);
+    await addClaim(env.DB, req.id, usdcLog(4105, 300_000_000, 9292).transactionHash);
+    await setLastBlock(4100);
+    await runWatcher(env, { rpc: fakeRpc(4140, [usdcLog(4105, 300_000_000, 9292)]).rpc, telegram: silent });
+    const obs = (await listObligations(env.DB, ["open", "escalated"], 200)).filter((o) => o.order_id === order.id);
+    const cost = obs.find((o) => o.kind === "printer_cost")!;
+    expect(cost).toMatchObject({ token: "USDC", amount_units: 257_500_000, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC", status: "open" });
+    const refund = obs.find((o) => o.kind === "refund")!;
+    expect(refund.status).toBe("escalated");
+    expect(refund.destination).toBe("0x2222222222222222222222222222222222222222");
+    const approval = (await listEscalations(env.DB)).find((e) => e.order_id === order.id && e.kind === "approval");
+    expect(JSON.parse(approval!.payload_json).obligationId).toBe(refund.id);
   });
 
   it("escalates an overpayment", async () => {
@@ -165,7 +182,7 @@ describe("runWatcher", () => {
     const big = usdcLog(405, 300_000_000, 4);
     await addClaim(env.DB, req.id, big.transactionHash);
     await runWatcher(env, { rpc: fakeRpc(440, [big]).rpc, telegram: silent });
-    const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.kind === "payment" && x.order_id === order.id && x.summary.includes("overpaid"));
+    const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.kind === "approval" && x.order_id === order.id && x.summary.includes("overpaid"));
     expect(e?.summary).toContain(`Order ${order.id} overpaid by 42.493839 USDC`);
   });
 

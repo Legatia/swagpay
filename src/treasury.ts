@@ -1,0 +1,216 @@
+import { isAddress, type Token } from "./money";
+
+export type ObligationKind = "printer_cost" | "refund" | "reserve";
+export type ObligationStatus = "open" | "approved" | "queued" | "paid" | "failed" | "escalated" | "cancelled";
+
+export interface ObligationRow {
+  id: number;
+  order_id: number | null;
+  kind: ObligationKind;
+  token: Token;
+  amount_units: number;
+  destination: string;
+  chain: string;
+  due_at: string;
+  status: ObligationStatus;
+  approved_by: string | null;
+  source_ref: string;
+  note: string | null;
+  created_at: string;
+  settled_at: string | null;
+}
+
+export interface PayoutRow {
+  id: number;
+  obligation_id: number;
+  method: "transfer" | "bridge";
+  chain: string;
+  token: Token;
+  amount_units: number;
+  destination: string;
+  idempotency_key: string;
+  status: "queued" | "sent" | "denied" | "failed";
+  result_ref: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TreasuryPolicy {
+  perTxUnits: number;
+  dailyUnits: number;
+  reserveMinBps: number;
+  reserveMaxBps: number;
+  /** "ARC" for a same-chain transfer; any other Circle chain code (e.g. "MATIC") bridges with CCTP forwarding. */
+  payoutChain: string;
+  payoutAddress: string | null;
+  reserveAddress: string | null;
+}
+
+export function loadTreasuryPolicy(vars: Record<string, unknown>): TreasuryPolicy {
+  const usdc = (key: string, fallback: number): number => {
+    const raw = vars[key];
+    if (raw === undefined || raw === "") return fallback * 1_000_000;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) throw new Error(`${key} must be a non-negative number, got "${String(raw)}"`);
+    return Math.round(n * 1_000_000);
+  };
+  const bps = (key: string, fallback: number): number => {
+    const raw = vars[key];
+    if (raw === undefined || raw === "") return fallback;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 0 || n > 10_000) throw new Error(`${key} must be 0-10000, got "${String(raw)}"`);
+    return n;
+  };
+  const addr = (key: string): string | null => (isAddress(vars[key]) ? (vars[key] as string) : null);
+  const policy: TreasuryPolicy = {
+    perTxUnits: usdc("TREASURY_PER_TX_USDC", 500),
+    dailyUnits: usdc("TREASURY_DAILY_USDC", 1500),
+    reserveMinBps: bps("TREASURY_RESERVE_MIN_BPS", 1000),
+    reserveMaxBps: bps("TREASURY_RESERVE_MAX_BPS", 3000),
+    payoutChain: String(vars.PAYOUT_CHAIN || "ARC"),
+    payoutAddress: addr("PAYOUT_ADDRESS"),
+    reserveAddress: addr("RESERVE_ADDRESS"),
+  };
+  if (policy.reserveMinBps > policy.reserveMaxBps) throw new Error("TREASURY_RESERVE_MIN_BPS must not exceed TREASURY_RESERVE_MAX_BPS");
+  return policy;
+}
+
+/** The printer's PLN cost in token units at the quote's rate plus the FX buffer, rounded up. */
+export function printerCostUnits(q: { cost_pln_grosze: number; pln_per_unit: number }, fxBuffer: number): number {
+  return Math.ceil((q.cost_pln_grosze * 10_000 * (1 + fxBuffer)) / q.pln_per_unit - 1e-6);
+}
+
+export async function createObligation(
+  db: D1Database,
+  o: { orderId: number | null; kind: ObligationKind; token: Token; amountUnits: number; destination: string; chain: string; dueAt: Date; sourceRef: string; status?: "open" | "escalated"; note?: string },
+  now: Date = new Date(),
+): Promise<ObligationRow> {
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO obligations (order_id, kind, token, amount_units, destination, chain, due_at, status, source_ref, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(o.orderId, o.kind, o.token, o.amountUnits, o.destination, o.chain, o.dueAt.toISOString(), o.status ?? "open", o.sourceRef, o.note ?? null, now.toISOString())
+    .run();
+  const row = await db.prepare("SELECT * FROM obligations WHERE source_ref = ?").bind(o.sourceRef).first<ObligationRow>();
+  if (!row) throw new Error("obligation insert returned no row");
+  return row;
+}
+
+export async function getObligation(db: D1Database, id: number): Promise<ObligationRow | null> {
+  return db.prepare("SELECT * FROM obligations WHERE id = ?").bind(id).first<ObligationRow>();
+}
+
+export async function listObligations(db: D1Database, statuses: ObligationStatus[], limit = 50): Promise<ObligationRow[]> {
+  return (await db
+    .prepare(`SELECT * FROM obligations WHERE status IN (${statuses.map(() => "?").join(", ")}) ORDER BY id LIMIT ?`)
+    .bind(...statuses, limit)
+    .all<ObligationRow>()).results;
+}
+
+export async function setObligationStatus(
+  db: D1Database, id: number, from: ObligationStatus[], to: ObligationStatus, extra: { approvedBy?: string } = {},
+): Promise<boolean> {
+  const res = await db
+    .prepare(`UPDATE obligations SET status = ?, approved_by = COALESCE(?, approved_by) WHERE id = ? AND status IN (${from.map(() => "?").join(", ")})`)
+    .bind(to, extra.approvedBy ?? null, id, ...from)
+    .run();
+  return res.meta.changes === 1;
+}
+
+export async function setObligationNote(db: D1Database, id: number, note: string): Promise<void> {
+  await db.prepare("UPDATE obligations SET note = ? WHERE id = ?").bind(note.slice(0, 500), id).run();
+}
+
+const isUniqueError = (err: unknown) => err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
+
+/** Queues one payout for an obligation that is open, approved or failed; null when it wasn't (or one is already live). */
+export async function queuePayout(db: D1Database, ob: ObligationRow, now: Date = new Date()): Promise<PayoutRow | null> {
+  const at = now.toISOString();
+  try {
+    const results = await db.batch([
+      db.prepare("UPDATE obligations SET status = 'queued' WHERE id = ? AND status IN ('open', 'approved', 'failed')").bind(ob.id),
+      db
+        .prepare(
+          `INSERT INTO payouts (obligation_id, method, chain, token, amount_units, destination, idempotency_key, created_at, updated_at)
+           SELECT id, CASE WHEN chain = 'ARC' THEN 'transfer' ELSE 'bridge' END, chain, token, amount_units, destination, ?, ?, ?
+           FROM obligations WHERE id = ? AND status = 'queued' RETURNING *`,
+        )
+        .bind(crypto.randomUUID(), at, at, ob.id),
+    ]);
+    return (results[1].results[0] as PayoutRow | undefined) ?? null;
+  } catch (err) {
+    if (isUniqueError(err)) return null;
+    throw err;
+  }
+}
+
+/** Records the runner's result for a queued payout; null when the payout was not queued (duplicate or late result). */
+export async function recordPayoutResult(
+  db: D1Database, id: number, r: { status: "sent" | "denied" | "failed"; ref?: string | null; error?: string | null }, now: Date = new Date(),
+): Promise<{ payout: PayoutRow; obligation: ObligationRow } | null> {
+  const at = now.toISOString();
+  const obligationStatus: ObligationStatus = r.status === "sent" ? "paid" : r.status === "denied" ? "escalated" : "failed";
+  const results = await db.batch([
+    db.prepare("UPDATE payouts SET status = ?, result_ref = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'queued' RETURNING *")
+      .bind(r.status, r.ref ?? null, r.error ?? null, at, id),
+    // Only the obligation of the payout that was just updated (same batch, same timestamp) moves.
+    db.prepare(
+      `UPDATE obligations SET status = ?, settled_at = CASE WHEN ? = 'paid' THEN ? ELSE settled_at END
+       WHERE status = 'queued' AND id = (SELECT obligation_id FROM payouts WHERE id = ? AND status = ? AND updated_at = ?)`,
+    ).bind(obligationStatus, obligationStatus, at, id, r.status, at),
+  ]);
+  const payout = results[0].results[0] as PayoutRow | undefined;
+  if (!payout) return null;
+  const obligation = await getObligation(db, payout.obligation_id);
+  return obligation ? { payout, obligation } : null;
+}
+
+export async function listQueuedPayouts(db: D1Database, limit = 20): Promise<PayoutRow[]> {
+  return (await db.prepare("SELECT * FROM payouts WHERE status = 'queued' ORDER BY id LIMIT ?").bind(limit).all<PayoutRow>()).results;
+}
+
+/** Units queued or sent in the 24 hours before `now`. */
+export async function payoutsLast24h(db: D1Database, now: Date = new Date()): Promise<number> {
+  const since = new Date(now.getTime() - 24 * 3_600_000).toISOString();
+  const row = await db
+    .prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM payouts WHERE status IN ('queued', 'sent') AND created_at >= ? AND created_at <= ?")
+    .bind(since, now.toISOString())
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+export async function queuedUnits(db: D1Database): Promise<number> {
+  return (await db.prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM payouts WHERE status = 'queued'").first<{ n: number }>())?.n ?? 0;
+}
+
+/** What the order brought in (surplus excluded: it is refunded) and its printer cost obligation. */
+export async function orderMargin(db: D1Database, orderId: number): Promise<{ status: string; token: Token; receivedUnits: number; printerCostUnits: number } | null> {
+  const order = await db.prepare("SELECT status FROM orders WHERE id = ?").bind(orderId).first<{ status: string }>();
+  if (!order) return null;
+  const received = await db
+    .prepare("SELECT token, COALESCE(SUM(MIN(paid_units, amount_units)), 0) AS n FROM payment_requests WHERE order_id = ? AND status != 'cancelled' GROUP BY token ORDER BY n DESC LIMIT 1")
+    .bind(orderId)
+    .first<{ token: Token; n: number }>();
+  const cost = await db
+    .prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM obligations WHERE order_id = ? AND kind = 'printer_cost' AND status != 'cancelled'")
+    .bind(orderId)
+    .first<{ n: number }>();
+  return { status: order.status, token: received?.token ?? "USDC", receivedUnits: received?.n ?? 0, printerCostUnits: cost?.n ?? 0 };
+}
+
+export async function insertTreasuryDecision(
+  db: D1Database,
+  d: { orderId: number | null; tool: string; reason: string; input: unknown; verdict: string; outcome: string; detail?: string },
+  now: Date = new Date(),
+): Promise<void> {
+  // An order id that doesn't exist is stored as null rather than failing the log.
+  await db
+    .prepare(
+      `INSERT INTO treasury_decisions (order_id, tool, reason, input_json, verdict, outcome, detail, created_at)
+       VALUES ((SELECT id FROM orders WHERE id = ?), ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(d.orderId, d.tool, d.reason, JSON.stringify(d.input ?? null), d.verdict, d.outcome, d.detail ?? null, now.toISOString())
+    .run();
+}
