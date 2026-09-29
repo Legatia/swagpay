@@ -274,6 +274,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
   }
 
   if (sub === "/design" && request.method === "POST") {
+    if (Number(request.headers.get("content-length") ?? 0) > MAX_DESIGN_BYTES) return fail(413, "a design can be up to 64 KB");
     const raw = await request.text();
     if (new TextEncoder().encode(raw).length > MAX_DESIGN_BYTES) return fail(413, "a design can be up to 64 KB");
     let body: unknown;

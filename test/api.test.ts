@@ -390,6 +390,12 @@ describe("API", () => {
     const order = (await getOrderByToken(env.DB, token))!;
     await env.DB.prepare("UPDATE orders SET status = 'deposit_pending' WHERE id = ?").bind(order.id).run();
     expect((await postDesign(token, JSON.stringify(design))).status).toBe(409);
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.sql`CREATE TABLE IF NOT EXISTS design (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL, at TEXT NOT NULL)`;
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM design`[0].n).toBe(0);
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).not.toContain("Design from the Swagpay editor");
+    });
   });
 
   it("caps new orders per day", async () => {

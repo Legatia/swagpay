@@ -73,7 +73,7 @@ export function designSummary(d: DesignSpec): string {
         const f = d.files[l.file];
         lines.push(`- image ${q(l.file)} (fileId ${f?.fileId ?? "?"}, ${f?.role ?? "?"}) ${l.widthMm} × ${l.heightMm} mm${l.effectiveDpi !== undefined ? ` at ${l.effectiveDpi} dpi` : ""}`);
       } else {
-        lines.push(`- text (from the host) ${q(l.text)} in ${sanitize(l.font)} ${l.weight}, ${l.sizeMm} mm, ${l.colour}`);
+        lines.push(`- text (from the host) ${q(l.text)} in font ${q(l.font)} ${l.weight}, ${l.sizeMm} mm, ${l.colour}`);
       }
     }
   }
