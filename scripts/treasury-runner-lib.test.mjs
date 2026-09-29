@@ -10,14 +10,14 @@ const cfg = { wallet: WALLET, usdc: "0x3600000000000000000000000000000000000000"
 
 test("builds an Arc transfer and a CCTP bridge", () => {
   assert.deepEqual(
-    buildCommand({ method: "transfer", chain: "ARC", destination: DEST, amount: "1.500000", idempotencyKey: K1 }, cfg),
+    buildCommand({ method: "transfer", token: "USDC", chain: "ARC", destination: DEST, amount: "1.500000", idempotencyKey: K1 }, cfg),
     ["wallet", "transfer", DEST, "--token", cfg.usdc, "--amount", "1.500000", "--address", "0x" + "a".repeat(40), "--chain", "ARC", "--idempotency-key", K1, "--output", "json"],
   );
   assert.deepEqual(
-    buildCommand({ method: "bridge", chain: "MATIC", destination: DEST, amount: "2.000000", idempotencyKey: K2 }, cfg),
+    buildCommand({ method: "bridge", token: "USDC", chain: "MATIC", destination: DEST, amount: "2.000000", idempotencyKey: K2 }, cfg),
     ["bridge", "transfer", "MATIC", DEST, "--amount", "2.000000", "--address", "0x" + "a".repeat(40), "--chain", "ARC", "--idempotency-key", K2, "--output", "json"],
   );
-  const ok = { method: "transfer", chain: "ARC", destination: DEST, amount: "1.500000", idempotencyKey: K1 };
+  const ok = { method: "transfer", token: "USDC", chain: "ARC", destination: DEST, amount: "1.500000", idempotencyKey: K1 };
   const bad = (over) => assert.throws(() => buildCommand({ ...ok, ...over }, cfg));
   bad({ method: "swap" });
   bad({ destination: "--rpc-url=http://evil" });
@@ -28,6 +28,13 @@ test("builds an Arc transfer and a CCTP bridge", () => {
   bad({ amount: "0.000000" });
   bad({ idempotencyKey: "--quiet" });
   bad({ chain: "MATIC" });
+  bad({ chain: "--" });
+  bad({ token: "EURC" });
+  bad({ idempotencyKey: "abcdef12" });
+  assert.deepEqual(
+    buildCommand({ ...ok, chain: "ARC" }, { ...cfg, chain: "ARC-TESTNET" }).slice(-6, -4),
+    ["--chain", "ARC-TESTNET"],
+  );
 });
 
 test("classifies CLI results", () => {
@@ -35,6 +42,10 @@ test("classifies CLI results", () => {
   assert.equal(classifyResult(0, "0xabc\n", "").status, "sent");
   assert.equal(classifyResult(1, "", "Transfer exceeds the daily spending limit").status, "denied");
   assert.equal(classifyResult(1, "", "Policy violation: recipient not allowed").status, "denied");
+  for (const t of ["timeout of 30000ms exceeded", "context deadline exceeded", "HTTP 429: rate limit", "ERC20: transfer amount exceeds balance"]) assert.equal(classifyResult(1, "", t).status, "failed", t);
+  assert.equal(classifyResult(1, "", "Transfer exceeds the daily limit").status, "denied");
+  assert.equal(classifyResult(1, "", "Policy violation: recipient not allowed by policy").status, "denied");
+  assert.deepEqual(classifyResult(0, JSON.stringify({ data: { id: "t1", state: "FAILED" } }), ""), { status: "failed", error: "circle reported state FAILED" });
   const failed = classifyResult(1, "", "RPC timeout");
   assert.equal(failed.status, "failed");
   assert.equal(failed.error, "RPC timeout");

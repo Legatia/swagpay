@@ -46,8 +46,11 @@ export async function handleTreasuryApi(request: Request, env: Env): Promise<Res
       try {
         const what = `Payout #${payout.id} (${formatUnits(payout.amount_units)} ${payout.token}, ${obligation.kind} obligation #${obligation.id})`;
         const detail = error ? `: ${error.slice(0, 200)}` : "";
-        const summary = status === "denied"
-          ? `Circle's spending limit refused payout #${payout.id} (${formatUnits(payout.amount_units)} ${payout.token}, ${obligation.kind} obligation #${obligation.id})${detail}. Raise the limit with \`circle wallet limit\` (OTP) and approve to retry, or reject and pay by hand.`
+        const refused = status === "failed" && error?.startsWith("runner rejected the payout");
+        const summary = refused
+          ? `The wallet runner refused payout #${payout.id} (${formatUnits(payout.amount_units)} ${payout.token}, ${obligation.kind} obligation #${obligation.id}): ${error}. Nothing was sent. Check the obligation, then approve to let the treasury agent try again or reject to settle it by hand.`
+          : status === "denied"
+          ? `Circle's spending limit refused payout #${payout.id} (${formatUnits(payout.amount_units)} ${payout.token}, ${obligation.kind} obligation #${obligation.id})${detail}. Check the agent wallet's transaction history before you approve a retry. Raise the limit with \`circle wallet limit\` (OTP) and approve to retry, or reject and pay by hand.`
           : `${what} failed${detail}. The transfer may still have gone out: check the agent wallet's transaction history before you approve a retry; reject to settle it by hand.`;
         const e = await createEscalation(env.DB, {
           orderId: null, kind: "approval", summary,

@@ -14,13 +14,17 @@ const cfg = {
   intervalMs: Number(process.env.INTERVAL_MS ?? 30_000),
   dryRun: process.env.DRY_RUN === "1",
 };
+if (!Number.isFinite(cfg.intervalMs) || cfg.intervalMs < 1000) throw new Error("INTERVAL_MS must be at least 1000");
 for (const k of ["base", "token", "wallet"]) if (!cfg[k]) throw new Error(`set ${k === "base" ? "SWAGPAY_URL" : k === "token" ? "TREASURY_RUNNER_TOKEN" : "AGENT_WALLET_ADDRESS"}`);
 
 const api = (path, init = {}) => fetch(`${cfg.base}${path}`, { ...init, headers: { authorization: `Bearer ${cfg.token}`, "content-type": "application/json", ...(init.headers ?? {}) } });
 
+const childEnv = { ...process.env };
+delete childEnv.TREASURY_RUNNER_TOKEN;
+
 function run(args) {
   return new Promise((resolve) => {
-    execFile(cfg.circle, args, { timeout: 180_000, maxBuffer: 1 << 20 }, (err, stdout, stderr) => {
+    execFile(cfg.circle, args, { timeout: 180_000, maxBuffer: 1 << 20, env: childEnv }, (err, stdout, stderr) => {
       resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout: String(stdout), stderr: String(stderr || (err && !err.code ? err.message : "")) });
     });
   });

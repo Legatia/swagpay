@@ -21,6 +21,15 @@ describe("treasury runner API", () => {
     expect(off.status).toBe(404);
   });
 
+  it("rejects a same-length wrong token and an unauthenticated result post", async () => {
+    expect((await SELF.fetch("https://swagpay.test/api/treasury/payouts", { headers: { authorization: "Bearer runner-secreX" } })).status).toBe(401);
+    const { payout } = await queued();
+    const res = await SELF.fetch(`https://swagpay.test/api/treasury/payouts/${payout.id}/result`, { method: "POST", body: JSON.stringify({ status: "sent", ref: "x" }) });
+    expect(res.status).toBe(401);
+    const list = await (await SELF.fetch("https://swagpay.test/api/treasury/payouts", { headers: auth })).json<{ payouts: Array<{ id: number }> }>();
+    expect(list.payouts.some((p) => p.id === payout.id)).toBe(true);
+  });
+
   it("lists queued payouts with decimal amounts", async () => {
     const { payout } = await queued();
     const body = await (await SELF.fetch("https://swagpay.test/api/treasury/payouts", { headers: auth })).json<{ payouts: Array<Record<string, unknown>> }>();
@@ -48,6 +57,17 @@ describe("treasury runner API", () => {
     const payload = JSON.parse(e!.payload_json);
     expect(payload.obligationId).toBe(ob.id);
     expect(payload.payoutId).toBe(payout.id);
+    expect(e?.summary).toContain("Check the agent wallet's transaction history before you approve a retry");
+    expect(e?.summary).toContain("circle wallet limit");
+  });
+
+  it("says nothing was sent when the runner refused a payout", async () => {
+    const { payout } = await queued();
+    expect((await postResult(payout.id, { status: "failed", error: "runner rejected the payout: bad amount" })).status).toBe(200);
+    const e = (await listEscalations(env.DB)).find((x) => JSON.parse(x.payload_json).payoutId === payout.id);
+    expect(e?.summary).toContain(`The wallet runner refused payout #${payout.id}`);
+    expect(e?.summary).toContain("Nothing was sent.");
+    expect(e?.summary).not.toContain("may still have gone out");
   });
 
   it("escalates a failed payout too, since the transfer may have gone out", async () => {
