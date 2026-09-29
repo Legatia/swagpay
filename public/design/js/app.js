@@ -1,4 +1,5 @@
 import { clampToArea } from "./geometry.js";
+import { attachGestures } from "./gestures.js";
 import { newImageLayer, nextAssetKey } from "./layers.js";
 import { mockupFor } from "./mockups.js";
 import { OWNER_NOTE, PRODUCTS, defaultOptions, viewAreas } from "./products.js";
@@ -221,6 +222,7 @@ export const beforeNext = {
 };
 
 function init() {
+  attachGestures({ svg, store, getContext: ctx, announce });
   renderProducts();
   $("products").addEventListener("click", (e) => {
     const b = e.target.closest("[data-product]");
