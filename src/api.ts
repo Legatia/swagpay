@@ -12,6 +12,10 @@ import { EMPTY_SPEC, itemsKey, type OrderSpec } from "./order-spec";
 import { loadPolicy, quoteStillValid } from "./policy";
 import { acceptQuoteForOrder, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
 
+export const FILE_ROLES = ["artwork", "mockup", "print", "cutline"] as const;
+export type FileRole = (typeof FILE_ROLES)[number];
+
+
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
 export const UPLOAD_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml", "application/pdf"];
@@ -156,6 +160,9 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     }
     const file = form.get("file");
     if (!(file instanceof File)) return fail(400, "file is required");
+    const rawRole = form.get("role");
+    const role = rawRole === null ? "artwork" : String(rawRole);
+    if (!(FILE_ROLES as readonly string[]).includes(role)) return fail(400, "role must be artwork, mockup, print or cutline");
     if (!UPLOAD_TYPES.includes(file.type)) return fail(400, "send PNG, JPEG, WebP, GIF, SVG or PDF");
     if (file.size > MAX_UPLOAD_BYTES) return fail(413, "files can be up to 10 MB");
     const view = await agent.getView();
@@ -174,6 +181,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
       mediaType: file.type,
       size: file.size,
       key,
+      role: role as FileRole,
       at: new Date().toISOString(),
     };
     try {

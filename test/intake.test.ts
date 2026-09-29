@@ -31,4 +31,11 @@ describe("intake", () => {
     expect(checkIntakeDates({ ...good, eventDate: "2026-09-29" }, now)).toMatch(/event date/);
     expect(checkIntakeDates({ ...good, deliverBy: "2026-02-30T10:00" }, now)).toMatch(/date/);
   });
+
+  it("accepts an optional designPending flag", () => {
+    const base = { eventName: "Builders meetup", eventDate: "2099-10-08", deliverBy: "2099-10-08T17:00", deliveryPlace: "Kolektyw3", contactName: "Ana", contactEmail: "ana@example.com", request: "60 black tees please" };
+    expect(IntakeSchema.parse({ ...base, designPending: true }).designPending).toBe(true);
+    expect(IntakeSchema.parse(base).designPending).toBeUndefined();
+    expect(IntakeSchema.safeParse({ ...base, designPending: "yes" }).success).toBe(false);
+  });
 });

@@ -51,6 +51,15 @@ describe("OrderAgent", () => {
     expect(decisions.map((d) => d.tool)).toEqual(["ask_host"]);
   });
 
+  it("tells the agent a design is coming when the host uses the editor", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.init(order.id, { ...intake, designPending: true });
+      const first = agent.sql<{ text: string }>`SELECT text FROM inbox ORDER BY id LIMIT 1`[0].text;
+      expect(first).toContain("The host is designing in the Swagpay editor; a design event will follow.");
+    });
+  });
+
   it("escalates an off-list item to the owner's Telegram and turns the decision into an event", async () => {
     const { order, stub } = await newAgent();
     const sent: string[] = [];
@@ -314,7 +323,7 @@ describe("OrderAgent", () => {
     await env.ARTWORK.put(`artwork/${order.instance}/${fileId}`, png);
     await runInDurableObject(stub, async (agent: OrderAgent) => {
       await agent.init(order.id, intake);
-      await agent.addArtwork({ fileId, name: "logo.png", mediaType: "image/png", size: png.length, key: `artwork/${order.instance}/${fileId}`, at: new Date().toISOString() });
+      await agent.addArtwork({ fileId, name: "logo.png", mediaType: "image/png", size: png.length, key: `artwork/${order.instance}/${fileId}`, role: "artwork", at: new Date().toISOString() });
       const model = scriptedModel([
         msg([toolUse("check_artwork", { fileId, reason: "host uploaded a logo" })], "tool_use"),
         msg([], "end_turn"),

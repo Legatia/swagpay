@@ -9,6 +9,7 @@ export const IntakeSchema = z.object({
   contactName: z.string().trim().min(1).max(80),
   contactEmail: z.email().max(200),
   request: z.string().trim().min(10).max(4000),
+  designPending: z.boolean().optional(),
 });
 
 export type Intake = z.infer<typeof IntakeSchema>;

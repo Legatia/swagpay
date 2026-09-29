@@ -44,6 +44,7 @@ export interface ArtworkMeta {
   mediaType: string;
   size: number;
   key: string;
+  role: "artwork" | "mockup" | "print" | "cutline";
   at: string;
 }
 
@@ -70,7 +71,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.sql`CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, text TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS conversation (id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS thread (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, text TEXT NOT NULL, at TEXT NOT NULL)`;
-    this.sql`CREATE TABLE IF NOT EXISTS artwork (file_id TEXT PRIMARY KEY, name TEXT NOT NULL, media_type TEXT NOT NULL, size INTEGER NOT NULL, r2_key TEXT NOT NULL, at TEXT NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS artwork (file_id TEXT PRIMARY KEY, name TEXT NOT NULL, media_type TEXT NOT NULL, size INTEGER NOT NULL, r2_key TEXT NOT NULL, at TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'artwork')`;
     this.sql`CREATE TABLE IF NOT EXISTS previews (file_id TEXT PRIMARY KEY, bytes INTEGER NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS spec (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
@@ -194,7 +195,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(EMPTY_SPEC)})`;
     this.addInbox({
       kind: "event",
-      text: `New order. Event name (from the host): ${JSON.stringify(intake.eventName)}. Event date (from the host): ${JSON.stringify(intake.eventDate)}. Deliver to (from the host): ${JSON.stringify(intake.deliveryPlace)}. Deliver by (from the host, Warsaw time): ${JSON.stringify(intake.deliverBy)}. Host's first name (from the host): ${JSON.stringify(intake.contactName.split(" ")[0])}.`,
+      text: `New order. Event name (from the host): ${JSON.stringify(intake.eventName)}. Event date (from the host): ${JSON.stringify(intake.eventDate)}. Deliver to (from the host): ${JSON.stringify(intake.deliveryPlace)}. Deliver by (from the host, Warsaw time): ${JSON.stringify(intake.deliverBy)}. Host's first name (from the host): ${JSON.stringify(intake.contactName.split(" ")[0])}.${intake.designPending ? " The host is designing in the Swagpay editor; a design event will follow. Don't ask about items before it arrives, unless the host writes to you first." : ""}`,
     });
     this.addInbox({ kind: "host", text: intake.request });
     this.addThread("host", intake.request);
@@ -216,8 +217,8 @@ export class OrderAgent extends Agent<Env, OrderState> {
   async addArtwork(meta: ArtworkMeta): Promise<void> {
     this.ensureTables();
     this.orderId();
-    this.sql`INSERT INTO artwork (file_id, name, media_type, size, r2_key, at) VALUES (${meta.fileId}, ${meta.name}, ${meta.mediaType}, ${meta.size}, ${meta.key}, ${meta.at})`;
-    this.addInbox({ kind: "event", text: `Artwork uploaded. fileId: ${meta.fileId}. File name (from the host): ${JSON.stringify(meta.name)}. Type: ${meta.mediaType}. Size: ${meta.size} bytes.` });
+    this.sql`INSERT INTO artwork (file_id, name, media_type, size, r2_key, at, role) VALUES (${meta.fileId}, ${meta.name}, ${meta.mediaType}, ${meta.size}, ${meta.key}, ${meta.at}, ${meta.role})`;
+    this.addInbox({ kind: "event", text: `Artwork uploaded. fileId: ${meta.fileId}. File name (from the host): ${JSON.stringify(meta.name)}. Type: ${meta.mediaType}. Size: ${meta.size} bytes. Role: ${meta.role}.` });
     this.addThread("system", `File uploaded: ${meta.name}`);
     await this.trigger();
   }
@@ -231,8 +232,8 @@ export class OrderAgent extends Agent<Env, OrderState> {
       missing: missingInfo(spec),
       thread: this.sql<{ id: number; sender: ThreadEntry["from"]; text: string; at: string }>`SELECT id, sender, text, at FROM thread ORDER BY id`
         .map((r) => ({ id: r.id, from: r.sender, text: r.text, at: r.at })),
-      artwork: this.sql<{ file_id: string; name: string; media_type: string; size: number; r2_key: string; at: string }>`SELECT * FROM artwork ORDER BY at`
-        .map((r) => ({ fileId: r.file_id, name: r.name, mediaType: r.media_type, size: r.size, key: r.r2_key, at: r.at })),
+      artwork: this.sql<{ file_id: string; name: string; media_type: string; size: number; r2_key: string; at: string; role: ArtworkMeta["role"] }>`SELECT * FROM artwork ORDER BY at`
+        .map((r) => ({ fileId: r.file_id, name: r.name, mediaType: r.media_type, size: r.size, key: r.r2_key, role: r.role, at: r.at })),
       busy: this.turnRunning,
     };
   }

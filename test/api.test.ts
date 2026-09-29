@@ -15,6 +15,7 @@ const intake = {
   request: "60 black tees with our logo and 500 stickers",
 };
 const base = "https://swagpay.test";
+const pngBytes = () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
 async function newOrder(): Promise<string> {
   const res = await SELF.fetch(`${base}/api/orders`, { method: "POST", body: JSON.stringify(intake), headers: { "content-type": "application/json" } });
@@ -305,6 +306,23 @@ describe("API", () => {
     expect(body.plnPerUnit).toBeNull();
     expect(body.fetchedAt).toBeNull();
     expect(body).toMatchObject({ markupMin: 0.4, fxBuffer: 0.03, perOrderCapUsd: 1000 });
+  });
+
+  it("stores the upload role, defaults it to artwork and refuses unknown roles", async () => {
+    const token = await newOrder();
+    const png = () => new File([pngBytes()], "logo.png", { type: "image/png" });
+    const up = (role?: string) => {
+      const form = new FormData();
+      form.append("file", png());
+      if (role !== undefined) form.append("role", role);
+      return SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: form });
+    };
+    const a = await (await up()).json<{ fileId: string }>();
+    const m = await (await up("mockup")).json<{ fileId: string }>();
+    expect((await up("poster")).status).toBe(400);
+    const view = await (await SELF.fetch(`${base}/api/o/${token}`)).json<{ view: { artwork: Array<{ fileId: string; role: string }> } }>();
+    expect(view.view.artwork.find((f) => f.fileId === a.fileId)?.role).toBe("artwork");
+    expect(view.view.artwork.find((f) => f.fileId === m.fileId)?.role).toBe("mockup");
   });
 
   it("scopes claims to the order, lowercases hashes, only for open requests and caps them", async () => {
