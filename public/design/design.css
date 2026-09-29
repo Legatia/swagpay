@@ -12,7 +12,7 @@ button, .tool, .product { min-height: 44px; }
 button { padding: 10px 16px; border: 0; border-radius: 8px; background: var(--action, #d7266f); color: var(--action-text, #ffffff); font-weight: 700; cursor: pointer; }
 button.secondary, .tool { background: var(--surface, #ffffff); color: var(--text, #171a38); border: 1px solid var(--line, #d9dcea); }
 button:disabled { opacity: 0.45; cursor: default; }
-:focus-visible { outline: 2px solid var(--focus, #d7266f); outline-offset: 2px; }
+:focus-visible, #logo-file:focus-visible + .tool { outline: 2px solid var(--focus, #d7266f); outline-offset: 2px; }
 input, select { min-height: 44px; padding: 10px; border: 1px solid var(--line, #d9dcea); border-radius: 8px; background: var(--page, #f5f6f9); color: var(--text, #171a38); width: 100%; }
 input[type="color"] { padding: 4px; }
 label { display: grid; gap: 4px; font-weight: 700; font-size: 0.9rem; }
