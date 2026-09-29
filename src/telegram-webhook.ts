@@ -1,6 +1,10 @@
 import { getAgentByName } from "agents";
-import { getOrderById } from "./db";
+import { getOrderById, setOrderStatus } from "./db";
 import { decideEscalation, getEscalation, listEscalations, listUndelivered, markDelivered, statusWord as word, type EscalationRow } from "./escalations";
+import { TOKEN_FOR, formatUnits } from "./money";
+import { createPaymentRequest } from "./payments";
+import { warsawTime } from "./quote-text";
+import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
 
 type Update = {
@@ -16,6 +20,7 @@ export const HELP = [
   "/resend <id> — re-send a decision the agent missed",
   "/cost <id> <PLN> [note] — printer cost for a cost request",
   "/order <number> — order status",
+  "/printed <order> — the printer finished; send the balance request",
 ].join("\n");
 
 function sameSecret(given: string, expected: string): boolean {
@@ -88,6 +93,32 @@ export async function resend(env: Env, id: number): Promise<string> {
   return (await deliver(env, row))
     ? `#${id} re-sent to the agent (${word(row.kind, row.status)}).`
     : `#${id}: the agent could not be told. Try /resend ${id} again later.`;
+}
+
+/** The owner reports the printer finished: request the balance (or mark the order paid when nothing is left). */
+export async function markPrinted(env: Env, n: number, now: Date = new Date()): Promise<string> {
+  const order = await getOrderById(env.DB, n);
+  if (!order) return `Order ${n} doesn't exist.`;
+  if (order.status !== "deposit_paid") return `Order ${n} is ${order.status}; /printed works once the deposit is paid.`;
+  const quote = await acceptedQuote(env.DB, n);
+  if (!quote) return `Order ${n} has no accepted quote.`;
+  const agent = await getAgentByName(env.OrderAgent, order.instance);
+  const balanceCents = quote.price_cents - quote.deposit_cents;
+  if (balanceCents <= 0) {
+    if (!(await setOrderStatus(env.DB, n, ["deposit_paid"], "balance_paid"))) return `Order ${n} changed; try again.`;
+    await agent.pushEvent('The owner reports the job is printed. Nothing more is due. When the swag arrives, ask the host to press "We received it" on the order page.', "Printing done. Nothing more is due.");
+    return `Order ${n}: printed; nothing more is due.`;
+  }
+  // Due before delivery, but never less than a day away.
+  const dueBy = new Date(Math.max(Date.parse(order.deliver_by), now.getTime() + 24 * 3_600_000));
+  const request = await createPaymentRequest(env.DB, { orderId: n, quoteId: quote.id, stage: "balance", token: TOKEN_FOR[quote.currency], cents: balanceCents, dueBy }, now);
+  if (!(await setOrderStatus(env.DB, n, ["deposit_paid"], "balance_pending"))) return `Order ${n} changed; try again.`;
+  const amount = `${formatUnits(request.amount_units)} ${request.token}`;
+  await agent.pushEvent(
+    `The owner reports the job is printed. Balance request #${request.id}: ${amount} on Arc, due by ${warsawTime(new Date(request.due_by))} (Warsaw time). Tell the host the balance is on the order page.`,
+    `Printing done. Balance due: ${amount}.`,
+  );
+  return `Order ${n}: printed; balance request #${request.id} for ${amount} is on the order page.`;
 }
 
 const parseId = (arg: string | undefined): number | null => (arg !== undefined && /^\d{1,9}$/.test(arg) ? Number(arg) : null);
@@ -203,6 +234,11 @@ export async function handleTelegram(request: Request, env: Env, deps: { telegra
       case "/order": {
         const n = parseId(arg);
         await reply(n !== null && n > 0 ? await orderStatus(env, n) : "Usage: /order <number>");
+        break;
+      }
+      case "/printed": {
+        const n = parseId(arg);
+        await reply(n !== null && n > 0 ? await markPrinted(env, n) : "Usage: /printed <order number>");
         break;
       }
       default:

@@ -122,7 +122,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     return json(201, { token, url: `/o/${token}` }, NO_STORE);
   }
 
-  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork|\/design|\/quote\/accept|\/payments\/(\d{1,9})\/claim)?$/.exec(path);
+  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork|\/design|\/quote\/accept|\/received|\/payments\/(\d{1,9})\/claim)?$/.exec(path);
   if (!m) return fail(404, "not found");
   const order = await getOrderByToken(env.DB, m[1]);
   if (!order) return fail(404, "order not found");
@@ -286,6 +286,18 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     const problems = designProblems(parsed.data, view.artwork.map((a) => ({ fileId: a.fileId, role: a.role })));
     if (problems.length) return fail(400, problems.join("; "));
     await agent.setDesign(parsed.data);
+    return json(201, { ok: true });
+  }
+
+  if (sub === "/received" && request.method === "POST") {
+    if (order.status !== "balance_paid" || !(await setOrderStatus(env.DB, order.id, ["balance_paid"], "closed"))) {
+      return fail(409, "The order can be marked received once it is fully paid.");
+    }
+    try {
+      await agent.pushEvent("The host confirmed the swag arrived. The order is closed: thank the host briefly.", "Delivery confirmed. The order is closed.");
+    } catch (err) {
+      console.error("could not tell the agent the order closed", err);
+    }
     return json(201, { ok: true });
   }
 

@@ -2,12 +2,13 @@ import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
-import { createOrder } from "../src/db";
+import { createOrder, getOrderById } from "../src/db";
 import { createEscalation, getEscalation, listEscalations } from "../src/escalations";
 import { IntakeSchema } from "../src/intake";
+import { listPaymentRequests } from "../src/payments";
 import { handleTelegram } from "../src/telegram-webhook";
 import type { TelegramClient } from "../src/telegram";
-import { completeSpec } from "./fixtures";
+import { completeSpec, insertQuote, newOrderRow } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
 const intake = IntakeSchema.parse({
@@ -43,6 +44,41 @@ async function orderWithEscalation() {
 }
 
 describe("Telegram webhook", () => {
+  async function paidDepositOrder(o: { priceCents?: number; depositCents?: number } = {}) {
+    const { order } = await newOrderRow();
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await stub.init(order.id, intake);
+    const quoteId = await insertQuote(env.DB, order.id, { priceCents: o.priceCents ?? 38000, depositCents: o.depositCents ?? 25750 });
+    await env.DB.prepare("UPDATE quotes SET status = 'accepted' WHERE id = ?").bind(quoteId).run();
+    await env.DB.prepare("UPDATE orders SET status = 'deposit_paid' WHERE id = ?").bind(order.id).run();
+    return { order, stub, quoteId };
+  }
+
+  it("/printed sends the balance request once", async () => {
+    const { order, stub } = await paidDepositOrder();
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/printed ${order.id}`)), env, t);
+    expect(t.sent[0]).toMatch(new RegExp(`^Order ${order.id}: printed; balance request #\\d+ for 122\\.50\\d{4} USDC is on the order page\\.$`));
+    const requests = (await listPaymentRequests(env.DB, order.id)).filter((r) => r.stage === "balance");
+    expect(requests).toHaveLength(1);
+    expect(Math.floor(requests[0].amount_units / 10_000)).toBe(12250);
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("balance_pending");
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).toContain(`Balance request #${requests[0].id}`);
+    });
+    await handleTelegram(update(fromOwner(`/printed ${order.id}`)), env, t);
+    expect(t.sent[1]).toBe(`Order ${order.id} is balance_pending; /printed works once the deposit is paid.`);
+    expect((await listPaymentRequests(env.DB, order.id)).filter((r) => r.stage === "balance")).toHaveLength(1);
+  });
+
+  it("/printed with nothing left to pay marks the order paid", async () => {
+    const { order } = await paidDepositOrder({ priceCents: 25750, depositCents: 25750 });
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/printed ${order.id}`)), env, t);
+    expect(t.sent[0]).toBe(`Order ${order.id}: printed; nothing more is due.`);
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("balance_paid");
+  });
+
   it("rejects a wrong secret and ignores other chats", async () => {
     const t = fakeTelegram();
     expect((await handleTelegram(update(fromOwner("/open"), "nope"), env, t)).status).toBe(401);

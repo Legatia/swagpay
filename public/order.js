@@ -79,6 +79,7 @@ async function refresh() {
   renderThread(view.thread);
   renderQuote(quote);
   renderPayments(payments, payTo);
+  $("received-box").hidden = order.status !== "balance_paid";
   $("busy").hidden = !view.busy;
 }
 
@@ -148,6 +149,21 @@ $("claim-form").addEventListener("submit", async (event) => {
     $("error").textContent = "Thanks. We'll match it within a minute or two.";
   } catch (err) {
     $("error").textContent = err.message;
+  }
+});
+
+$("received").addEventListener("click", async () => {
+  $("error").textContent = "";
+  $("received").disabled = true;
+  try {
+    const res = await fetch(`/api/o/${token}/received`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not confirm delivery.");
+    await refresh();
+  } catch (err) {
+    $("error").textContent = err.message;
+  } finally {
+    $("received").disabled = false;
   }
 });
 

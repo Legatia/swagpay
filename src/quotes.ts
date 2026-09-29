@@ -30,6 +30,11 @@ export interface NewQuote {
   itemsKey: string;
 }
 
+/** The quote the host accepted for this order, if any. */
+export async function acceptedQuote(db: D1Database, orderId: number): Promise<QuoteRow | null> {
+  return db.prepare("SELECT * FROM quotes WHERE order_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1").bind(orderId).first<QuoteRow>();
+}
+
 export async function createQuote(db: D1Database, orderId: number, q: NewQuote, now: Date, validUntil: Date): Promise<QuoteRow> {
   const quotable = "EXISTS (SELECT 1 FROM orders WHERE id = ? AND status IN ('draft', 'quoted'))";
   const results = await db.batch([

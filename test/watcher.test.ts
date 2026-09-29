@@ -50,6 +50,23 @@ async function pendingDeposit(tag: number, opts: { init?: boolean; pending?: boo
 }
 
 describe("runWatcher", () => {
+  it("completes the balance and asks the host to confirm delivery", async () => {
+    const { order } = await newOrderRow();
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await stub.init(order.id, intakeFor());
+    const quoteId = await insertQuote(env.DB, order.id);
+    await env.DB.prepare("UPDATE orders SET status = 'balance_pending' WHERE id = ?").bind(order.id).run();
+    const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "balance", token: "USDC", cents: 12250, dueBy: new Date(Date.now() + 86_400_000) }, new Date(), () => 7575);
+    await setLastBlock(4000);
+    await runWatcher(env, { rpc: fakeRpc(4040, [usdcLog(4010, req.amount_units, 7575)]).rpc, telegram: silent });
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("balance_paid");
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text).join("\n")).toContain("The balance is fully paid.");
+    });
+    const notice = (await listEscalations(env.DB)).find((e) => e.order_id === order.id && e.summary.includes("balance paid"));
+    expect(notice?.summary).toContain("Deliver the swag");
+  });
+
   it("starts at the current block on its first run", async () => {
     await env.DB.prepare("DELETE FROM watcher_state").run();
     const { rpc, calls } = fakeRpc(1_000_000);

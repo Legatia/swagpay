@@ -17,6 +17,7 @@ it("serves the landing page, the form and the order page", async () => {
   expect(order.status).toBe(200);
   expect(await order.text()).toContain('id="thread"');
   expect(await (await SELF.fetch(`${base}/o/${"b".repeat(43)}`)).text()).toContain('id="pay-box"');
+  expect(await (await SELF.fetch(`${base}/o/${"c".repeat(43)}`)).text()).toContain('id="received"');
 });
 
 it("tells the payer exactly what to send, and the agent to repeat amounts exactly", async () => {

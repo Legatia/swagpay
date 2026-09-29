@@ -410,6 +410,21 @@ describe("API", () => {
     });
   });
 
+  it("closes the order when the host confirms delivery, only once it is paid", async () => {
+    const token = await newOrder();
+    const order = (await getOrderByToken(env.DB, token))!;
+    const received = () => SELF.fetch(`${base}/api/o/${token}/received`, { method: "POST" });
+    expect((await received()).status).toBe(409);
+    await env.DB.prepare("UPDATE orders SET status = 'balance_paid' WHERE id = ?").bind(order.id).run();
+    expect((await received()).status).toBe(201);
+    expect((await getOrderByToken(env.DB, token))?.status).toBe("closed");
+    expect((await received()).status).toBe(409);
+    const stub = await getAgentByName(env.OrderAgent, order.instance);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).toContain("The host confirmed the swag arrived.");
+    });
+  });
+
   it("caps new orders per day", async () => {
     // MAX_NEW_ORDERS_PER_DAY is 50 in the test config. Fill today's quota directly, then ask for one more.
     const now = new Date().toISOString();

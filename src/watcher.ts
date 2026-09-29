@@ -53,15 +53,23 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
   let completedDeposit = false;
   // Late means this transfer reached Swagpay after the request's due time; it is still credited.
   const late = Date.parse(t.created_at) > Date.parse(r.due_by);
+  // This transfer completed its request (it was not complete before it).
+  const completed = paid - t.amount_units < r.amount_units && paid >= r.amount_units;
   if (r.stage === "deposit" && (await depositPaid(env.DB, order.id))) {
     // "quoted" too: if the accept route could not move the order to deposit_pending, the deposit still completes it. Idempotent.
     await setOrderStatus(env.DB, order.id, ["quoted", "deposit_pending"], "deposit_paid");
-    if (paid - t.amount_units < r.amount_units && paid >= r.amount_units) {
+    if (completed) {
       completedDeposit = true;
       text += late
         ? " The deposit arrived after it was due; the owner will confirm whether printing is still possible before anything is booked."
         : " The deposit is fully paid.";
     }
+  }
+  let completedBalance = false;
+  if (r.stage === "balance" && completed) {
+    await setOrderStatus(env.DB, order.id, ["balance_pending"], "balance_paid");
+    completedBalance = true;
+    text += ' The balance is fully paid. When the swag arrives, ask the host to press "We received it" on the order page.';
   }
   const surplus = paid > r.amount_units ? Math.min(t.amount_units, paid - r.amount_units) : 0;
   if (surplus > 0) text += ` Overpaid by ${formatUnits(surplus)} ${r.token}; the owner will refund it.`;
@@ -96,6 +104,14 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
       orderId: order.id, kind: "payment",
       summary,
       payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id },
+    });
+    await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+  }
+  if (completedBalance) {
+    const e = await createEscalation(env.DB, {
+      orderId: order.id, kind: "payment",
+      summary: `Order ${order.id}: balance paid (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Deliver the swag to ${order.delivery_place.replace(/\s+/g, " ")}.`,
+      payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id },
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   }
