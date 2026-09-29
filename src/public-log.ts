@@ -14,7 +14,7 @@ export interface PublicDecision {
 export function redactReason(text: string): string {
   return text
     .replace(/[^\s@<>"']+@[^\s@<>"']+\.[a-z]{2,}/gi, "[email]")
-    .replace(/0x[0-9a-f]+|\+?\d[\d\s().-]{7,}\d/gi, (m) => (/^0x/i.test(m) ? m : "[phone]"));
+    .replace(/0x[0-9a-f]+|\+\d[\d\s()-]{7,}\d|\b\d{3}[\s-]\d{3}[\s-]\d{3}\b|\b\d{9,}\b/gi, (m) => (/^0x/i.test(m) ? m : "[phone]"));
 }
 
 /** Both agents' decisions, newest first: tool, reason and outcome only; never inputs. */

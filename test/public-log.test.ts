@@ -31,6 +31,8 @@ describe("public log and metrics", () => {
     const a = "0x1234567890123456789012345678901234567890";
     expect(redactReason(`sent to ${a}`)).toBe(`sent to ${a}`);
     expect(redactReason("Order 12 is paid")).toBe("Order 12 is paid");
+    for (const keep of ["257.500000 USDC", "2026-10-08", "1500.000000"]) expect(redactReason(keep)).toBe(keep);
+    expect(redactReason("call 600 123 456")).toBe("call [phone]");
   });
 
   it("counts money in and out and decisions made against escalated", async () => {
