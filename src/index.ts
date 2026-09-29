@@ -15,6 +15,9 @@ export default {
         return Response.json({ error: "Something went wrong. Please try again." }, { status: 500 });
       }
     }
+    if (/^\/o\/[A-Za-z0-9_-]{43}$/.test(url.pathname)) {
+      return env.ASSETS.fetch(new Request(new URL("/order", url), request));
+    }
     return env.ASSETS.fetch(request);
   },
 } satisfies ExportedHandler<Env>;

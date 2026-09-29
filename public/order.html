@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <title>Your order · Swagpay</title>
+  <link rel="icon" type="image/svg+xml" href="/mark.svg">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@800&family=Figtree:wght@400;600&family=IBM+Plex+Mono:wght@400&display=swap">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <span class="label" id="job">Order</span>
+  <h1 id="event">Loading…</h1>
+  <p class="muted" id="delivery"></p>
+  <p class="muted">Keep this link private: anyone with it can see and change the order.</p>
+
+  <section class="sheet">
+    <h2>Order so far</h2>
+    <div id="spec" class="muted">Nothing yet.</div>
+    <div id="missing"></div>
+  </section>
+
+  <section class="sheet">
+    <h2>Artwork</h2>
+    <div id="artwork" class="chips"></div>
+    <label>Upload a file (PNG, JPEG, WebP, GIF, SVG or PDF, up to 10 MB)
+      <input id="file" type="file" accept=".png,.jpg,.jpeg,.webp,.gif,.svg,.pdf">
+    </label>
+  </section>
+
+  <section class="sheet">
+    <h2>Conversation</h2>
+    <div id="thread" class="thread"></div>
+    <p class="muted" id="busy" hidden>The agent is working…</p>
+    <form id="message-form">
+      <label>Message <textarea id="text" rows="3" maxlength="4000" required></textarea></label>
+      <p class="error" id="error" role="alert"></p>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </section>
+</main>
+<script src="/order.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New order · Swagpay</title>
+  <link rel="icon" type="image/svg+xml" href="/mark.svg">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@800&family=Figtree:wght@400;600&family=IBM+Plex+Mono:wght@400&display=swap">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <span class="label">New order</span>
+  <h1>What do you need for your event?</h1>
+  <form id="order-form" class="sheet">
+    <label>Event name <input id="eventName" name="eventName" required maxlength="120"></label>
+    <div class="row">
+      <label>Event date <input id="eventDate" name="eventDate" type="date" required></label>
+      <label>Deliver by (Warsaw time) <input id="deliverBy" name="deliverBy" type="datetime-local" required></label>
+    </div>
+    <label>Delivery place <input id="deliveryPlace" name="deliveryPlace" required maxlength="200" value="Kolektyw3, Koszykowa 54, Warsaw"></label>
+    <div class="row">
+      <label>Your name <input id="contactName" name="contactName" required maxlength="80"></label>
+      <label>Email <input id="contactEmail" name="contactEmail" type="email" required maxlength="200"></label>
+    </div>
+    <label>What do you need? <textarea id="request" name="request" rows="5" required minlength="10" maxlength="4000" placeholder="For example: 60 black t-shirts with our logo on the front, and 500 round stickers."></textarea></label>
+    <p class="error" id="error" role="alert"></p>
+    <button type="submit" id="submit">Send to the agent</button>
+  </form>
+</main>
+<script src="/new.js"></script>
+</body>
+</html>
