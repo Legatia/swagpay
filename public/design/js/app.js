@@ -19,11 +19,21 @@ const app = $("design-app");
 const svg = $("stage");
 const STEPS = ["product", "design", "details", "review"];
 
-function safeStorage() {
+// Private or restricted browser modes either throw when storage is touched or refuse writes. The
+// editor works either way; `writable` tells us whether to say drafts can't be saved.
+function probeStorage() {
+  let storage = null;
   try {
-    return window.localStorage;
+    storage = window.localStorage;
   } catch {
-    return null;
+    return { storage: null, writable: false };
+  }
+  try {
+    storage.setItem("swagpay-design-probe", "1");
+    storage.removeItem("swagpay-design-probe");
+    return { storage, writable: true };
+  } catch {
+    return { storage, writable: false };
   }
 }
 
@@ -63,7 +73,7 @@ function dropUnsavedImages(draft) {
   return { draft: { ...draft, layers, assets, selectedId }, dropped: true };
 }
 
-const storage = safeStorage();
+const { storage, writable: storageWritable } = probeStorage();
 const loaded = dropUnsavedImages(loadDraft(storage));
 const draft = loaded.draft;
 export const store = createStore({ initial: draft ? { ...initial, ...draft } : initial, storage });
@@ -297,7 +307,7 @@ function init() {
     if (problem) return notice(problem);
     go(STEPS[Math.min(STEPS.length - 1, STEPS.indexOf(s.step) + 1)]);
   });
-  if (store.saveProblem() === "all") notice("Drafts can't be saved in this browser mode. Your design stays while this tab is open.");
+  if (!storageWritable || store.saveProblem() === "all") notice("Drafts can't be saved in this browser mode. Your design stays while this tab is open.");
   if (loaded.dropped) notice("Your logo wasn't saved on this device, so it was removed. Add it again.");
   store.subscribe(render);
   render();
