@@ -47,6 +47,24 @@ describe("ask_host", () => {
     expect(state.posted).toEqual([]);
     expect(state.decisions[0]).toMatchObject({ tool: "ask_host", reason: "(no reason given)", outcome: "error" });
   });
+
+  it("logs and returns error when postToHost throws", async () => {
+    const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[] };
+    const ctx: ToolContext = {
+      policy: DEFAULT_POLICY,
+      async getSpec() { return structuredClone(state.spec); },
+      async saveSpec(s) { state.spec = structuredClone(s); },
+      async postToHost() { throw new Error("db down"); },
+      async loadArtwork(id) { return null; },
+      async logDecision(d) { state.decisions.push(d); },
+    };
+    const h = makeHandlers(ctx);
+    const r = await h.ask_host({ message: "Hi", reason: "greeting the host" });
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("Tool failed");
+    expect(state.decisions).toHaveLength(1);
+    expect(state.decisions[0]).toMatchObject({ tool: "ask_host", reason: "greeting the host", outcome: "error", detail: "db down" });
+  });
 });
 
 describe("update_order", () => {
@@ -113,7 +131,13 @@ describe("check_artwork", () => {
     const { h } = fakeCtx([svg, huge]);
     expect((await h.check_artwork({ fileId: "f2", reason: "svg" })).content).toMatch(/can't preview image\/svg\+xml/);
     expect((await h.check_artwork({ fileId: "f3", reason: "big" })).content).toMatch(/too large to preview/);
-    const missing = await h.check_artwork({ fileId: "nope", reason: "x" });
+  });
+
+  it("rejects check_artwork for unknown fileId", async () => {
+    const { h, state } = fakeCtx();
+    const missing = await h.check_artwork({ fileId: "nope", reason: "host mentioned a file" });
     expect(missing.isError).toBe(true);
+    expect(missing.content).toContain("nope");
+    expect(state.decisions[0]).toMatchObject({ outcome: "error", detail: "unknown fileId" });
   });
 });

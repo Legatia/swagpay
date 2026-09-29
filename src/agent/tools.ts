@@ -78,16 +78,29 @@ function logged<S extends z.ZodType>(
       await ctx.logDecision({ tool: name, reason: typeof r === "string" && r.trim() ? r : "(no reason given)", input: raw, verdict: "none", outcome: "error", detail });
       return { content: `Invalid input. ${detail}`, isError: true };
     }
-    const out = await run(parsed.data);
-    await ctx.logDecision({
-      tool: name,
-      reason: (parsed.data as { reason: string }).reason,
-      input: raw,
-      verdict: out.verdict,
-      outcome: out.outcome,
-      ...(out.detail ? { detail: out.detail } : {}),
-    });
-    return out.result;
+    try {
+      const out = await run(parsed.data);
+      await ctx.logDecision({
+        tool: name,
+        reason: (parsed.data as { reason: string }).reason,
+        input: raw,
+        verdict: out.verdict,
+        outcome: out.outcome,
+        ...(out.detail ? { detail: out.detail } : {}),
+      });
+      return out.result;
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      await ctx.logDecision({
+        tool: name,
+        reason: (parsed.data as { reason: string }).reason,
+        input: raw,
+        verdict: "none",
+        outcome: "error",
+        detail: errMsg,
+      });
+      return { content: `Tool failed: ${errMsg}`, isError: true };
+    }
   };
 }
 
