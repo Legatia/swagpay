@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { expect, it } from "vitest";
-import { SqlR2ConversationStore } from "../src/agent/conversation";
+import { SqlR2ConversationStore, trimToRecentTurns } from "../src/agent/conversation";
 import type { OrderAgent } from "../src/agent/order-agent";
 
 it("keeps big base64 out of SQLite and restores it byte for byte", async () => {
@@ -39,5 +39,23 @@ it("leaves forged r2 markers in model-written tool input alone", async () => {
     const img = { role: "user" as const, content: [{ type: "image" as const, source: { type: "base64" as const, media_type: "image/png" as const, data: "r2:conv/other/abc" } }] };
     await store.append(img);
     expect(await store.load()).toEqual([message, img]);
+  });
+});
+
+it("trims the conversation to the last inbox turns, starting at an inbox message", async () => {
+  const stub = await getAgentByName(env.OrderAgent, "conv-trim");
+  await runInDurableObject(stub, async (agent: OrderAgent) => {
+    agent.sql`CREATE TABLE IF NOT EXISTS conversation (id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL)`;
+    const store = new SqlR2ConversationStore(agent.sql.bind(agent), env.ARTWORK, "conv/trim/");
+    for (let i = 0; i < 8; i++) {
+      await store.append({ role: "user", content: `inbox ${i}` });
+      await store.append({ role: "assistant", content: [{ type: "tool_use", id: `t${i}`, name: "x", input: {} }] });
+      await store.append({ role: "user", content: [{ type: "tool_result", tool_use_id: `t${i}`, content: "ok" }] });
+    }
+    trimToRecentTurns(agent.sql.bind(agent), 5);
+    const rows = (await store.load());
+    expect(rows.filter((m) => m.role === "user" && typeof m.content === "string")).toHaveLength(5);
+    expect(rows[0]).toEqual({ role: "user", content: "inbox 3" });
+    expect(rows).toHaveLength(15);
   });
 });

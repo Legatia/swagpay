@@ -5,9 +5,9 @@ import { formatUnits, isAddress } from "../money";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import {
   createObligation, getObligation, insertTreasuryDecision, listObligations, loadTreasuryPolicy, orderMargin, payoutsLast24h, queuePayout,
-  queuedUnits, setObligationNote, type TreasuryPolicy,
+  queuedUnits, setObligationNote, setObligationStatus, type TreasuryPolicy,
 } from "../treasury";
-import { SqlR2ConversationStore, repairDanglingToolUse } from "./conversation";
+import { SqlR2ConversationStore, repairDanglingToolUse, trimToRecentTurns } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
 import { runTurn, type TurnResult } from "./loop";
 import { createAnthropicModel, type ModelClient } from "./model";
@@ -17,6 +17,8 @@ import { TREASURY_TOOLS, makeTreasuryHandlers } from "./treasury-tools";
 export const TREASURY_NAME = "treasury";
 export const MAX_TREASURY_CALLS_PER_DAY = 60;
 export const MAX_TREASURY_TOOL_CALLS = 8;
+export const KEEP_TREASURY_TURNS = 5;
+const SNAPSHOT_OBLIGATIONS = 30;
 
 export class TreasuryAgent extends Agent<Env, Record<string, never>> {
   initialState: Record<string, never> = {};
@@ -92,12 +94,16 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
   private async snapshot(policy: TreasuryPolicy): Promise<string> {
     const [balance, queued, used, open] = await Promise.all([
       this.walletUnits(), queuedUnits(this.env.DB), payoutsLast24h(this.env.DB),
-      listObligations(this.env.DB, ["open", "approved", "failed", "escalated", "queued"], 30),
+      listObligations(this.env.DB, ["open", "approved", "failed", "escalated", "queued"], 200),
     ]);
+    // Oldest first from the ledger: show the newest, so stuck ones don't push new ones out.
+    const shown = open.slice(-SNAPSHOT_OBLIGATIONS);
+    const hidden = open.length - shown.length;
     const lines = [
       `Treasury snapshot: wallet ${balance === null ? "unknown" : formatUnits(balance)} USDC; queued payouts ${formatUnits(queued)} USDC; paid out in the last 24 hours ${formatUnits(used)} of the ${formatUnits(policy.dailyUnits)} USDC budget; per-payout limit ${formatUnits(policy.perTxUnits)} USDC; reserve share ${policy.reserveMinBps}–${policy.reserveMaxBps} bps.`,
       open.length ? "Obligations:" : "No open obligations.",
-      ...open.map((o) => `- #${o.id} ${o.kind}${o.order_id !== null ? ` order ${o.order_id}` : ""}: ${formatUnits(o.amount_units)} ${o.token} to ${o.chain} ${o.destination}, ${o.status}${o.approved_by ? ` (approved by ${o.approved_by})` : ""}${o.note ? ` — note: ${o.note}` : ""}`),
+      ...(hidden > 0 ? [`(${hidden} older obligations not shown)`] : []),
+      ...shown.map((o) => `- #${o.id} ${o.kind}${o.order_id !== null ? ` order ${o.order_id}` : ""}: ${formatUnits(o.amount_units)} ${o.token} to ${o.chain} ${o.kind === "refund" ? "the payer's address" : o.destination}, ${o.status}${o.approved_by ? ` (approved by ${o.approved_by})` : ""}${o.note ? ` — note: ${o.note}` : ""}`),
     ];
     return lines.join("\n");
   }
@@ -132,12 +138,13 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
         queuePayout: (ob) => queuePayout(this.env.DB, ob),
         holdObligation: async (id, hours, note) => {
           await setObligationNote(this.env.DB, id, `held: ${note}`);
-          await this.schedule(new Date(Date.now() + hours * 3_600_000), "recheck", { obligationId: id }, { idempotent: true });
+          await this.schedule(new Date(Date.now() + hours * 3_600_000), "recheck", { obligationId: id });
         },
         orderMargin: (orderId) => orderMargin(this.env.DB, orderId),
         createReserve: (orderId, units, token) => createObligation(this.env.DB, {
           orderId, kind: "reserve", token, amountUnits: units, destination: p.reserveAddress ?? "", chain: "ARC", dueAt: new Date(), sourceRef: `reserve:order:${orderId}`,
         }),
+        markEscalated: async (id) => { await setObligationStatus(this.env.DB, id, ["open"], "escalated"); },
         escalateOnce: (key, e) => this.escalateOnce(key, e),
         logDecision: async (d) => {
           const input = d.input as { orderId?: unknown; obligationId?: unknown } | null;
@@ -154,9 +161,11 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
     }
 
     this.turnRunning = true;
+    let failed = false;
     try {
       const store = new SqlR2ConversationStore(this.sql.bind(this), this.env.ARTWORK, `conv/${this.name}/`);
       await repairDanglingToolUse(this.sql.bind(this), store);
+      trimToRecentTurns(this.sql.bind(this), KEEP_TREASURY_TURNS);
       if (pending.length > 0) {
         const items = [...pending.map((p) => ({ kind: p.kind, text: p.text })), { kind: "event" as const, text: await this.snapshot(policy) }];
         await store.append({ role: "user", content: formatInbox(items) });
@@ -173,8 +182,16 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
           return real.create(req);
         },
       };
-      return await runTurn({ model, system: TREASURY_PROMPT, tools: TREASURY_TOOLS, handlers, store, maxToolCalls: MAX_TREASURY_TOOL_CALLS });
+      const result = await runTurn({ model, system: TREASURY_PROMPT, tools: TREASURY_TOOLS, handlers, store, maxToolCalls: MAX_TREASURY_TOOL_CALLS });
+      if (result.status === "refused") {
+        await log({ orderId: null, tool: "agent_run", reason: "model declined the request", input: null, verdict: "none", outcome: "error" });
+        await this.escalateOnce(`system:refused:${day}`, { orderId: null, kind: "system", summary: "The treasury agent's model declined a request.", payload: {} });
+      } else if (result.status === "tool_limit" || result.status === "truncated") {
+        await log({ orderId: null, tool: "agent_run", reason: `turn ended early: ${result.status}`, input: result, verdict: "none", outcome: "error" });
+      }
+      return result;
     } catch (err) {
+      failed = true;
       const detail = err instanceof Error ? err.message : String(err);
       await log({ orderId: null, tool: "agent_run", reason: "treasury turn failed", input: null, verdict: "none", outcome: "error", detail });
       await this.escalateOnce(`system:turn:${day}`, { orderId: null, kind: "system", summary: `The treasury agent's turn failed: ${detail.slice(0, 200)}`, payload: {} });
@@ -182,7 +199,8 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
     } finally {
       this.turnRunning = false;
       this.setMeta("turn_pending", "0");
-      if (this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM inbox`[0].n > 0) await this.trigger();
+      // A failed turn is retried by the next notify or the daily cron, not in a loop.
+      if (!failed && this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM inbox`[0].n > 0) await this.trigger();
     }
   }
 }

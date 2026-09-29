@@ -3,7 +3,7 @@ import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { TreasuryAgent } from "../src/agent/treasury-agent";
 import { createEscalation } from "../src/escalations";
-import { createObligation, getObligation, listQueuedPayouts } from "../src/treasury";
+import { createObligation, getObligation, listQueuedPayouts, setObligationStatus } from "../src/treasury";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
 const quiet = { async send() { return 1; }, async answerCallback() {} };
@@ -57,8 +57,36 @@ describe("TreasuryAgent", () => {
       await agent.notify("Daily review.");
       expect(await agent.processTurn()).toBeNull();
       expect(called).toBe(false);
+      expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text)).toContain("Daily review.");
+      const logged = await env.DB.prepare("SELECT COUNT(*) AS n FROM treasury_decisions WHERE reason = 'daily model call budget spent'").first<{ n: number }>();
+      expect(logged!.n).toBeGreaterThan(0);
       agent.sql`UPDATE meta SET value = '0' WHERE key = 'calls'`;
       agent.sql`DELETE FROM inbox`;
     });
+  });
+
+  async function decide(cmd: string, kind: "approval" | "payment", payload: Record<string, unknown>, status: "open" | "escalated" | "failed") {
+    const ob = await createObligation(env.DB, { orderId: null, kind: "refund", token: "USDC", amountUnits: 5_000_000, destination: "0x2222222222222222222222222222222222222222", chain: "ARC", dueAt: new Date(), sourceRef: `d:${crypto.randomUUID()}`, ...(status === "failed" ? {} : { status }) });
+    if (status === "failed") await setObligationStatus(env.DB, ob.id, ["open"], "failed");
+    const e = await createEscalation(env.DB, { orderId: null, kind, summary: "x", payload: { obligationId: ob.id, ...payload } });
+    const res = await SELF.fetch(new Request("https://swagpay.test/api/telegram", {
+      method: "POST", headers: { "x-telegram-bot-api-secret-token": "test-secret" },
+      body: JSON.stringify({ message: { chat: { id: 42 }, text: `${cmd} ${e.id}` } }),
+    }));
+    expect(res.status).toBe(200);
+    return getObligation(env.DB, ob.id);
+  }
+
+  it("acknowledging a payment notice leaves an open obligation open", async () => {
+    expect(await decide("/approve", "payment", {}, "open")).toMatchObject({ status: "open", approved_by: null });
+  });
+
+  it("rejecting an approval cancels an escalated obligation", async () => {
+    expect((await decide("/reject", "approval", {}, "escalated"))?.status).toBe("cancelled");
+  });
+
+  it("an approval reopens a failed obligation only with a payoutId", async () => {
+    expect((await decide("/approve", "approval", {}, "failed"))?.status).toBe("failed");
+    expect(await decide("/approve", "approval", { payoutId: 1 }, "failed")).toMatchObject({ status: "approved", approved_by: "owner" });
   });
 });

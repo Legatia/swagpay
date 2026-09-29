@@ -36,11 +36,14 @@ function sameSecret(given: string, expected: string): boolean {
 async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
   try {
     // First: a failure here delivers nothing, so /resend repeats it (both steps are idempotent).
-    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown } | null; } catch { return null; } })();
-    if (typeof payload?.obligationId === "number") {
+    // Only real approvals decide an obligation: a payment notice's Acknowledge button must not approve a payout.
+    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown; payoutId?: unknown } | null; } catch { return null; } })();
+    if (row.kind === "approval" && typeof payload?.obligationId === "number") {
       const obligationId = payload.obligationId;
-      if (row.status === "approved") await setObligationStatus(env.DB, obligationId, ["escalated", "open", "failed"], "approved", { approvedBy: "owner" });
-      else await setObligationStatus(env.DB, obligationId, ["escalated", "open", "failed"], "cancelled");
+      // A failed payout may have been broadcast; only the runner-result escalation (it carries payoutId) may reopen it.
+      const from: ("escalated" | "open" | "failed")[] = typeof payload.payoutId === "number" ? ["escalated", "open", "failed"] : ["escalated", "open"];
+      if (row.status === "approved") await setObligationStatus(env.DB, obligationId, from, "approved", { approvedBy: "owner" });
+      else await setObligationStatus(env.DB, obligationId, from, "cancelled");
       const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
       await treasury.notify(`Owner decision on obligation #${obligationId}: ${row.status}.${row.decision_note ? ` Note from the owner: ${JSON.stringify(row.decision_note)}.` : ""}`);
     }

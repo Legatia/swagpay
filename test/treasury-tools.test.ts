@@ -12,7 +12,7 @@ function ob(o: Partial<ObligationRow> = {}): ObligationRow {
 }
 
 function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null; last24h: number; queued: number; margin: { status: string; token: "USDC"; receivedUnits: number; printerCostUnits: number } | null }> = {}) {
-  const state = { queued: [] as number[], held: [] as [number, number][], reserves: [] as [number, number][], escalations: [] as string[], decisions: [] as Array<Record<string, unknown>> };
+  const state = { queued: [] as number[], held: [] as [number, number][], reserves: [] as [number, number][], escalations: [] as string[], escalated: [] as number[], decisions: [] as Array<Record<string, unknown>> };
   const ctx: TreasuryContext = {
     policy,
     async getObligation(id) { return obligations.find((x) => x.id === id) ?? null; },
@@ -20,6 +20,7 @@ function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null;
     async payoutsLast24h() { return o.last24h ?? 0; },
     async queuedUnits() { return o.queued ?? 0; },
     async queuePayout(x) { state.queued.push(x.id); return { id: 100 + x.id, obligation_id: x.id } as PayoutRow; },
+    async markEscalated(id) { state.escalated.push(id); },
     async holdObligation(id, hours) { state.held.push([id, hours]); },
     async orderMargin() { return o.margin === undefined ? { status: "closed", token: "USDC", receivedUnits: 380_000_000, printerCostUnits: 257_500_000 } : o.margin; },
     async createReserve(orderId, units) { state.reserves.push([orderId, units]); return ob({ id: 50, kind: "reserve", amount_units: units, destination: RESERVE, chain: "ARC" }); },
@@ -48,6 +49,7 @@ describe("treasury tools", () => {
     const r = await big.h.pay_obligation({ obligationId: 1, reason: "pay it" });
     expect(r.content).toContain("Not paid: above the per-payout limit of 500.000000 USDC");
     expect(big.state.queued).toEqual([]);
+    expect(big.state.escalated).toEqual([1]);
     expect(big.state.decisions[0]).toMatchObject({ verdict: "escalate", outcome: "escalated" });
     const daily = fake([ob()], { last24h: 1_400_000_000 });
     expect((await daily.h.pay_obligation({ obligationId: 1, reason: "pay it" })).content).toContain("above the 24-hour budget");

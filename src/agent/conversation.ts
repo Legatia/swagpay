@@ -73,3 +73,16 @@ export async function repairDanglingToolUse(sql: SqlFn, store: ConversationStore
   if (ids.length === 0) return;
   await store.append({ role: "user", content: ids.map((id) => ({ type: "tool_result" as const, tool_use_id: id, content: "Interrupted before the result was saved.", is_error: true })) });
 }
+
+/** Keeps only the last `keep` inbox turns (a turn starts at a user message that is not a tool_result) so a long-lived agent's context stays bounded. */
+export function trimToRecentTurns(sql: SqlFn, keep: number): void {
+  const starts = sql<{ id: number; message: string }>`SELECT id, message FROM conversation ORDER BY id`
+    .filter((r) => {
+      const m = JSON.parse(r.message) as { role?: string; content?: unknown };
+      return m.role === "user" && (typeof m.content === "string" || (Array.isArray(m.content) && !m.content.some((b) => (b as { type?: string })?.type === "tool_result")));
+    })
+    .map((r) => r.id);
+  if (starts.length <= keep) return;
+  const cut = starts[starts.length - keep];
+  sql`DELETE FROM conversation WHERE id < ${cut}`;
+}

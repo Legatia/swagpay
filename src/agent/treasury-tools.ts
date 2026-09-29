@@ -12,6 +12,7 @@ export interface TreasuryContext extends DecisionLogger {
   payoutsLast24h(): Promise<number>;
   queuedUnits(): Promise<number>;
   queuePayout(ob: ObligationRow): Promise<PayoutRow | null>;
+  markEscalated(id: number): Promise<void>;
   holdObligation(id: number, hours: number, note: string): Promise<void>;
   orderMargin(orderId: number): Promise<{ status: string; token: Token; receivedUnits: number; printerCostUnits: number } | null>;
   createReserve(orderId: number, units: number, token: Token): Promise<ObligationRow>;
@@ -40,6 +41,8 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
       summary: `Treasury: ${ob.kind} obligation #${ob.id}${ob.order_id !== null ? ` (order ${ob.order_id})` : ""} for ${formatUnits(ob.amount_units)} ${ob.token} is ${what}. Approve to let the treasury agent pay it anyway (Circle's own limit still applies); reject to handle it yourself.`,
       payload: { obligationId: ob.id },
     });
+    // Later turns must not retry it and raise the escalation count; the owner's decision moves it on.
+    await ctx.markEscalated(ob.id);
     return { verdict: "escalate", outcome: "escalated", detail: `#${e.id}`, result: { content: `Not paid: ${what}. ${e.created ? "Sent to the owner" : "Waiting for the owner"} (#${e.id}); their decision arrives as an event.` } };
   };
 
