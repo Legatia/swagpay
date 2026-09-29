@@ -71,3 +71,7 @@ Apply the new migration remotely before deploying: `npx wrangler d1 migrations a
 - Printer cost: when an order is complete, the agent asks you in Telegram. Reply `/cost <#> <PLN gross, delivery included> [printer]`. The agent then quotes inside the markup band.
 - Payments: the watcher matches USDC (native, from Arc's system emitter) and EURC transfers to `RECEIVING_ADDRESS`. Matching order: the exact amount still due, then the 4-digit tag for a short payment, then a transaction hash the payer pasted (every credit made through a pasted hash is flagged to the owner). Over-sized tagged payments and anything unmatched go to the owner. Unmatched transfers under 1 USDC/EURC are only logged. An overpayment and every completed deposit also open a payment escalation in Telegram.
 - Apply the migrations before deploying: `npx wrangler d1 migrations apply swagpay --remote`.
+
+## Design editor intake (plan 4a)
+
+The design editor (`/design/`, built separately) creates orders with `designPending: true`. It then uploads files with a `role` (`artwork`, `mockup`, `print`, `cutline`) and posts its v1 design JSON to `POST /api/o/<token>/design`. The schema lives in `src/design-spec.ts`: changing its shape means a new `version` and an update to the editor. Designs are refused once a quote has been accepted.
