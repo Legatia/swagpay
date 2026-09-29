@@ -2,9 +2,11 @@ import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { TreasuryAgent } from "../src/agent/treasury-agent";
+import { TREASURY_PROMPT } from "../src/agent/treasury-prompt";
 import { createEscalation, listEscalations } from "../src/escalations";
 import { handleTelegram } from "../src/telegram-webhook";
 import { createObligation, getObligation, listQueuedPayouts, queuePayout, recordPayoutResult, setObligationStatus } from "../src/treasury";
+import { newOrderRow } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
 const quiet = { async send() { return 1; }, async answerCallback() {} };
@@ -133,5 +135,47 @@ describe("TreasuryAgent", () => {
     const latest = await createEscalation(env.DB, { orderId: null, kind: "approval", summary: "new", payload: { obligationId: ob.id, payoutId: p2.id } });
     await SELF.fetch(fromOwner(`/approve ${latest.id}`));
     expect(await getObligation(env.DB, ob.id)).toMatchObject({ status: "approved", approved_by: "owner" });
+  });
+
+  async function snapshotLines(): Promise<string[]> {
+    const stub = await getAgentByName(env.TreasuryAgent, "treasury");
+    return runInDurableObject(stub, async (agent: TreasuryAgent) => {
+      agent.telegramOverride = quiet;
+      agent.rpcOverride = rich;
+      const model = scriptedModel([msg([], "end_turn")]);
+      agent.modelOverride = model;
+      await agent.notify("Daily review.");
+      await agent.processTurn();
+      const blocks = model.requests[0].messages.at(-1)!.content as Array<{ text: string }>;
+      return blocks.at(-1)!.text.replace(/^<event>|<\/event>$/g, "").split("\n");
+    });
+  }
+
+  it("the snapshot lists closed orders not yet swept, newest first, and leaves settled obligations out", async () => {
+    const orders = [];
+    for (let i = 0; i < 3; i++) orders.push((await newOrderRow()).order);
+    const [swept, older, newer] = orders;
+    await env.DB.prepare("UPDATE orders SET status = 'closed' WHERE id IN (?, ?, ?)").bind(swept.id, older.id, newer.id).run();
+    await createObligation(env.DB, { orderId: swept.id, kind: "reserve", token: "USDC", amountUnits: 1_000_000, destination: "0x4444444444444444444444444444444444444444", chain: "ARC", dueAt: new Date(), sourceRef: `reserve:order:${swept.id}` });
+    const settled = await createObligation(env.DB, { orderId: null, kind: "refund", token: "EURC", amountUnits: 1_000_000, destination: "0x2222222222222222222222222222222222222222", chain: "ARC", dueAt: new Date(), sourceRef: `x:${crypto.randomUUID()}`, status: "escalated" });
+    await setObligationStatus(env.DB, settled.id, ["escalated"], "settled");
+    const lines = await snapshotLines();
+    const unswept = lines.find((l) => l.startsWith("Closed orders not yet swept: "))!;
+    const ids = unswept.slice("Closed orders not yet swept: ".length).split(", ");
+    expect(ids.slice(0, 2)).toEqual([`#${newer.id}`, `#${older.id}`]);
+    expect(ids).not.toContain(`#${swept.id}`);
+    expect(ids.length).toBeLessThanOrEqual(10);
+    expect(lines.some((l) => l.startsWith(`- #${settled.id} `))).toBe(false);
+  });
+
+  it("the snapshot lists payouts queued for over two hours", async () => {
+    const fresh = await createObligation(env.DB, { orderId: null, kind: "printer_cost", token: "USDC", amountUnits: 1_000_000, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC", dueAt: new Date(), sourceRef: `q:${crypto.randomUUID()}` });
+    const stuck = await createObligation(env.DB, { orderId: null, kind: "printer_cost", token: "USDC", amountUnits: 1_000_000, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC", dueAt: new Date(), sourceRef: `q:${crypto.randomUUID()}` });
+    const recent = (await queuePayout(env.DB, fresh))!;
+    const old = (await queuePayout(env.DB, stuck, new Date(Date.now() - 5 * 3_600_000 - 60_000)))!;
+    const line = (await snapshotLines()).find((l) => l.startsWith("Payouts queued over 2 hours: "));
+    expect(line).toContain(`#${old.id} (5 h)`);
+    expect(line).not.toContain(`#${recent.id} `);
+    expect(TREASURY_PROMPT).toContain("If payouts have been queued for hours, the wallet runner may be down: escalate.");
   });
 });

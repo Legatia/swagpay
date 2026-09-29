@@ -5,7 +5,7 @@ import { formatUnits, isAddress } from "../money";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import {
   getObligation, insertObligation, insertTreasuryDecision, listObligations, loadTreasuryPolicy, orderMargin, payoutsLast24h, queuePayout,
-  queuedUnits, setObligationNote, setObligationStatus, type TreasuryPolicy,
+  queuedUnits, setObligationNote, setObligationStatus, staleQueuedPayouts, unsweptClosedOrders, type TreasuryPolicy,
 } from "../treasury";
 import { SqlR2ConversationStore, repairDanglingToolUse, trimToRecentTurns } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
@@ -99,9 +99,12 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
   }
 
   private async snapshot(policy: TreasuryPolicy): Promise<string> {
-    const [balance, queued, used, open] = await Promise.all([
-      this.walletUnits(), queuedUnits(this.env.DB), payoutsLast24h(this.env.DB),
+    const now = new Date();
+    // Settled (and cancelled) obligations are done: they are not listed.
+    const [balance, queued, used, open, unswept, stale] = await Promise.all([
+      this.walletUnits(), queuedUnits(this.env.DB), payoutsLast24h(this.env.DB, now),
       listObligations(this.env.DB, ["open", "approved", "failed", "escalated", "queued"], 200),
+      unsweptClosedOrders(this.env.DB), staleQueuedPayouts(this.env.DB, now),
     ]);
     // Oldest first from the ledger: show the newest, so stuck ones don't push new ones out.
     const shown = open.slice(-SNAPSHOT_OBLIGATIONS);
@@ -111,6 +114,8 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
       open.length ? "Obligations:" : "No open obligations.",
       ...(hidden > 0 ? [`(${hidden} older obligations not shown)`] : []),
       ...shown.map((o) => `- #${o.id} ${o.kind}${o.order_id !== null ? ` order ${o.order_id}` : ""}: ${formatUnits(o.amount_units)} ${o.token} to ${o.chain} ${o.kind === "refund" ? "the payer's address" : o.destination}, ${o.status}${o.approved_by ? ` (approved by ${o.approved_by})` : ""}${o.note ? ` — note: ${o.note}` : ""}`),
+      ...(unswept.length ? [`Closed orders not yet swept: ${unswept.map((id) => `#${id}`).join(", ")}`] : []),
+      ...(stale.length ? [`Payouts queued over 2 hours: ${stale.map((p) => `#${p.id} (${Math.floor((now.getTime() - Date.parse(p.created_at)) / 3_600_000)} h)`).join(", ")}`] : []),
     ];
     return lines.join("\n");
   }

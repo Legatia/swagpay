@@ -209,6 +209,24 @@ export async function payoutsLast24h(db: D1Database, now: Date = new Date()): Pr
   return row?.n ?? 0;
 }
 
+/** Payouts still queued `hours` after they were queued (the wallet runner may be down), oldest first. */
+export async function staleQueuedPayouts(db: D1Database, now: Date = new Date(), hours = 2, limit = 10): Promise<PayoutRow[]> {
+  const before = new Date(now.getTime() - hours * 3_600_000).toISOString();
+  return (await db.prepare("SELECT * FROM payouts WHERE status = 'queued' AND created_at < ? ORDER BY id LIMIT ?").bind(before, limit).all<PayoutRow>()).results;
+}
+
+/** Closed orders with no reserve obligation yet, newest first. */
+export async function unsweptClosedOrders(db: D1Database, limit = 10): Promise<number[]> {
+  return (await db
+    .prepare(
+      `SELECT id FROM orders WHERE status = 'closed'
+         AND NOT EXISTS (SELECT 1 FROM obligations WHERE order_id = orders.id AND kind = 'reserve')
+       ORDER BY id DESC LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ id: number }>()).results.map((r) => r.id);
+}
+
 export async function queuedUnits(db: D1Database): Promise<number> {
   return (await db.prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM payouts WHERE status = 'queued'").first<{ n: number }>())?.n ?? 0;
 }
