@@ -6,7 +6,8 @@ import { previewsIn } from "../src/agent/previews";
 import type { NewDecision } from "../src/db";
 
 function fakeCtx(files: ArtworkFile[] = []) {
-  const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[] };
+  const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[] };
+  const statuses = new Map<string, "open" | "approved" | "rejected">();
   const previews = new Map<string, number>();
   const state2 = { loads: 0 };
   const ctx: ToolContext = {
@@ -19,19 +20,25 @@ function fakeCtx(files: ArtworkFile[] = []) {
     async previewedBytes() { return [...previews.values()].reduce((a, b) => a + b, 0); },
     async wasPreviewed(id) { return previews.has(id); },
     async logDecision(d) { state.decisions.push(d); },
+    async escalateOnce(key, kind, summary) {
+      const i = state.escalations.findIndex((e) => e.key === key);
+      if (i >= 0) return { id: i + 1, status: statuses.get(key) ?? "open", created: false };
+      state.escalations.push({ key, kind, summary });
+      return { id: state.escalations.length, status: "open", created: true };
+    },
   };
   const save = (r: { content: unknown }) => {
     for (const p of previewsIn({ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: r.content as never }] })) previews.set(p.fileId, p.bytes);
   };
-  return { ctx, state, loads: state2, previews, save, h: makeHandlers(ctx) };
+  return { ctx, state, statuses, loads: state2, previews, save, h: makeHandlers(ctx) };
 }
 
 const tee = { kind: "tshirt", description: "Black tee", method: "screen", quantity: 60, colour: "black",
   sizes: { S: 10, M: 20, L: 20, XL: 10 }, printAreas: ["front"] };
 
 describe("tool definitions", () => {
-  it("defines the three intake tools with object schemas that require a reason", () => {
-    expect(TOOL_DEFINITIONS.map((t) => t.name)).toEqual(["ask_host", "update_order", "check_artwork"]);
+  it("defines the intake tools with object schemas that require a reason", () => {
+    expect(TOOL_DEFINITIONS.map((t) => t.name)).toEqual(["ask_host", "update_order", "check_artwork", "escalate"]);
     for (const t of TOOL_DEFINITIONS) {
       expect(t.input_schema.type).toBe("object");
       expect(t.input_schema.required).toContain("reason");
@@ -69,6 +76,7 @@ describe("ask_host", () => {
       async previewedBytes() { return 0; },
       async wasPreviewed() { return false; },
       async logDecision(d) { state.decisions.push(d); },
+      async escalateOnce() { return { id: 1, status: "open" as const, created: true }; },
     };
     const h = makeHandlers(ctx);
     const r = await h.ask_host({ message: "Hi", reason: "greeting the host" });
@@ -105,13 +113,24 @@ describe("update_order", () => {
     expect(state.spec.items).toHaveLength(0);
   });
 
-  it("saves an item that needs approval and says so", async () => {
-    const { h, state } = fakeCtx();
-    const r = await h.update_order({ spec: { items: [tee, { kind: "banner", description: "2 m banner", quantity: 1 }], artwork: [] }, reason: "host also wants a banner" });
+  it("sends an off-list item to the owner once, then reports the owner's decision", async () => {
+    const { h, state, statuses } = fakeCtx();
+    const spec = { items: [tee, { kind: "banner", description: "2 m banner", quantity: 1 }], artwork: [] };
+    const r = await h.update_order({ spec, reason: "host also wants a banner" });
     expect(r.isError).toBeFalsy();
     expect(state.spec.items).toHaveLength(2);
-    expect(r.content).toContain("needs the owner's approval");
+    expect(r.content).toContain("Sent to the owner (#1)");
+    expect(state.escalations).toEqual([{ key: 'approval:"banner" is not on the item list; the owner must approve it', kind: "approval", summary: 'Approve: "banner" is not on the item list; the owner must approve it' }]);
     expect(state.decisions[0]).toMatchObject({ verdict: "escalate", outcome: "escalated" });
+
+    const again = await h.update_order({ spec, reason: "sizes updated" });
+    expect(again.content).toContain("Waiting for the owner (#1)");
+    expect(state.escalations).toHaveLength(1);
+
+    statuses.set('approval:"banner" is not on the item list; the owner must approve it', "approved");
+    const approved = await h.update_order({ spec, reason: "owner approved the banner" });
+    expect(approved.content).toContain("Approved by the owner (#1)");
+    expect(state.decisions.at(-1)).toMatchObject({ verdict: "allow", outcome: "done" });
   });
 
   it("rejects artwork reviews for files that don't exist", async () => {
@@ -239,5 +258,17 @@ describe("check_artwork", () => {
     expect(missing.isError).toBe(true);
     expect(missing.content).toContain("nope");
     expect(state.decisions[0]).toMatchObject({ outcome: "error", detail: "unknown fileId" });
+  });
+});
+
+describe("escalate", () => {
+  it("sends a question to the owner once", async () => {
+    const { h, state } = fakeCtx();
+    const r = await h.escalate({ summary: "Host asks for a 10% discount", reason: "discounts need the owner" });
+    expect(r.content).toBe("Sent to the owner as #1. Their decision will arrive as an event.");
+    expect(state.escalations).toEqual([{ key: "agent:Host asks for a 10% discount", kind: "agent", summary: "Host asks for a 10% discount" }]);
+    const again = await h.escalate({ summary: "Host asks for a 10% discount", reason: "asked again" });
+    expect(again.content).toBe("Already with the owner as #1 (open).");
+    expect(state.decisions.map((d) => d.outcome)).toEqual(["escalated", "escalated"]);
   });
 });

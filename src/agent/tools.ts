@@ -32,6 +32,7 @@ export interface ToolContext {
   previewedBytes(): Promise<number>;
   wasPreviewed(fileId: string): Promise<boolean>;
   logDecision(d: Omit<NewDecision, "orderId">): Promise<void>;
+  escalateOnce(key: string, kind: "approval" | "agent", summary: string, payload: unknown): Promise<{ id: number; status: "open" | "approved" | "rejected"; created: boolean }>;
 }
 
 const reason = z.string().trim().min(3).max(500).describe("One sentence on why, for the public decision log");
@@ -39,6 +40,7 @@ const reason = z.string().trim().min(3).max(500).describe("One sentence on why, 
 const AskHostInput = z.object({ message: z.string().trim().min(1).max(2000).describe("What the host will read"), reason });
 const UpdateOrderInput = z.object({ spec: OrderSpecSchema.describe("The whole order as it now stands"), reason });
 const CheckArtworkInput = z.object({ fileId: z.string().min(1).max(64), reason });
+const EscalateInput = z.object({ summary: z.string().trim().min(3).max(500).describe("What the owner needs to decide or know"), reason });
 
 function inputSchema(schema: z.ZodType): BetaTool.InputSchema {
   const json = z.toJSONSchema(schema) as Record<string, unknown>;
@@ -61,6 +63,11 @@ export const TOOL_DEFINITIONS: BetaTool[] = [
     name: "check_artwork",
     description: "Look at an uploaded artwork file by its fileId. Record your review afterwards with update_order.",
     input_schema: inputSchema(CheckArtworkInput),
+  },
+  {
+    name: "escalate",
+    description: "Ask the owner to decide something you may not decide yourself, or tell them about a problem you can't solve. Their decision arrives later as an event.",
+    input_schema: inputSchema(EscalateInput),
   },
 ];
 
@@ -133,14 +140,36 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         return { verdict: "block", outcome: "blocked", detail, result: { content: `Not saved. ${detail}`, isError: true } };
       }
       await ctx.saveSpec(spec);
-      const approvals = verdicts.filter((v): v is { kind: "escalate"; reason: string } => v.kind === "escalate").map((v) => v.reason);
-      const missing = missingInfo(spec);
+      const reasons = [...new Set(verdicts.filter((v): v is { kind: "escalate"; reason: string } => v.kind === "escalate").map((v) => v.reason))];
       const lines = ["Saved."];
-      if (approvals.length) lines.push(`This needs the owner's approval: ${approvals.join("; ")}. Tell the host a person will confirm it.`);
+      let waiting = false;
+      for (const r of reasons) {
+        const e = await ctx.escalateOnce(`approval:${r}`, "approval", `Approve: ${r}`, { reason: r });
+        if (e.status === "approved") {
+          lines.push(`Approved by the owner (#${e.id}): ${r}.`);
+        } else if (e.status === "rejected") {
+          waiting = true;
+          lines.push(`Rejected by the owner (#${e.id}): ${r}. Remove it from the order and tell the host.`);
+        } else {
+          waiting = true;
+          lines.push(`${e.created ? "Sent to the owner" : "Waiting for the owner"} (#${e.id}): ${r}. Tell the host a person will confirm it.`);
+        }
+      }
+      const missing = missingInfo(spec);
       lines.push(missing.length ? `Still missing: ${missing.join("; ")}` : "The order is complete.");
-      return approvals.length
-        ? { verdict: "escalate", outcome: "escalated", detail: approvals.join("; "), result: { content: lines.join(" ") } }
+      return waiting
+        ? { verdict: "escalate", outcome: "escalated", detail: reasons.join("; "), result: { content: lines.join(" ") } }
         : { verdict: "allow", outcome: "done", result: { content: lines.join(" ") } };
+    }),
+
+    escalate: logged(ctx, "escalate", EscalateInput, async ({ summary }) => {
+      const e = await ctx.escalateOnce(`agent:${summary}`, "agent", summary, {});
+      return {
+        verdict: "escalate",
+        outcome: "escalated",
+        detail: `#${e.id}`,
+        result: { content: e.created ? `Sent to the owner as #${e.id}. Their decision will arrive as an event.` : `Already with the owner as #${e.id} (${e.status}).` },
+      };
     }),
 
     check_artwork: logged(ctx, "check_artwork", CheckArtworkInput, async ({ fileId }) => {

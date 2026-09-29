@@ -1,5 +1,6 @@
 import { Agent } from "agents";
 import { insertDecision, saveOrderSpec } from "../db";
+import { createEscalation, type EscalationKind } from "../escalations";
 import type { Intake } from "../intake";
 import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
@@ -9,6 +10,7 @@ import { runTurn, type ConversationStore, type TurnResult } from "./loop";
 import { previewsIn } from "./previews";
 import { createAnthropicModel, type ModelClient } from "./model";
 import { SYSTEM_PROMPT } from "./prompt";
+import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile } from "./tools";
 
 export const MAX_HOST_MESSAGES = 60;
@@ -55,6 +57,8 @@ export class OrderAgent extends Agent<Env, OrderState> {
   initialState: OrderState = { orderId: null };
   /** Tests set this to a scripted model; production uses Claude. */
   modelOverride: ModelClient | null = null;
+  /** Tests set this to a fake; production uses the Bot API. */
+  telegramOverride: TelegramClient | null = null;
   private tablesReady = false;
   private turnRunning = false;
 
@@ -67,7 +71,45 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.sql`CREATE TABLE IF NOT EXISTS previews (file_id TEXT PRIMARY KEY, bytes INTEGER NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS spec (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS escalated (key TEXT PRIMARY KEY, escalation_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open')`;
     this.tablesReady = true;
+  }
+
+  protected telegram(): TelegramClient {
+    return this.telegramOverride ?? createTelegram(this.env.TELEGRAM_BOT_TOKEN);
+  }
+
+  /** One escalation per key per order; later calls return the existing one and its status. */
+  private async escalateOnce(orderId: number, key: string, kind: EscalationKind, summary: string, payload: unknown) {
+    const existing = this.sql<{ escalation_id: number; status: "open" | "approved" | "rejected" }>`SELECT escalation_id, status FROM escalated WHERE key = ${key}`[0];
+    if (existing) return { id: existing.escalation_id, status: existing.status, created: false };
+    const row = await createEscalation(this.env.DB, { orderId, kind, summary, payload });
+    this.sql`INSERT INTO escalated (key, escalation_id, status) VALUES (${key}, ${row.id}, 'open')`;
+    await notifyOwner(this.env.DB, this.telegram(), this.env.TELEGRAM_OWNER_CHAT_ID, row);
+    return { id: row.id, status: "open" as const, created: true };
+  }
+
+  /** Tells the owner about the agent's own failure; never throws. */
+  private async systemEscalation(orderId: number, reason: string, detail?: string): Promise<void> {
+    try {
+      await this.escalateOnce(orderId, `system:${reason}`, "system", `Order ${orderId}: ${reason}${detail ? ` (${detail.slice(0, 300)})` : ""}`, {});
+    } catch (err) {
+      console.error("system escalation failed", err);
+    }
+  }
+
+  async ownerDecision(e: { id: number; kind: EscalationKind; summary: string }, decision: "approved" | "rejected", note: string | null): Promise<void> {
+    this.ensureTables();
+    this.orderId();
+    if (e.kind === "system") {
+      // An acknowledgement only re-arms the notice; it costs no model call.
+      this.sql`DELETE FROM escalated WHERE escalation_id = ${e.id}`;
+      return;
+    }
+    this.sql`UPDATE escalated SET status = ${decision} WHERE escalation_id = ${e.id}`;
+    const notePart = note ? ` Note from the owner: ${JSON.stringify(note)}.` : "";
+    this.addInbox({ kind: "event", text: `Owner decision on escalation #${e.id} (${e.summary}): ${decision}.${notePart}` });
+    await this.trigger();
   }
 
   private orderId(): number {
@@ -191,6 +233,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     const budgetSpent = async (calls: number) => {
       this.addThread("system", "This order has reached the agent's limit. The owner will continue it personally.");
       await log({ orderId, tool: "agent_run", reason: "per-order model call budget spent", input: { calls }, verdict: "none", outcome: "error" });
+      await this.systemEscalation(orderId, "per-order model call budget spent");
     };
     const calls = Number(this.meta("model_calls") ?? "0");
     if (calls >= MAX_MODEL_CALLS) {
@@ -223,6 +266,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
         previewedBytes: async () => this.sql<{ n: number }>`SELECT COALESCE(SUM(bytes), 0) AS n FROM previews`[0].n,
         wasPreviewed: async (fileId) => this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM previews WHERE file_id = ${fileId}`[0].n > 0,
         logDecision: (d) => log({ orderId, ...d }),
+        escalateOnce: (key, kind, summary, payload) => this.escalateOnce(orderId, key, kind, summary, payload),
       });
     } catch (err) {
       this.addThread("system", "Something went wrong on our side. Your message is saved and the agent will pick it up.");
@@ -230,6 +274,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
         orderId, tool: "agent_run", reason: "policy configuration invalid", verdict: "none", outcome: "error",
         input: null, detail: err instanceof Error ? err.message : String(err),
       });
+      await this.systemEscalation(orderId, "policy configuration invalid", err instanceof Error ? err.message : String(err));
       return null;
     }
 
@@ -274,6 +319,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
       if (result.status === "refused") {
         this.addThread("system", "The agent could not handle the last message. The owner will follow up.");
         await log({ orderId, tool: "agent_run", reason: "model declined the request", input: null, verdict: "none", outcome: "error" });
+        await this.systemEscalation(orderId, "model declined the request");
       } else if (result.status === "tool_limit" || result.status === "truncated") {
         await log({ orderId, tool: "agent_run", reason: `turn ended early: ${result.status}`, input: result, verdict: "none", outcome: "error" });
       }
@@ -287,6 +333,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
           orderId, tool: "agent_run", reason: "model call failed", input: null, verdict: "none", outcome: "error",
           detail: err instanceof Error ? err.message : String(err),
         });
+        await this.systemEscalation(orderId, "model call failed", err instanceof Error ? err.message : String(err));
       }
       return null;
     } finally {

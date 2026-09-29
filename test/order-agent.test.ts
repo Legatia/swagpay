@@ -3,7 +3,9 @@ import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
 import { createOrder, listDecisions } from "../src/db";
+import { getEscalation, listEscalations } from "../src/escalations";
 import { IntakeSchema } from "../src/intake";
+import type { TelegramClient } from "../src/telegram";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
 const intake = IntakeSchema.parse({
@@ -45,6 +47,66 @@ describe("OrderAgent", () => {
     });
     const decisions = await listDecisions(env.DB, order.id);
     expect(decisions.map((d) => d.tool)).toEqual(["ask_host"]);
+  });
+
+  it("escalates an off-list item to the owner's Telegram and turns the decision into an event", async () => {
+    const { order, stub } = await newAgent();
+    const sent: string[] = [];
+    const telegram: TelegramClient = { async send(_c, text) { sent.push(text); return 1; }, async answerCallback() {} };
+    const tee = { kind: "tshirt", description: "Black tee", method: "screen", quantity: 60, colour: "black", sizes: { M: 60 }, printAreas: ["front"] };
+    const spec = { items: [tee, { kind: "banner", description: "2 m banner", quantity: 1 }], artwork: [] };
+    let escalationId = 0;
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.telegramOverride = telegram;
+      agent.modelOverride = scriptedModel([
+        msg([toolUse("update_order", { spec, reason: "host also wants a banner" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      await agent.init(order.id, intake);
+      await agent.processTurn();
+    });
+    const open = (await listEscalations(env.DB, { status: "open" })).filter((e) => e.order_id === order.id);
+    expect(open).toHaveLength(1);
+    escalationId = open[0].id;
+    expect(open[0].kind).toBe("approval");
+    expect(sent[0]).toContain(`#${escalationId} · Order ${order.id} · approval`);
+
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.ownerDecision({ id: escalationId, kind: "approval", summary: open[0].summary }, "approved", "ok for this event");
+      const model = scriptedModel([
+        msg([toolUse("update_order", { spec, reason: "owner approved the banner" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      agent.modelOverride = model;
+      await agent.processTurn();
+      const event = JSON.stringify(model.requests[0].messages.at(-1));
+      expect(event).toContain(`Owner decision on escalation #${escalationId}`);
+      expect(event).toContain("approved");
+      expect(event).toContain("ok for this event");
+      expect(JSON.stringify(model.requests[1].messages.at(-1))).toContain(`Approved by the owner (#${escalationId})`);
+    });
+    // The agent only hears the decision; the D1 row is decided by the Telegram webhook (Task 6).
+    expect((await getEscalation(env.DB, escalationId))?.status).toBe("open");
+  });
+
+  it("opens one system escalation when the model keeps failing", async () => {
+    const { order, stub } = await newAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.telegramOverride = { async send() { return null; }, async answerCallback() {} };
+      agent.modelOverride = { async create() { throw new Error("overloaded"); } };
+      await agent.init(order.id, intake);
+      await agent.processTurn();
+      await agent.postHostMessage("hello?");
+      await agent.processTurn();
+    });
+    const system = (await listEscalations(env.DB)).filter((e) => e.order_id === order.id && e.kind === "system");
+    expect(system).toHaveLength(1);
+    expect(system[0].summary).toContain("model call failed");
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.ownerDecision({ id: system[0].id, kind: "system", summary: system[0].summary }, "approved", null);
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM inbox`[0].n).toBe(0);
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM escalated`[0].n).toBe(0);
+    });
   });
 
   it("runs the queued turn from the Durable Object alarm", async () => {
