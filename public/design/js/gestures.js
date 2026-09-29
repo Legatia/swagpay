@@ -45,7 +45,8 @@ export function attachGestures({ svg, store, getContext, announce, notice = () =
   svg.addEventListener("pointerdown", (e) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     // preventDefault below stops the browser focusing the stage, so do it here: click, then arrows.
-    svg.focus({ preventScroll: true });
+    // No focus ring for touch or pen: it only helps a keyboard or mouse user who reaches for the arrows next.
+    svg.focus({ preventScroll: true, focusVisible: e.pointerType === "mouse" });
     const p = local(e);
     pointers.set(e.pointerId, p);
     svg.setPointerCapture(e.pointerId);
@@ -109,8 +110,10 @@ export function attachGestures({ svg, store, getContext, announce, notice = () =
   svg.addEventListener("pointercancel", end);
 
   svg.addEventListener("keydown", (e) => {
-    // Leave browser shortcuts alone (zoom, Back, and so on).
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Leave browser shortcuts alone (zoom, Back, and so on), but let [ and ] through when a layout
+    // types them with AltGr or Option (German, Polish on Mac, and others).
+    const typedBracket = e.key === "[" || e.key === "]";
+    if (e.metaKey || ((e.ctrlKey || e.altKey) && !typedBracket)) return;
     const s = store.get();
     const layer = s.selectedId ? findLayer(s, s.side, s.selectedId) : null;
     if (!layer) return;

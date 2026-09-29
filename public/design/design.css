@@ -61,7 +61,7 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 .quality { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .quality li { padding: 8px 10px; border-radius: 8px; background: var(--agent-bubble, #fbe3ee); font-size: 0.9rem; }
 .quality li[data-status="block"] { color: var(--error, #b91e5a); font-weight: 700; }
-.notice { position: fixed; left: 16px; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom)); max-width: 640px; margin: 0 auto; z-index: 4; padding: 10px 14px; border-radius: 8px; background: var(--text, #171a38); color: var(--page, #f5f6f9); }
+.notice { position: fixed; left: 16px; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom)); max-width: 640px; margin: 0 auto; z-index: 4; pointer-events: none; padding: 10px 14px; border-radius: 8px; background: var(--text, #171a38); color: var(--page, #f5f6f9); }
 .notice:empty { padding: 0; background: transparent; }
 .downloads { display: flex; flex-wrap: wrap; gap: 8px; }
 .sizes { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
