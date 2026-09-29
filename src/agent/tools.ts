@@ -29,7 +29,11 @@ export interface ArtworkFile {
   bytes: Uint8Array;
 }
 
-export interface ToolContext {
+export interface DecisionLogger {
+  logDecision(d: Omit<NewDecision, "orderId">): Promise<void>;
+}
+
+export interface ToolContext extends DecisionLogger {
   policy: Policy;
   getSpec(): Promise<OrderSpec>;
   saveSpec(spec: OrderSpec): Promise<void>;
@@ -40,7 +44,6 @@ export interface ToolContext {
   hasArtwork(fileId: string): Promise<boolean>;
   previewedBytes(): Promise<number>;
   wasPreviewed(fileId: string): Promise<boolean>;
-  logDecision(d: Omit<NewDecision, "orderId">): Promise<void>;
   orderSummary(): Promise<{ number: number; status: string; deliverBy: Date; deliveryPlace: string }>;
   /** PLN gross (delivery included) the owner gave for these items, or null. */
   printerCost(specKey: string): Promise<number | null>;
@@ -64,7 +67,7 @@ const SendQuoteInput = z.object({
   message: z.string().trim().min(1).max(2000).describe("What the host reads above the quote: what the price covers, with no amounts, percentages or dates; Swagpay adds those."),
   reason,
 });
-function inputSchema(schema: z.ZodType): BetaTool.InputSchema {
+export function inputSchema(schema: z.ZodType): BetaTool.InputSchema {
   const json = z.toJSONSchema(schema) as Record<string, unknown>;
   delete json.$schema;
   return json as BetaTool.InputSchema;
@@ -103,15 +106,15 @@ export const TOOL_DEFINITIONS: BetaTool[] = [
   },
 ];
 
-type Logged = {
+export type Logged = {
   verdict: NewDecision["verdict"];
   outcome: NewDecision["outcome"];
   detail?: string;
   result: ToolOutcome;
 };
 
-function logged<S extends z.ZodType>(
-  ctx: ToolContext,
+export function logged<S extends z.ZodType>(
+  ctx: DecisionLogger,
   name: string,
   schema: S,
   run: (input: z.infer<S>) => Promise<Logged>,

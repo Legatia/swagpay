@@ -1,0 +1,188 @@
+import { Agent } from "agents";
+import { createRpc, type RpcClient } from "../arc";
+import { createEscalation } from "../escalations";
+import { formatUnits, isAddress } from "../money";
+import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
+import {
+  createObligation, getObligation, insertTreasuryDecision, listObligations, loadTreasuryPolicy, orderMargin, payoutsLast24h, queuePayout,
+  queuedUnits, setObligationNote, type TreasuryPolicy,
+} from "../treasury";
+import { SqlR2ConversationStore, repairDanglingToolUse } from "./conversation";
+import { formatInbox, type InboxItem } from "./inbox";
+import { runTurn, type TurnResult } from "./loop";
+import { createAnthropicModel, type ModelClient } from "./model";
+import { TREASURY_PROMPT } from "./treasury-prompt";
+import { TREASURY_TOOLS, makeTreasuryHandlers } from "./treasury-tools";
+
+export const TREASURY_NAME = "treasury";
+export const MAX_TREASURY_CALLS_PER_DAY = 60;
+export const MAX_TREASURY_TOOL_CALLS = 8;
+
+export class TreasuryAgent extends Agent<Env, Record<string, never>> {
+  initialState: Record<string, never> = {};
+  /** Tests set these; production uses Claude, the Bot API and the Arc RPC. */
+  modelOverride: ModelClient | null = null;
+  telegramOverride: TelegramClient | null = null;
+  rpcOverride: RpcClient | null = null;
+  private tablesReady = false;
+  private turnRunning = false;
+
+  private ensureTables(): void {
+    if (this.tablesReady) return;
+    this.sql`CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, text TEXT NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS conversation (id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS escalated (key TEXT PRIMARY KEY, escalation_id INTEGER NOT NULL)`;
+    this.tablesReady = true;
+  }
+
+  private meta(key: string): string | null {
+    return this.sql<{ value: string }>`SELECT value FROM meta WHERE key = ${key}`[0]?.value ?? null;
+  }
+
+  private setMeta(key: string, value: string): void {
+    this.sql`INSERT OR REPLACE INTO meta (key, value) VALUES (${key}, ${value})`;
+  }
+
+  private callsToday(): number {
+    return this.meta("calls_day") === new Date().toISOString().slice(0, 10) ? Number(this.meta("calls") ?? "0") : 0;
+  }
+
+  /** Swagpay tells the treasury something happened; a turn follows. */
+  async notify(text: string): Promise<void> {
+    this.ensureTables();
+    this.sql`INSERT INTO inbox (kind, text) VALUES ('event', ${text})`;
+    await this.trigger();
+  }
+
+  /** Scheduled by hold_obligation. */
+  async recheck(payload: { obligationId: number }): Promise<void> {
+    await this.notify(`Recheck obligation #${payload.obligationId}: you held it earlier.`);
+  }
+
+  private async trigger(): Promise<void> {
+    if (this.env.AGENT_AUTORUN === "1") await this.queue("processTurn", null, { id: "turn" });
+  }
+
+  protected telegram(): TelegramClient {
+    return this.telegramOverride ?? createTelegram(this.env.TELEGRAM_BOT_TOKEN);
+  }
+
+  /** USDC units in the agent wallet, or null when it can't be read. */
+  private async walletUnits(): Promise<number | null> {
+    if (!isAddress(this.env.RECEIVING_ADDRESS)) return null;
+    try {
+      const rpc = this.rpcOverride ?? createRpc([this.env.ARC_RPC_URL, this.env.ARC_RPC_FALLBACK_URL].filter((u) => u));
+      return rpc.erc20Balance ? await rpc.erc20Balance(this.env.USDC_ADDRESS, this.env.RECEIVING_ADDRESS) : null;
+    } catch (err) {
+      console.error("treasury balance read failed", err);
+      return null;
+    }
+  }
+
+  private async escalateOnce(key: string, e: { orderId: number | null; kind: "approval" | "agent" | "system"; summary: string; payload: unknown }): Promise<{ id: number; created: boolean }> {
+    const existing = this.sql<{ escalation_id: number }>`SELECT escalation_id FROM escalated WHERE key = ${key}`[0];
+    if (existing) return { id: existing.escalation_id, created: false };
+    const row = await createEscalation(this.env.DB, e);
+    this.sql`INSERT INTO escalated (key, escalation_id) VALUES (${key}, ${row.id})`;
+    await notifyOwner(this.env.DB, this.telegram(), this.env.TELEGRAM_OWNER_CHAT_ID, row);
+    return { id: row.id, created: true };
+  }
+
+  private async snapshot(policy: TreasuryPolicy): Promise<string> {
+    const [balance, queued, used, open] = await Promise.all([
+      this.walletUnits(), queuedUnits(this.env.DB), payoutsLast24h(this.env.DB),
+      listObligations(this.env.DB, ["open", "approved", "failed", "escalated", "queued"], 30),
+    ]);
+    const lines = [
+      `Treasury snapshot: wallet ${balance === null ? "unknown" : formatUnits(balance)} USDC; queued payouts ${formatUnits(queued)} USDC; paid out in the last 24 hours ${formatUnits(used)} of the ${formatUnits(policy.dailyUnits)} USDC budget; per-payout limit ${formatUnits(policy.perTxUnits)} USDC; reserve share ${policy.reserveMinBps}–${policy.reserveMaxBps} bps.`,
+      open.length ? "Obligations:" : "No open obligations.",
+      ...open.map((o) => `- #${o.id} ${o.kind}${o.order_id !== null ? ` order ${o.order_id}` : ""}: ${formatUnits(o.amount_units)} ${o.token} to ${o.chain} ${o.destination}, ${o.status}${o.approved_by ? ` (approved by ${o.approved_by})` : ""}${o.note ? ` — note: ${o.note}` : ""}`),
+    ];
+    return lines.join("\n");
+  }
+
+  async processTurn(): Promise<TurnResult | null> {
+    if (this.turnRunning) return null;
+    this.ensureTables();
+    const pending = this.sql<{ id: number; kind: InboxItem["kind"]; text: string }>`SELECT id, kind, text FROM inbox ORDER BY id`;
+    const resume = this.meta("turn_pending") === "1";
+    if (pending.length === 0 && !resume) return null;
+    const day = new Date().toISOString().slice(0, 10);
+    const log = (d: Parameters<typeof insertTreasuryDecision>[1]) => insertTreasuryDecision(this.env.DB, d);
+
+    if (this.callsToday() >= MAX_TREASURY_CALLS_PER_DAY) {
+      // Keep the inbox: tomorrow's first turn picks it up.
+      await log({ orderId: null, tool: "agent_run", reason: "daily model call budget spent", input: { day }, verdict: "none", outcome: "error" });
+      await this.escalateOnce(`system:budget:${day}`, { orderId: null, kind: "system", summary: "The treasury agent spent today's model call budget; it resumes tomorrow.", payload: {} });
+      return null;
+    }
+
+    let policy: TreasuryPolicy;
+    let handlers: ReturnType<typeof makeTreasuryHandlers>;
+    try {
+      policy = loadTreasuryPolicy(this.env as unknown as Record<string, unknown>);
+      const p = policy;
+      handlers = makeTreasuryHandlers({
+        policy: p,
+        getObligation: (id) => getObligation(this.env.DB, id),
+        walletUnits: () => this.walletUnits(),
+        payoutsLast24h: () => payoutsLast24h(this.env.DB),
+        queuedUnits: () => queuedUnits(this.env.DB),
+        queuePayout: (ob) => queuePayout(this.env.DB, ob),
+        holdObligation: async (id, hours, note) => {
+          await setObligationNote(this.env.DB, id, `held: ${note}`);
+          await this.schedule(new Date(Date.now() + hours * 3_600_000), "recheck", { obligationId: id }, { idempotent: true });
+        },
+        orderMargin: (orderId) => orderMargin(this.env.DB, orderId),
+        createReserve: (orderId, units, token) => createObligation(this.env.DB, {
+          orderId, kind: "reserve", token, amountUnits: units, destination: p.reserveAddress ?? "", chain: "ARC", dueAt: new Date(), sourceRef: `reserve:order:${orderId}`,
+        }),
+        escalateOnce: (key, e) => this.escalateOnce(key, e),
+        logDecision: async (d) => {
+          const input = d.input as { orderId?: unknown; obligationId?: unknown } | null;
+          let orderId: number | null = typeof input?.orderId === "number" ? input.orderId : null;
+          if (orderId === null && typeof input?.obligationId === "number") orderId = (await getObligation(this.env.DB, input.obligationId))?.order_id ?? null;
+          await log({ ...d, orderId });
+        },
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      await log({ orderId: null, tool: "agent_run", reason: "treasury configuration invalid", input: null, verdict: "none", outcome: "error", detail });
+      await this.escalateOnce(`system:config:${day}`, { orderId: null, kind: "system", summary: `Treasury configuration is invalid: ${detail.slice(0, 200)}`, payload: {} });
+      return null;
+    }
+
+    this.turnRunning = true;
+    try {
+      const store = new SqlR2ConversationStore(this.sql.bind(this), this.env.ARTWORK, `conv/${this.name}/`);
+      await repairDanglingToolUse(this.sql.bind(this), store);
+      if (pending.length > 0) {
+        const items = [...pending.map((p) => ({ kind: p.kind, text: p.text })), { kind: "event" as const, text: await this.snapshot(policy) }];
+        await store.append({ role: "user", content: formatInbox(items) });
+        this.sql`DELETE FROM inbox WHERE id <= ${pending.at(-1)!.id}`;
+        this.setMeta("turn_pending", "1");
+      }
+      const real = this.modelOverride ?? createAnthropicModel(this.env);
+      const model: ModelClient = {
+        create: async (req) => {
+          const n = this.callsToday();
+          if (n >= MAX_TREASURY_CALLS_PER_DAY) throw new Error("daily model call budget spent");
+          this.setMeta("calls_day", new Date().toISOString().slice(0, 10));
+          this.setMeta("calls", String(n + 1));
+          return real.create(req);
+        },
+      };
+      return await runTurn({ model, system: TREASURY_PROMPT, tools: TREASURY_TOOLS, handlers, store, maxToolCalls: MAX_TREASURY_TOOL_CALLS });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      await log({ orderId: null, tool: "agent_run", reason: "treasury turn failed", input: null, verdict: "none", outcome: "error", detail });
+      await this.escalateOnce(`system:turn:${day}`, { orderId: null, kind: "system", summary: `The treasury agent's turn failed: ${detail.slice(0, 200)}`, payload: {} });
+      return null;
+    } finally {
+      this.turnRunning = false;
+      this.setMeta("turn_pending", "0");
+      if (this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM inbox`[0].n > 0) await this.trigger();
+    }
+  }
+}

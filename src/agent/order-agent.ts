@@ -8,7 +8,7 @@ import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
 import { priceBand } from "../quote-text";
 import { createQuote, withdrawStaleQuote } from "../quotes";
-import { SqlR2ConversationStore } from "./conversation";
+import { SqlR2ConversationStore, repairDanglingToolUse } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
 import { runTurn, type ConversationStore, type TurnResult } from "./loop";
 import { previewsIn } from "./previews";
@@ -250,27 +250,6 @@ export class OrderAgent extends Agent<Env, OrderState> {
     };
   }
 
-  /** Closes an assistant tool_use left without results (crash or refusal) so the API accepts the next call. */
-  private async repairDanglingToolUse(store: SqlR2ConversationStore): Promise<void> {
-    const row = this.sql<{ message: string }>`SELECT message FROM conversation ORDER BY id DESC LIMIT 1`[0];
-    if (!row) return;
-    const last = JSON.parse(row.message) as { role?: string; content?: unknown };
-    if (last.role !== "assistant" || !Array.isArray(last.content)) return;
-    const ids = (last.content as { type?: string; id?: string }[])
-      .filter((b) => b?.type === "tool_use" && typeof b.id === "string")
-      .map((b) => b.id as string);
-    if (ids.length === 0) return;
-    await store.append({
-      role: "user",
-      content: ids.map((id) => ({
-        type: "tool_result" as const,
-        tool_use_id: id,
-        content: "Interrupted before the result was saved.",
-        is_error: true,
-      })),
-    });
-  }
-
   /** Tests override this to simulate a bad policy configuration. */
   protected loadTurnPolicy(): ReturnType<typeof loadPolicy> {
     return loadPolicy(this.env as unknown as Record<string, unknown>);
@@ -375,7 +354,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
           }
         },
       };
-      await this.repairDanglingToolUse(store);
+      await repairDanglingToolUse(this.sql.bind(this), store);
       if (pending.length > 0) {
         // Move the inbox into the conversation as one user message, then clear it.
         await store.append({ role: "user", content: formatInbox(pending.map((p) => ({ kind: p.kind, text: p.text }))) });

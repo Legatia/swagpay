@@ -24,6 +24,8 @@ export interface RpcClient {
   chainId(): Promise<number>;
   blockNumber(): Promise<number>;
   getLogs(filter: LogFilter): Promise<RawLog[]>;
+  /** ERC-20 balanceOf, in the token's own smallest units (6 decimals for USDC on Arc's ERC-20 interface). */
+  erc20Balance?(token: string, owner: string): Promise<number>;
   /** True once after a call fell back from the pinned URL to another one. */
   takeSwitched?(): boolean;
 }
@@ -84,6 +86,13 @@ export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcC
     async getLogs(f) {
       const result = await call("eth_getLogs", [{ fromBlock: hex(f.fromBlock), toBlock: hex(f.toBlock), address: f.address, topics: f.topics }], isLogArray);
       return result as RawLog[];
+    },
+    async erc20Balance(token, owner) {
+      const data = `0x70a08231${"0".repeat(24)}${owner.slice(2).toLowerCase()}`;
+      const r = String(await call("eth_call", [{ to: token, data }, "latest"], (x) => typeof x === "string" && /^0x[0-9a-fA-F]*$/.test(x)));
+      const v = BigInt(r === "0x" ? "0x0" : r);
+      if (v > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("eth_call: balance too large");
+      return Number(v);
     },
   };
 }

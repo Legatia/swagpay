@@ -1,11 +1,13 @@
 import { getAgentByName } from "agents";
 import { getOrderById, setOrderStatus } from "./db";
 import { decideEscalation, getEscalation, listEscalations, listUndelivered, markDelivered, statusWord as word, type EscalationRow } from "./escalations";
+import { TREASURY_NAME } from "./agent/treasury-agent";
 import { TOKEN_FOR, formatUnits } from "./money";
 import { createPaymentRequest } from "./payments";
 import { warsawTime } from "./quote-text";
 import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
+import { setObligationStatus } from "./treasury";
 
 type Update = {
   message?: { chat?: { id?: number }; text?: string };
@@ -33,6 +35,15 @@ function sameSecret(given: string, expected: string): boolean {
 /** Tells the order's agent about a decided escalation and records that it was told. Never throws. */
 async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
   try {
+    // First: a failure here delivers nothing, so /resend repeats it (both steps are idempotent).
+    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown } | null; } catch { return null; } })();
+    if (typeof payload?.obligationId === "number") {
+      const obligationId = payload.obligationId;
+      if (row.status === "approved") await setObligationStatus(env.DB, obligationId, ["escalated", "open", "failed"], "approved", { approvedBy: "owner" });
+      else await setObligationStatus(env.DB, obligationId, ["escalated", "open", "failed"], "cancelled");
+      const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
+      await treasury.notify(`Owner decision on obligation #${obligationId}: ${row.status}.${row.decision_note ? ` Note from the owner: ${JSON.stringify(row.decision_note)}.` : ""}`);
+    }
     if (row.order_id !== null) {
       const order = await getOrderById(env.DB, row.order_id);
       if (order) {

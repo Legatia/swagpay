@@ -1,6 +1,7 @@
 import { getAgentByName } from "agents";
 import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, setOrderStatus, type OrderRow } from "./db";
 import { DesignSpecSchema, FILE_ROLES, MAX_DESIGN_BYTES, designProblems, type FileRole } from "./design-spec";
+import { TREASURY_NAME } from "./agent/treasury-agent";
 import { newFileId } from "./ids";
 import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
 import type { ArtworkMeta } from "./agent/order-agent";
@@ -301,6 +302,11 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
       await agent.pushEvent("The host confirmed the swag arrived. The order is closed: thank the host briefly.", "Delivery confirmed. The order is closed.");
     } catch (err) {
       console.error("could not tell the agent the order closed", err);
+    }
+    try {
+      await (await getAgentByName(env.TreasuryAgent, TREASURY_NAME)).notify(`Order ${order.id} closed. Decide its reserve sweep.`);
+    } catch (err) {
+      console.error("could not tell the treasury agent the order closed", err);
     }
     return json(201, { ok: true });
   }

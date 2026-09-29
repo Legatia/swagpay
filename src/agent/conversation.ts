@@ -62,3 +62,14 @@ export class SqlR2ConversationStore implements ConversationStore {
     this.sql`INSERT INTO conversation (message) VALUES (${JSON.stringify(slim)})`;
   }
 }
+
+/** Closes an assistant tool_use left without results (crash or refusal) so the API accepts the next call. */
+export async function repairDanglingToolUse(sql: SqlFn, store: ConversationStore): Promise<void> {
+  const row = sql<{ message: string }>`SELECT message FROM conversation ORDER BY id DESC LIMIT 1`[0];
+  if (!row) return;
+  const last = JSON.parse(row.message) as { role?: string; content?: unknown };
+  if (last.role !== "assistant" || !Array.isArray(last.content)) return;
+  const ids = (last.content as { type?: string; id?: string }[]).filter((b) => b?.type === "tool_use" && typeof b.id === "string").map((b) => b.id as string);
+  if (ids.length === 0) return;
+  await store.append({ role: "user", content: ids.map((id) => ({ type: "tool_result" as const, tool_use_id: id, content: "Interrupted before the result was saved.", is_error: true })) });
+}

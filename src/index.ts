@@ -1,11 +1,12 @@
 import { OrderAgent } from "./agent/order-agent";
+import { TreasuryAgent } from "./agent/treasury-agent";
 import { handleAdmin } from "./admin";
 import { handleApi } from "./api";
 import { computeMetrics, listPublicDecisions, renderLog } from "./public-log";
 import { handleScheduled } from "./scheduled";
 import { handleTelegram } from "./telegram-webhook";
 
-export { OrderAgent };
+export { OrderAgent, TreasuryAgent };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

@@ -8,6 +8,7 @@ import { loadPolicy } from "./policy";
 import { warsawTime } from "./quote-text";
 import { getQuote } from "./quotes";
 import { createTelegram, notifyOwner, type TelegramClient } from "./telegram";
+import { TREASURY_NAME } from "./agent/treasury-agent";
 import { createObligation, loadTreasuryPolicy, printerCostUnits } from "./treasury";
 
 export const CHUNK_BLOCKS = 5000;
@@ -93,6 +94,7 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
       payload: { txHash: t.tx_hash, logIndex: t.log_index, surplus, obligationId: refund.id },
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+    await tellTreasury(env, `Obligation #${refund.id}: refund ${formatUnits(surplus)} ${r.token} awaits the owner's approval.`);
   }
   if (o.via === "claim") {
     // Anyone can paste a public tx hash; the amount matched nothing, so the owner checks it really came from this payer.
@@ -136,6 +138,9 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
       });
       await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
     }
+    if (costOb) {
+      await tellTreasury(env, `Order ${order.id}: deposit completed${late ? " LATE (the owner must first confirm printing is still possible)" : ""}. Obligation #${costOb.id}: printer cost ${formatUnits(costOb.amount_units)} ${r.token} to the payout account (${costOb.status}).`);
+    }
   }
   if (completedBalance) {
     const e = await createEscalation(env.DB, {
@@ -144,6 +149,15 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
       payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id },
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+  }
+}
+
+/** Wakes the treasury agent. It only logs on failure: a throw here would make notifyPass repeat the owner escalations. */
+async function tellTreasury(env: Env, text: string): Promise<void> {
+  try {
+    await (await getAgentByName(env.TreasuryAgent, TREASURY_NAME)).notify(text);
+  } catch (err) {
+    console.error("could not tell the treasury agent", err);
   }
 }
 

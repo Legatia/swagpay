@@ -106,6 +106,19 @@ describe("createRpc", () => {
     expect(seen).toEqual(["https://a", "https://b", "https://b", "https://b", "https://a", "https://c", "https://c"]);
   });
 
+  it("reads an ERC-20 balance with eth_call", async () => {
+    const seen: { method: string; params: unknown[] }[] = [];
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const { id, method, params } = JSON.parse(String(init?.body));
+      seen.push({ method, params });
+      return Response.json({ jsonrpc: "2.0", id, result: "0x" + (1_234_567n).toString(16).padStart(64, "0") });
+    }) as typeof fetch;
+    const owner = "0x1111111111111111111111111111111111111111";
+    expect(await createRpc(["https://a"], fetchImpl).erc20Balance!("0x3600000000000000000000000000000000000000", owner)).toBe(1234567);
+    expect(seen[0].method).toBe("eth_call");
+    expect(JSON.stringify(seen[0].params)).toContain(`0x70a08231${"0".repeat(24)}${"1".repeat(40)}`);
+  });
+
   it("throws the last error when every URL fails", async () => {
     const fetchImpl = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
     await expect(createRpc(["https://a"], fetchImpl).blockNumber()).rejects.toThrow("HTTP 503");
