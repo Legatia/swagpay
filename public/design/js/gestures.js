@@ -41,6 +41,8 @@ export function attachGestures({ svg, store, getContext, announce }) {
 
   svg.addEventListener("pointerdown", (e) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    // preventDefault below stops the browser focusing the stage, so do it here: click, then arrows.
+    svg.focus({ preventScroll: true });
     const p = local(e);
     pointers.set(e.pointerId, p);
     svg.setPointerCapture(e.pointerId);
@@ -104,6 +106,8 @@ export function attachGestures({ svg, store, getContext, announce }) {
   svg.addEventListener("pointercancel", end);
 
   svg.addEventListener("keydown", (e) => {
+    // Leave browser shortcuts alone (zoom, Back, and so on).
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const s = store.get();
     const layer = s.selectedId ? findLayer(s, s.side, s.selectedId) : null;
     if (!layer) return;
