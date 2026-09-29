@@ -4,7 +4,8 @@ import { getAgentByName } from "agents";
 import type { OrderAgent } from "../src/agent/order-agent";
 import { getOrderByToken, saveOrderSpec, setOrderStatus } from "../src/db";
 import { EMPTY_SPEC, itemsKey } from "../src/order-spec";
-import { createQuote, getQuote } from "../src/quotes";
+import { acceptQuoteForOrder, createQuote, getQuote } from "../src/quotes";
+import { createPaymentRequest } from "../src/payments";
 import { handleApi } from "../src/api";
 import { completeSpec } from "./fixtures";
 
@@ -138,7 +139,9 @@ describe("API", () => {
     const res = await accept(token, quote.id);
     expect(res.status).toBe(201);
     const { requestId } = await res.json<{ requestId: number }>();
-    expect((await accept(token, quote.id)).status).toBe(409);
+    const repeat = await accept(token, quote.id);
+    expect(repeat.status).toBe(201);
+    expect((await repeat.json<{ requestId: number }>()).requestId).toBe(requestId);
     const view = await (await SELF.fetch(`${base}/api/o/${token}`)).json<{
       order: { status: string }; quote: { status: string; price: string; deposit: string };
       payments: Array<{ id: number; stage: string; token: string; amount: string; due: string; status: string }>;
@@ -249,6 +252,33 @@ describe("API", () => {
     const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 0, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: await itemsKey(EMPTY_SPEC) }, new Date(), new Date(Date.now() + 48 * 3_600_000));
     expect((await accept(token, quote.id)).status).toBe(500);
     expect((await getQuote(env.DB, quote.id))?.status).toBe("open");
+    expect((await getOrderByToken(env.DB, token))?.status).toBe("quoted");
+  });
+
+  it("reuses the deposit request after a half-finished acceptance", async () => {
+    const { token, order, quote } = await quotedOrder();
+    // As if an earlier call created the request and then failed before answering.
+    const earlier = await createPaymentRequest(env.DB, { orderId: order.id, quoteId: quote.id, stage: "deposit", token: "USDC", cents: quote.deposit_cents, dueBy: new Date(Date.now() + 3_600_000) });
+    const first = await accept(token, quote.id);
+    expect(first.status).toBe(201);
+    expect((await first.json<{ requestId: number }>()).requestId).toBe(earlier.id);
+    expect((await getQuote(env.DB, quote.id))?.status).toBe("accepted");
+    expect((await getOrderByToken(env.DB, token))?.status).toBe("deposit_pending");
+    const again = await accept(token, quote.id);
+    expect(again.status).toBe(201);
+    expect((await again.json<{ requestId: number }>()).requestId).toBe(earlier.id);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM payment_requests WHERE quote_id = ?").bind(quote.id).first<{ n: number }>())?.n).toBe(1);
+  });
+
+  it("does not accept when the order changed between the check and the acceptance", async () => {
+    const { token, order, quote } = await quotedOrder();
+    // Same items, other details: the key still matches, but the acceptance must see the spec it checked.
+    const stale = { ...order, spec_json: JSON.stringify({ ...EMPTY_SPEC, notes: "old" }) };
+    await saveOrderSpec(env.DB, order.id, { ...EMPTY_SPEC, notes: "new" });
+    expect(await acceptQuoteForOrder(env.DB, quote.id, stale, new Date())).toBe("order_changed");
+    expect((await getQuote(env.DB, quote.id))?.status).toBe("open");
+    expect((await getOrderByToken(env.DB, token))?.status).toBe("quoted");
+    expect((await accept(token, quote.id)).status).toBe(201);
   });
 
   it("refuses to accept when the order is no longer quoted", async () => {

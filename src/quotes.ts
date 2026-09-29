@@ -56,8 +56,40 @@ export async function latestQuote(db: D1Database, orderId: number): Promise<Quot
   return db.prepare("SELECT * FROM quotes WHERE order_id = ? AND status != 'superseded' ORDER BY id DESC LIMIT 1").bind(orderId).first<QuoteRow>();
 }
 
+function acceptStatement(db: D1Database, id: number, now: Date): D1PreparedStatement {
+  return db.prepare("UPDATE quotes SET status = 'accepted', accepted_at = ? WHERE id = ? AND status = 'open' RETURNING *").bind(now.toISOString(), id);
+}
+
 export async function acceptQuote(db: D1Database, id: number, now: Date): Promise<QuoteRow | null> {
-  return db.prepare("UPDATE quotes SET status = 'accepted', accepted_at = ? WHERE id = ? AND status = 'open' RETURNING *").bind(now.toISOString(), id).first<QuoteRow>();
+  return acceptStatement(db, id, now).first<QuoteRow>();
+}
+
+/**
+ * Accepts an open quote and moves its order quoted → deposit_pending in one transaction.
+ * The move also requires the order's spec to be the one the caller checked, so an item change that lands in between
+ * undoes the acceptance.
+ */
+export async function acceptQuoteForOrder(
+  db: D1Database,
+  quoteId: number,
+  order: { id: number; spec_json: string | null },
+  now: Date,
+): Promise<"accepted" | "not_open" | "order_changed"> {
+  const [accepted, moved] = await db.batch([
+    acceptStatement(db, quoteId, now),
+    db
+      .prepare(
+        `UPDATE orders SET status = 'deposit_pending' WHERE id = ? AND status = 'quoted' AND spec_json IS ?
+         AND EXISTS (SELECT 1 FROM quotes WHERE id = ? AND status = 'accepted' AND accepted_at = ?)`,
+      )
+      .bind(order.id, order.spec_json, quoteId, now.toISOString()),
+  ]);
+  if (accepted.meta.changes !== 1) return "not_open";
+  if (moved.meta.changes !== 1) {
+    await reopenQuote(db, quoteId);
+    return "order_changed";
+  }
+  return "accepted";
 }
 
 export async function reopenQuote(db: D1Database, id: number): Promise<void> {

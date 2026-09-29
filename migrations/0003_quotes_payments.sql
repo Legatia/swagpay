@@ -38,6 +38,7 @@ CREATE TABLE payment_requests (
   paid_at TEXT
 );
 CREATE UNIQUE INDEX payment_requests_open_tag ON payment_requests(token, tag) WHERE status = 'open';
+CREATE UNIQUE INDEX payment_requests_quote_stage ON payment_requests(quote_id, stage);
 CREATE INDEX payment_requests_by_order ON payment_requests(order_id);
 
 CREATE TABLE payment_claims (

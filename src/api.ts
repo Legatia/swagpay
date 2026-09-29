@@ -7,10 +7,10 @@ import { sniffMediaType } from "./sniff";
 import { verifyTurnstile } from "./turnstile";
 import { ratesFor } from "./fx";
 import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
-import { addClaim, createPaymentRequest, getPaymentRequest, listPaymentRequests, type PaymentRequestRow } from "./payments";
+import { addClaim, createPaymentRequest, findPaymentRequest, getPaymentRequest, listPaymentRequests, type PaymentRequestRow } from "./payments";
 import { EMPTY_SPEC, itemsKey, type OrderSpec } from "./order-spec";
 import { loadPolicy, quoteStillValid } from "./policy";
-import { acceptQuote, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
+import { acceptQuoteForOrder, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -189,6 +189,11 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     const body = (await readJson(request)) as { quoteId?: unknown } | undefined;
     const quote = typeof body?.quoteId === "number" && Number.isInteger(body.quoteId) ? await getQuote(env.DB, body.quoteId) : null;
     if (!quote || quote.order_id !== order.id) return fail(404, "quote not found");
+    if (quote.status === "accepted") {
+      // A repeat of an acceptance that went through: answer with the same deposit request.
+      const existing = await findPaymentRequest(env.DB, quote.id, "deposit");
+      if (existing) return json(201, { requestId: existing.id }, NO_STORE);
+    }
     if (quote.status !== "open") return fail(409, `This quote is ${quote.status}.`);
     if (order.status !== "quoted") return fail(409, "This order already has an accepted quote.");
     const spec = order.spec_json ? (JSON.parse(order.spec_json) as OrderSpec) : EMPTY_SPEC;
@@ -215,19 +220,25 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
       }
       return fail(409, "This quote has expired. The agent will send a new one shortly.");
     }
-    const accepted = await acceptQuote(env.DB, quote.id, now);
-    if (!accepted) return fail(409, "This quote is no longer open.");
+    const outcome = await acceptQuoteForOrder(env.DB, quote.id, order, now);
+    if (outcome === "not_open") return fail(409, "This quote is no longer open.");
+    if (outcome === "order_changed") return fail(409, "The order changed while you were accepting. Please reload the page and try again.");
     let payment: PaymentRequestRow;
     try {
       // The deposit is due within 48 hours, at most a day after the quote's validity, and never after the delivery deadline.
       const dueBy = new Date(Math.min(now.getTime() + 48 * 3_600_000, Date.parse(quote.valid_until) + 24 * 3_600_000, Date.parse(order.deliver_by)));
+      // Reuses the request an earlier, half-finished acceptance of this quote created.
       payment = await createPaymentRequest(env.DB, { orderId: order.id, quoteId: quote.id, stage: "deposit", token: TOKEN_FOR[quote.currency], cents: quote.deposit_cents, dueBy }, now);
     } catch (err) {
-      await reopenQuote(env.DB, quote.id);
+      try {
+        await reopenQuote(env.DB, quote.id);
+        await setOrderStatus(env.DB, order.id, ["deposit_pending"], "quoted");
+      } catch (err2) {
+        console.error("could not undo the acceptance", err2);
+      }
       throw err;
     }
     try {
-      await setOrderStatus(env.DB, order.id, ["quoted"], "deposit_pending");
       const amount = `${formatUnits(payment.amount_units)} ${payment.token}`;
       await agent.pushEvent(
         `The host accepted quote #${quote.id}. Deposit request #${payment.id}: ${amount} on Arc. Payments arrive as events.`,

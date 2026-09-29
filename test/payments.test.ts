@@ -29,6 +29,17 @@ describe("payment requests", () => {
     expect(Date.parse(req.due_by)).toBeGreaterThan(Date.now());
   });
 
+  it("creates one request per quote and stage, returning the existing one on a repeat or a race", async () => {
+    const { order, quoteId, req } = await depositRequest(10000, [4646]);
+    const dueBy = new Date(Date.now() + 3_600_000);
+    const again = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents: 10000, dueBy });
+    expect(again.id).toBe(req.id);
+    const other = await insertQuote(env.DB, order.id);
+    const [a, b] = await Promise.all([1, 2].map(() => createPaymentRequest(env.DB, { orderId: order.id, quoteId: other, stage: "deposit", token: "USDC", cents: 10000, dueBy })));
+    expect(a.id).toBe(b.id);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM payment_requests WHERE quote_id = ?").bind(other).first<{ n: number }>())?.n).toBe(1);
+  });
+
   it("picks another tag when the first is taken by an open request of the same token", async () => {
     const a = await depositRequest(10000, [7777]);
     const b = await depositRequest(20000, [7777, 7778]);

@@ -49,12 +49,19 @@ const isUniqueError = (err: unknown) => err instanceof Error && /UNIQUE constrai
 export const TAG_QUARANTINE_DAYS = 30;
 const randomTag = () => 1 + Math.floor(Math.random() * MAX_TAG);
 
+export async function findPaymentRequest(db: D1Database, quoteId: number, stage: "deposit" | "balance"): Promise<PaymentRequestRow | null> {
+  return db.prepare("SELECT * FROM payment_requests WHERE quote_id = ? AND stage = ?").bind(quoteId, stage).first<PaymentRequestRow>();
+}
+
+/** One request per quote and stage: a repeat call (or a racing one) gets the existing request back. */
 export async function createPaymentRequest(
   db: D1Database,
   r: { orderId: number; quoteId: number; stage: "deposit" | "balance"; token: Token; cents: number; dueBy: Date },
   now: Date = new Date(),
   nextTag: () => number = randomTag,
 ): Promise<PaymentRequestRow> {
+  const existing = await findPaymentRequest(db, r.quoteId, r.stage);
+  if (existing) return existing;
   for (let attempt = 0; attempt < 20; attempt++) {
     const tag = nextTag();
     const since = new Date(now.getTime() - TAG_QUARANTINE_DAYS * 86_400_000).toISOString();
@@ -72,6 +79,9 @@ export async function createPaymentRequest(
       return row;
     } catch (err) {
       if (!isUniqueError(err)) throw err;
+      // Either the tag was just taken (try another) or a racing call created this quote's request (reuse it).
+      const raced = await findPaymentRequest(db, r.quoteId, r.stage);
+      if (raced) return raced;
     }
   }
   throw new Error("no free payment tag after 20 attempts");
