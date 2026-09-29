@@ -91,13 +91,17 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
   await agent.pushEvent(text, `Payment received: ${got}.`);
   // Owner escalations come last, so a failing agent call cannot repeat owner pings on every retry.
   if (surplus > 0) {
+    // A bridge mint (CCTP) arrives from the zero address: there is no one to send the refund back to.
+    const minted = /^0x0{40}$/i.test(t.from_address);
     const refund = await createObligation(env.DB, {
       orderId: order.id, kind: "refund", token: r.token, amountUnits: surplus, destination: t.from_address, chain: "ARC",
-      dueAt: new Date(), sourceRef: `refund:${t.tx_hash}:${t.log_index}`, status: "escalated",
+      dueAt: new Date(), sourceRef: `refund:${t.tx_hash}:${t.log_index}`, status: "escalated", ...(minted ? { note: "sender is the zero address (a bridge mint)" } : {}),
     });
     const e = await createEscalation(env.DB, {
       orderId: order.id, kind: "approval",
-      summary: `Order ${order.id} overpaid by ${formatUnits(surplus)} ${r.token} (tx ${t.tx_hash}). Refund it to ${t.from_address}? ${r.token === "USDC" ? `Approve to let the treasury agent send it (refund obligation #${refund.id}); reject if you'll handle it yourself.` : `The treasury agent only sends USDC: approve once you've refunded it by hand from the wallet, or reject (refund obligation #${refund.id}).`} Exchanges and bridges send from shared addresses: check with the payer first.`,
+      summary: minted
+        ? `Order ${order.id} overpaid by ${formatUnits(surplus)} ${r.token} (tx ${t.tx_hash}; refund obligation #${refund.id}). The sender is the zero address (a bridge mint): ask the payer for a refund address and refund by hand, then reject.`
+        : `Order ${order.id} overpaid by ${formatUnits(surplus)} ${r.token} (tx ${t.tx_hash}). Refund it to ${t.from_address}? ${r.token === "USDC" ? `Approve to let the treasury agent send it (refund obligation #${refund.id}); reject if you'll handle it yourself.` : `The treasury agent only sends USDC: approve once you've refunded it by hand from the wallet, or reject (refund obligation #${refund.id}).`} Exchanges and bridges send from shared addresses: check with the payer first.`,
       payload: { txHash: t.tx_hash, logIndex: t.log_index, surplus, obligationId: refund.id },
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);

@@ -64,6 +64,7 @@ describe("treasury tools", () => {
   it("blocks unapproved refunds, foreign destinations, EURC, closed obligations and a short or unknown balance", async () => {
     const cases: Array<[ObligationRow, Partial<{ balance: number | null; queued: number }>, string]> = [
       [ob({ kind: "refund", destination: "0x9999999999999999999999999999999999999999", chain: "ARC" }), {}, "refunds need the owner's approval"],
+      [ob({ kind: "refund", destination: "0x0000000000000000000000000000000000000000", chain: "ARC", status: "approved", approved_by: "owner" }), {}, "the destination is the zero address"],
       [ob({ destination: "0x9999999999999999999999999999999999999999" }), {}, "is not the configured address"],
       [ob({ token: "EURC" }), {}, "only USDC payouts are configured"],
       [ob({ chain: "ARC" }), {}, "the obligation's chain ARC is not the configured chain"],

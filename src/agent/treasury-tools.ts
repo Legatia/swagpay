@@ -58,6 +58,8 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
       }
       if (ob.token !== "USDC") return blocked("only USDC payouts are configured; escalate");
       if (ob.kind === "refund" && ob.approved_by !== "owner") return blocked("refunds need the owner's approval");
+      // A refund of a bridge mint would go to the zero address and burn the money.
+      if (/^0x0{40}$/i.test(ob.destination)) return blocked("the destination is the zero address");
       const expected = ob.kind === "printer_cost" ? ctx.policy.payoutAddress : ob.kind === "reserve" ? ctx.policy.reserveAddress : ob.destination;
       if (!expected || expected.toLowerCase() !== ob.destination.toLowerCase()) return blocked(`the destination ${ob.destination} is not the configured address`);
       // The same address on another chain may belong to someone else.

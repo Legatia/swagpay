@@ -219,6 +219,22 @@ describe("runWatcher", () => {
     expect(e?.summary).toContain("pay from the wallet by hand");
   });
 
+  it("asks for a refund address when the overpayment came from the zero address (a bridge mint)", async () => {
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const { order, req } = await pendingDeposit(9696);
+    const minted: RawLog = { ...usdcLog(4505, 300_000_000, 9696), topics: [TRANSFER_TOPIC, addressTopic(ZERO), addressTopic(TO)] };
+    await addClaim(env.DB, req.id, minted.transactionHash);
+    await setLastBlock(4500);
+    await runWatcher(env, { rpc: fakeRpc(4540, [minted]).rpc, telegram: silent });
+    const refund = await env.DB.prepare("SELECT * FROM obligations WHERE order_id = ? AND kind = 'refund'").bind(order.id).first<ObligationRow>();
+    expect(refund).toMatchObject({ status: "escalated", destination: ZERO, note: "sender is the zero address (a bridge mint)" });
+    const e = (await listEscalations(env.DB)).find((x) => x.order_id === order.id && x.kind === "approval" && x.summary.includes("overpaid"));
+    expect(e?.summary).toContain(`Order ${order.id} overpaid by 42.490304 USDC`);
+    expect(e?.summary).toContain(`refund obligation #${refund!.id}`);
+    expect(e?.summary).toContain("The sender is the zero address (a bridge mint): ask the payer for a refund address and refund by hand, then reject.");
+    expect(e?.summary).not.toContain(`Refund it to ${ZERO}`);
+  });
+
   it("escalates an overpayment", async () => {
     const { order, req } = await pendingDeposit(6161);
     await setLastBlock(400);
