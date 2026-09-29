@@ -197,8 +197,20 @@ function syncTextWidths() {
 
 export const renderers = [];
 
+// The button that was just pressed is hidden by the step change, so keyboard focus would fall to
+// the page. Move it to the new step's heading instead.
+let shownStep = null;
+function focusStepHeading(step) {
+  const h = $(`step-${step}`).querySelector("h1");
+  if (!h) return;
+  h.tabIndex = -1;
+  h.focus({ preventScroll: true });
+}
+
 function render() {
   const s = store.get();
+  const stepChanged = shownStep !== null && shownStep !== s.step;
+  shownStep = s.step;
   app.dataset.step = s.step;
   for (const step of STEPS) $(`step-${step}`).hidden = step !== s.step;
   $("back").disabled = s.step === "product";
@@ -211,6 +223,7 @@ function render() {
     requestAnimationFrame(syncTextWidths);
   }
   for (const fn of renderers) fn(s);
+  if (stepChanged) focusStepHeading(s.step);
 }
 
 function go(step) {

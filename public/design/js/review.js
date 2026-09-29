@@ -100,6 +100,7 @@ export function renderReview(s) {
           return a;
         }),
       );
+      box.querySelector("a")?.focus();
     } catch (err) {
       b.disabled = false;
       b.textContent = "Prepare files";
