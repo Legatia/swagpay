@@ -259,6 +259,8 @@ describe("API", () => {
     const { token, order, quote } = await quotedOrder();
     // As if an earlier call created the request and then failed before answering.
     const earlier = await createPaymentRequest(env.DB, { orderId: order.id, quoteId: quote.id, stage: "deposit", token: "USDC", cents: quote.deposit_cents, dueBy: new Date(Date.now() + 3_600_000) });
+    // The earlier call passed the validity checks; the quote running out since then doesn't void its request.
+    await env.DB.prepare("UPDATE quotes SET valid_until = ? WHERE id = ?").bind(new Date(Date.now() - 60_000).toISOString(), quote.id).run();
     const first = await accept(token, quote.id);
     expect(first.status).toBe(201);
     expect((await first.json<{ requestId: number }>()).requestId).toBe(earlier.id);

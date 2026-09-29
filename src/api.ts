@@ -189,11 +189,9 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     const body = (await readJson(request)) as { quoteId?: unknown } | undefined;
     const quote = typeof body?.quoteId === "number" && Number.isInteger(body.quoteId) ? await getQuote(env.DB, body.quoteId) : null;
     if (!quote || quote.order_id !== order.id) return fail(404, "quote not found");
-    if (quote.status === "accepted") {
-      // A repeat of an acceptance that went through: answer with the same deposit request.
-      const existing = await findPaymentRequest(env.DB, quote.id, "deposit");
-      if (existing) return json(201, { requestId: existing.id }, NO_STORE);
-    }
+    // A deposit request for this quote means an earlier acceptance got that far: reuse it, never create another.
+    const existing = quote.status === "open" || quote.status === "accepted" ? await findPaymentRequest(env.DB, quote.id, "deposit") : null;
+    if (existing && quote.status === "accepted") return json(201, { requestId: existing.id }, NO_STORE);
     if (quote.status !== "open") return fail(409, `This quote is ${quote.status}.`);
     if (order.status !== "quoted") return fail(409, "This order already has an accepted quote.");
     const spec = order.spec_json ? (JSON.parse(order.spec_json) as OrderSpec) : EMPTY_SPEC;
@@ -208,17 +206,20 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     }
     if (!isAddress(env.RECEIVING_ADDRESS)) return fail(503, "Payments are not open yet. Please try again later.");
     const now = new Date();
-    const rates = await ratesFor(env.DB, quote.currency, now);
-    if (!rates) return fail(503, "Exchange rates are updating. Please try again in a few minutes.");
-    const policy = loadPolicy(env as unknown as Record<string, unknown>);
-    if (Date.parse(quote.valid_until) <= now.getTime() || !quoteStillValid({ issuedAt: new Date(quote.issued_at), plnPerUnit: quote.pln_per_unit }, now, rates.plnPerUnit, policy)) {
-      await expireQuote(env.DB, quote.id);
-      try {
-        await agent.pushEvent(`Quote #${quote.id} expired before the host accepted it: its validity ended (at most ${policy.quoteValidityHours} hours, less when the deadline is close) or the złoty moved more than the FX buffer. Send a new quote with send_quote.`);
-      } catch (err) {
-        console.error("could not tell the agent about the expired quote", err);
+    // The earlier acceptance that created an existing request already passed these checks.
+    if (!existing) {
+      const rates = await ratesFor(env.DB, quote.currency, now);
+      if (!rates) return fail(503, "Exchange rates are updating. Please try again in a few minutes.");
+      const policy = loadPolicy(env as unknown as Record<string, unknown>);
+      if (Date.parse(quote.valid_until) <= now.getTime() || !quoteStillValid({ issuedAt: new Date(quote.issued_at), plnPerUnit: quote.pln_per_unit }, now, rates.plnPerUnit, policy)) {
+        await expireQuote(env.DB, quote.id);
+        try {
+          await agent.pushEvent(`Quote #${quote.id} expired before the host accepted it: its validity ended (at most ${policy.quoteValidityHours} hours, less when the deadline is close) or the złoty moved more than the FX buffer. Send a new quote with send_quote.`);
+        } catch (err) {
+          console.error("could not tell the agent about the expired quote", err);
+        }
+        return fail(409, "This quote has expired. The agent will send a new one shortly.");
       }
-      return fail(409, "This quote has expired. The agent will send a new one shortly.");
     }
     const outcome = await acceptQuoteForOrder(env.DB, quote.id, order, now);
     if (outcome === "not_open") return fail(409, "This quote is no longer open.");
