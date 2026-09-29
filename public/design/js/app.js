@@ -201,7 +201,9 @@ function syncTextWidths() {
     if (l.type !== "text" || !w || Math.abs(w - l.widthMm) < 0.5) return l;
     changed = true;
     const cx = l.xMm + l.widthMm / 2;
-    return { ...l, widthMm: w, xMm: l.align === "center" ? cx - w / 2 : l.align === "right" ? l.xMm + l.widthMm - w : l.xMm };
+    const measured = { ...l, widthMm: w, xMm: l.align === "center" ? cx - w / 2 : l.align === "right" ? l.xMm + l.widthMm - w : l.xMm };
+    // A long line can measure wider than the print area: shrink it to fit, like any other layer.
+    return clampToArea(measured, area()).layer;
   });
   if (changed) store.set({ layers: { ...s.layers, [s.side]: list } }, { record: false });
 }
