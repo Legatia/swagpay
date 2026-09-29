@@ -12,7 +12,9 @@ export async function makeSigner() {
   )) as CryptoKeyPair;
   const jwk = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as JsonWebKey;
   const certs = { keys: [{ kid, kty: "RSA", alg: "RS256", n: jwk.n, e: jwk.e }] };
+  let fetches = 0;
   const fetchImpl = (async (input: RequestInfo | URL) => {
+    fetches++;
     if (String(input) !== `${TEAM}/cdn-cgi/access/certs`) return new Response("nope", { status: 404 });
     return Response.json(certs);
   }) as typeof fetch;
@@ -21,5 +23,5 @@ export async function makeSigner() {
     const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, new TextEncoder().encode(data)));
     return `${data}.${b64url(sig)}`;
   };
-  return { sign, fetchImpl };
+  return { sign, fetchImpl, kid, fetches: () => fetches };
 }

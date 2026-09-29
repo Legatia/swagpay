@@ -47,8 +47,14 @@ export async function verifyAccessJwt(
   const header = decodeJson(parts[0]);
   const payload = decodeJson(parts[1]);
   if (!header || !payload || header.alg !== "RS256" || typeof header.kid !== "string") return null;
-  let jwk = (await certs(teamDomain, fetchImpl, now, false)).find((k) => k.kid === header.kid);
-  if (!jwk) jwk = (await certs(teamDomain, fetchImpl, now, true)).find((k) => k.kid === header.kid);
+  let jwk: Jwk | undefined;
+  try {
+    jwk = (await certs(teamDomain, fetchImpl, now, false)).find((k) => k.kid === header.kid);
+    if (!jwk) jwk = (await certs(teamDomain, fetchImpl, now, true)).find((k) => k.kid === header.kid);
+  } catch (err) {
+    console.error("access certs fetch failed", err);
+    return null;
+  }
   if (!jwk?.n || !jwk.e) return null;
   try {
     const key = await crypto.subtle.importKey(
