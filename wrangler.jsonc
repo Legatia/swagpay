@@ -11,5 +11,20 @@
     { "binding": "DB", "database_name": "swagpay", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [{ "binding": "ARTWORK", "bucket_name": "swagpay-artwork" }],
-  "vars": { "MODEL": "claude-sonnet-5-5", "AGENT_AUTORUN": "1", "MAX_NEW_ORDERS_PER_DAY": "20" }
+  "triggers": { "crons": ["* * * * *", "17 * * * *"] },
+  "vars": {
+    "MODEL": "claude-sonnet-5-5",
+    "AGENT_AUTORUN": "1",
+    "MAX_NEW_ORDERS_PER_DAY": "20",
+    "REQUIRE_TURNSTILE": "1",
+    "TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": "",
+    "RECEIVING_ADDRESS": "",
+    "ARC_CHAIN_ID": "5042",
+    "USDC_ADDRESS": "0x3600000000000000000000000000000000000000",
+    "EURC_ADDRESS": "0xbEf5f6d51CB62b58e6A8f77868681825C6fe21c1",
+    "ARC_RPC_URL": "https://rpc.blockdaemon.mainnet.arc.io",
+    "ARC_RPC_FALLBACK_URL": ""
+  }
 }

@@ -23,6 +23,27 @@
     <div id="missing"></div>
   </section>
 
+  <section class="sheet" id="quote-box" hidden>
+    <h2>Quote</h2>
+    <p id="quote-text"></p>
+    <p class="muted" id="quote-valid"></p>
+    <button type="button" id="accept" hidden>Accept quote</button>
+  </section>
+
+  <section class="sheet" id="pay-box" hidden>
+    <h2>Payment</h2>
+    <div id="payments"></div>
+    <p class="muted">Send exactly the amount shown, on Arc, to the address below. If an exchange takes a withdrawal fee from the amount, the difference shows as still due.</p>
+    <p class="mono" id="pay-address"></p>
+    <p class="mono" id="pay-token" hidden></p>
+    <form id="claim-form">
+      <label>Paid? Paste the transaction hash so we can match it faster
+        <input id="tx" maxlength="66" placeholder="0x…" autocomplete="off">
+      </label>
+      <button type="submit" id="claim">Send hash</button>
+    </form>
+  </section>
+
   <section class="sheet">
     <h2>Artwork</h2>
     <div id="artwork" class="chips"></div>

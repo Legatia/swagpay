@@ -75,3 +75,19 @@ export function businessDaysBetween(now: Date, deadline: Date): number {
   for (let t = start; t < end; t += DAY) if (isPolishBusinessDay(utcMsToYmd(t))) count++;
   return count;
 }
+
+/**
+ * The first Warsaw midnight after `now` from which fewer than `requiredDays` business days remain before `deadline`;
+ * the deadline itself if earlier. Looks at most 60 days ahead and returns the 60th midnight when nothing earlier qualifies.
+ */
+export function leadTimeCutoff(now: Date, deadline: Date, requiredDays: number): Date {
+  const DAY = 86_400_000;
+  const today = ymdToUtcMs(warsawDate(now));
+  let midnight = now;
+  for (let i = 1; i <= 60; i++) {
+    midnight = warsawLocalToUtc(`${utcMsToYmd(today + i * DAY)}T00:00`);
+    if (midnight.getTime() >= deadline.getTime()) return deadline;
+    if (businessDaysBetween(midnight, deadline) < requiredDays) return midnight;
+  }
+  return midnight;
+}

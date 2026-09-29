@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
-  countOrdersSince, createOrder, getOrderById, getOrderByToken, insertDecision, listDecisions, saveOrderSpec,
+  countOrdersSince, createOrder, getOrderById, getOrderByToken, insertDecision, listDecisions, saveOrderSpec, setOrderStatus,
 } from "../src/db";
 import { IntakeSchema } from "../src/intake";
 
@@ -30,6 +30,16 @@ describe("db", () => {
     expect(JSON.parse((await getOrderById(env.DB, order.id))!.spec_json!)).toEqual({ items: [], artwork: [], notes: "hi" });
     expect(await countOrdersSince(env.DB, new Date("2090-01-01T00:00:00Z"))).toBeGreaterThanOrEqual(1);
     expect(await countOrdersSince(env.DB, new Date("2090-01-02T00:00:00Z"))).toBe(0);
+  });
+
+  it("freezes the spec once a quote was accepted", async () => {
+    const { order } = await createOrder(env.DB, intake, new Date("2026-10-01T10:00:00Z"));
+    await saveOrderSpec(env.DB, order.id, { items: [], artwork: [], notes: "draft" });
+    await setOrderStatus(env.DB, order.id, ["draft"], "quoted");
+    await saveOrderSpec(env.DB, order.id, { items: [], artwork: [], notes: "quoted" });
+    await setOrderStatus(env.DB, order.id, ["quoted"], "deposit_pending");
+    await expect(saveOrderSpec(env.DB, order.id, { items: [], artwork: [], notes: "late" })).rejects.toThrow("items are frozen: a quote was already accepted");
+    expect(JSON.parse((await getOrderById(env.DB, order.id))!.spec_json!).notes).toBe("quoted");
   });
 
   it("logs decisions in order", async () => {

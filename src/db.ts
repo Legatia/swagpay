@@ -51,8 +51,10 @@ export async function getOrderById(db: D1Database, id: number): Promise<OrderRow
   return db.prepare(`SELECT ${ORDER_COLUMNS} FROM orders WHERE id = ?`).bind(id).first<OrderRow>();
 }
 
+/** Saves the spec while the order can still change; after a quote is accepted the items are frozen. */
 export async function saveOrderSpec(db: D1Database, id: number, spec: OrderSpec): Promise<void> {
-  await db.prepare("UPDATE orders SET spec_json = ? WHERE id = ?").bind(JSON.stringify(spec), id).run();
+  const res = await db.prepare("UPDATE orders SET spec_json = ? WHERE id = ? AND status IN ('draft','quoted')").bind(JSON.stringify(spec), id).run();
+  if (res.meta.changes !== 1) throw new Error("items are frozen: a quote was already accepted");
 }
 
 export async function countOrdersSince(db: D1Database, since: Date): Promise<number> {
@@ -98,7 +100,21 @@ export async function listDecisions(db: D1Database, orderId: number): Promise<De
 
 export async function deleteOrder(db: D1Database, id: number): Promise<void> {
   await db.batch([
+    db.prepare("DELETE FROM escalations WHERE order_id = ?").bind(id),
     db.prepare("DELETE FROM decisions WHERE order_id = ?").bind(id),
     db.prepare("DELETE FROM orders WHERE id = ?").bind(id),
   ]);
+}
+
+export async function listRecentOrders(db: D1Database, limit: number): Promise<OrderRow[]> {
+  return (await db.prepare(`SELECT ${ORDER_COLUMNS} FROM orders ORDER BY id DESC LIMIT ?`).bind(limit).all<OrderRow>()).results;
+}
+
+/** Moves an order to `to` only from one of the `from` states. Returns whether it moved. */
+export async function setOrderStatus(db: D1Database, id: number, from: string[], to: string): Promise<boolean> {
+  const res = await db
+    .prepare(`UPDATE orders SET status = ? WHERE id = ? AND status IN (${from.map(() => "?").join(", ")})`)
+    .bind(to, id, ...from)
+    .run();
+  return res.meta.changes === 1;
 }

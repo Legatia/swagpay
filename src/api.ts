@@ -1,12 +1,25 @@
 import { getAgentByName } from "agents";
-import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, type OrderRow } from "./db";
+import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, setOrderStatus, type OrderRow } from "./db";
+import { DesignSpecSchema, FILE_ROLES, MAX_DESIGN_BYTES, designProblems, type FileRole } from "./design-spec";
 import { newFileId } from "./ids";
 import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
 import type { ArtworkMeta } from "./agent/order-agent";
+import { sniffMediaType } from "./sniff";
+import { verifyTurnstile } from "./turnstile";
+import { ratesFor } from "./fx";
+import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
+import { addClaim, createPaymentRequest, findPaymentRequest, getPaymentRequest, listPaymentRequests, type PaymentRequestRow } from "./payments";
+import { EMPTY_SPEC, itemsKey, type OrderSpec } from "./order-spec";
+import { loadPolicy, quoteStillValid } from "./policy";
+import { acceptQuoteForOrder, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
 export const UPLOAD_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml", "application/pdf"];
+
+export interface ApiDeps {
+  verifyHuman?: (token: unknown, ip: string | null) => Promise<boolean>;
+}
 
 const json = (status: number, body: unknown, headers?: HeadersInit) => Response.json(body, { status, headers });
 const NO_STORE = { "cache-control": "no-store" };
@@ -42,13 +55,53 @@ function publicOrder(o: OrderRow) {
   };
 }
 
-export async function handleApi(request: Request, env: Env): Promise<Response> {
+function publicQuote(q: QuoteRow | null) {
+  if (!q) return null;
+  return { id: q.id, currency: q.currency, price: formatCents(q.price_cents), deposit: formatCents(q.deposit_cents), validUntil: q.valid_until, status: q.status };
+}
+
+function publicPayment(p: PaymentRequestRow) {
+  return {
+    id: p.id, stage: p.stage, token: p.token, amount: formatUnits(p.amount_units), paid: formatUnits(p.paid_units),
+    due: formatUnits(Math.max(0, p.amount_units - p.paid_units)), status: p.status,
+  };
+}
+
+function payTo(env: Env) {
+  if (!isAddress(env.RECEIVING_ADDRESS)) return null;
+  return { address: env.RECEIVING_ADDRESS, network: "Arc", chainId: Number(env.ARC_CHAIN_ID) || 5042, tokens: { USDC: env.USDC_ADDRESS, EURC: env.EURC_ADDRESS } };
+}
+
+export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+
+  if (path === "/api/config" && request.method === "GET") {
+    return json(200, { turnstileSiteKey: env.TURNSTILE_SITE_KEY || null });
+  }
+
+  if (path === "/api/pricing" && request.method === "GET") {
+    const now = new Date();
+    const [usd, eur] = await Promise.all([ratesFor(env.DB, "USD", now), ratesFor(env.DB, "EUR", now)]);
+    const policy = loadPolicy(env as unknown as Record<string, unknown>);
+    const fresh = usd && eur;
+    const at = fresh ? (await env.DB.prepare("SELECT MIN(fetched_at) AS at FROM fx_rates WHERE code IN ('USD', 'EUR')").first<{ at: string | null }>())?.at ?? null : null;
+    return json(200, {
+      plnPerUnit: fresh ? { USD: usd.plnPerUnit, EUR: eur.plnPerUnit } : null,
+      fetchedAt: at, markupMin: policy.markupMin, markupMax: policy.markupMax, fxBuffer: policy.fxBuffer, perOrderCapUsd: policy.perOrderCapUsd,
+    }, { "cache-control": "public, max-age=300" });
+  }
 
   if (path === "/api/orders" && request.method === "POST") {
     const body = await readJson(request);
     if (body === undefined) return fail(400, "body must be JSON");
+    if (String(env.REQUIRE_TURNSTILE) !== "0") {
+      const secret = env.TURNSTILE_SECRET;
+      const verifyHuman = deps.verifyHuman ?? (secret ? (token: unknown, ip: string | null) => verifyTurnstile(token, ip, secret) : async () => false);
+      if (!(await verifyHuman((body as { turnstile?: unknown } | null)?.turnstile, request.headers.get("cf-connecting-ip")))) {
+        return fail(403, "Please complete the human check and try again.");
+      }
+    }
     const parsed = IntakeSchema.safeParse(body);
     if (!parsed.success) return fail(400, issueText(parsed.error));
     const now = new Date();
@@ -69,7 +122,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     return json(201, { token, url: `/o/${token}` }, NO_STORE);
   }
 
-  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork)?$/.exec(path);
+  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork|\/design|\/quote\/accept|\/payments\/(\d{1,9})\/claim)?$/.exec(path);
   if (!m) return fail(404, "not found");
   const order = await getOrderByToken(env.DB, m[1]);
   if (!order) return fail(404, "order not found");
@@ -77,7 +130,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
   const sub = m[2];
 
   if (!sub && request.method === "GET") {
-    return json(200, { order: publicOrder(order), view: await agent.getView() }, NO_STORE);
+    const [view, quote, payments] = await Promise.all([agent.getView(), latestQuote(env.DB, order.id), listPaymentRequests(env.DB, order.id)]);
+    return json(200, { order: publicOrder(order), view, quote: publicQuote(quote), payments: payments.map(publicPayment), payTo: payTo(env) }, NO_STORE);
   }
 
   if (sub === "/messages" && request.method === "POST") {
@@ -103,19 +157,28 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     }
     const file = form.get("file");
     if (!(file instanceof File)) return fail(400, "file is required");
+    const rawRole = form.get("role");
+    const role = rawRole === null ? "artwork" : String(rawRole);
+    if (!(FILE_ROLES as readonly string[]).includes(role)) return fail(400, "role must be artwork, mockup, print or cutline");
     if (!UPLOAD_TYPES.includes(file.type)) return fail(400, "send PNG, JPEG, WebP, GIF, SVG or PDF");
     if (file.size > MAX_UPLOAD_BYTES) return fail(413, "files can be up to 10 MB");
     const view = await agent.getView();
     if (view.artwork.length >= MAX_FILES_PER_ORDER) return fail(400, "an order can have up to 10 files");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.length === 0) return fail(400, "the file is empty");
+    if (sniffMediaType(bytes) !== file.type) {
+      return fail(400, "the file's content doesn't match its type; export it again as PNG, JPEG, WebP, GIF, SVG or PDF");
+    }
     const fileId = newFileId();
     const key = `artwork/${order.instance}/${fileId}`;
-    await env.ARTWORK.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
+    await env.ARTWORK.put(key, bytes, { httpMetadata: { contentType: file.type } });
     const meta: ArtworkMeta = {
       fileId,
       name: file.name.slice(0, 120),
       mediaType: file.type,
       size: file.size,
       key,
+      role: role as FileRole,
       at: new Date().toISOString(),
     };
     try {
@@ -125,6 +188,105 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       throw err;
     }
     return json(201, { fileId });
+  }
+
+  if (sub === "/quote/accept" && request.method === "POST") {
+    const body = (await readJson(request)) as { quoteId?: unknown } | undefined;
+    const quote = typeof body?.quoteId === "number" && Number.isInteger(body.quoteId) ? await getQuote(env.DB, body.quoteId) : null;
+    if (!quote || quote.order_id !== order.id) return fail(404, "quote not found");
+    // A deposit request for this quote means an earlier acceptance got that far: reuse it, never create another.
+    const existing = quote.status === "open" || quote.status === "accepted" ? await findPaymentRequest(env.DB, quote.id, "deposit") : null;
+    if (existing && quote.status === "accepted") return json(201, { requestId: existing.id }, NO_STORE);
+    if (quote.status !== "open") return fail(409, `This quote is ${quote.status}.`);
+    if (order.status !== "quoted") return fail(409, "This order already has an accepted quote.");
+    const spec = order.spec_json ? (JSON.parse(order.spec_json) as OrderSpec) : EMPTY_SPEC;
+    if ((await itemsKey(spec)) !== quote.items_key) {
+      await supersedeQuote(env.DB, quote.id);
+      try {
+        await agent.pushEvent(`Quote #${quote.id} no longer matches the order's items; send a new quote.`);
+      } catch (err) {
+        console.error("could not tell the agent about the outdated quote", err);
+      }
+      return fail(409, "The order changed since this quote. The agent will send a new one.");
+    }
+    if (!isAddress(env.RECEIVING_ADDRESS)) return fail(503, "Payments are not open yet. Please try again later.");
+    const now = new Date();
+    // The earlier acceptance that created an existing request already passed these checks.
+    if (!existing) {
+      const rates = await ratesFor(env.DB, quote.currency, now);
+      if (!rates) return fail(503, "Exchange rates are updating. Please try again in a few minutes.");
+      const policy = loadPolicy(env as unknown as Record<string, unknown>);
+      if (Date.parse(quote.valid_until) <= now.getTime() || !quoteStillValid({ issuedAt: new Date(quote.issued_at), plnPerUnit: quote.pln_per_unit }, now, rates.plnPerUnit, policy)) {
+        await expireQuote(env.DB, quote.id);
+        try {
+          await agent.pushEvent(`Quote #${quote.id} expired before the host accepted it: its validity ended (at most ${policy.quoteValidityHours} hours, less when the deadline is close) or the złoty moved more than the FX buffer. Send a new quote with send_quote.`);
+        } catch (err) {
+          console.error("could not tell the agent about the expired quote", err);
+        }
+        return fail(409, "This quote has expired. The agent will send a new one shortly.");
+      }
+    }
+    const outcome = await acceptQuoteForOrder(env.DB, quote.id, order, now);
+    if (outcome === "not_open") return fail(409, "This quote is no longer open.");
+    if (outcome === "order_changed") return fail(409, "The order changed while you were accepting. Please reload the page and try again.");
+    let payment: PaymentRequestRow;
+    try {
+      // The deposit is due within 48 hours, at most a day after the quote's validity, and never after the delivery deadline.
+      const dueBy = new Date(Math.min(now.getTime() + 48 * 3_600_000, Date.parse(quote.valid_until) + 24 * 3_600_000, Date.parse(order.deliver_by)));
+      // Reuses the request an earlier, half-finished acceptance of this quote created.
+      payment = await createPaymentRequest(env.DB, { orderId: order.id, quoteId: quote.id, stage: "deposit", token: TOKEN_FOR[quote.currency], cents: quote.deposit_cents, dueBy }, now);
+    } catch (err) {
+      try {
+        await reopenQuote(env.DB, quote.id);
+        await setOrderStatus(env.DB, order.id, ["deposit_pending"], "quoted");
+      } catch (err2) {
+        console.error("could not undo the acceptance", err2);
+      }
+      throw err;
+    }
+    try {
+      const amount = `${formatUnits(payment.amount_units)} ${payment.token}`;
+      await agent.pushEvent(
+        `The host accepted quote #${quote.id}. Deposit request #${payment.id}: ${amount} on Arc. Payments arrive as events.`,
+        `Quote #${quote.id} accepted. Deposit due: ${amount}.`,
+      );
+    } catch (err) {
+      console.error("acceptance committed but follow-up failed", err);
+    }
+    return json(201, { requestId: payment.id }, NO_STORE);
+  }
+
+  if (m[3] && request.method === "POST") {
+    const body = (await readJson(request)) as { txHash?: unknown } | undefined;
+    const txHash = typeof body?.txHash === "string" ? body.txHash.trim().toLowerCase() : "";
+    if (!/^0x[0-9a-f]{64}$/.test(txHash)) return fail(400, "paste the transaction hash: 0x followed by 64 characters");
+    const payment = await getPaymentRequest(env.DB, Number(m[3]));
+    if (!payment || payment.order_id !== order.id) return fail(404, "payment request not found");
+    if (payment.status !== "open") return fail(409, "This payment is already complete.");
+    const claims = (await env.DB.prepare("SELECT COUNT(*) AS n FROM payment_claims WHERE request_id = ?").bind(payment.id).first<{ n: number }>())?.n ?? 0;
+    if (claims >= 5) return fail(429, "Too many transaction hashes for this payment. The owner will check it.");
+    if ((await addClaim(env.DB, payment.id, txHash)) === "taken") return fail(409, "That transaction is already linked to another payment.");
+    return json(201, { ok: true });
+  }
+
+  if (sub === "/design" && request.method === "POST") {
+    if (Number(request.headers.get("content-length") ?? 0) > MAX_DESIGN_BYTES) return fail(413, "a design can be up to 64 KB");
+    const raw = await request.text();
+    if (new TextEncoder().encode(raw).length > MAX_DESIGN_BYTES) return fail(413, "a design can be up to 64 KB");
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      return fail(400, "body must be JSON");
+    }
+    const parsed = DesignSpecSchema.safeParse(body);
+    if (!parsed.success) return fail(400, issueText(parsed.error));
+    if (order.status !== "draft" && order.status !== "quoted") return fail(409, "A quote was already accepted; the design can't change now.");
+    const view = await agent.getView();
+    const problems = designProblems(parsed.data, view.artwork.map((a) => ({ fileId: a.fileId, role: a.role })));
+    if (problems.length) return fail(400, problems.join("; "));
+    await agent.setDesign(parsed.data);
+    return json(201, { ok: true });
   }
 
   return fail(405, "method not allowed");
