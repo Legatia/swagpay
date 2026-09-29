@@ -95,3 +95,10 @@ export async function listDecisions(db: D1Database, orderId: number): Promise<De
   const { results } = await db.prepare("SELECT * FROM decisions WHERE order_id = ? ORDER BY id").bind(orderId).all<DecisionRow>();
   return results;
 }
+
+export async function deleteOrder(db: D1Database, id: number): Promise<void> {
+  await db.batch([
+    db.prepare("DELETE FROM decisions WHERE order_id = ?").bind(id),
+    db.prepare("DELETE FROM orders WHERE id = ?").bind(id),
+  ]);
+}

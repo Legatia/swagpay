@@ -1,5 +1,5 @@
 import { getAgentByName } from "agents";
-import { countOrdersSince, createOrder, getOrderByToken, type OrderRow } from "./db";
+import { countOrdersSince, createOrder, deleteOrder, getOrderByToken, type OrderRow } from "./db";
 import { newFileId } from "./ids";
 import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
 import type { ArtworkMeta } from "./agent/order-agent";
@@ -8,7 +8,19 @@ export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
 export const UPLOAD_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml", "application/pdf"];
 
-const json = (status: number, body: unknown) => Response.json(body, { status });
+const json = (status: number, body: unknown, headers?: HeadersInit) => Response.json(body, { status, headers });
+const NO_STORE = { "cache-control": "no-store" };
+
+let warnedCap = false;
+function orderCap(env: Env): number {
+  const n = Number(env.MAX_NEW_ORDERS_PER_DAY);
+  if (Number.isFinite(n) && n > 0) return n;
+  if (!warnedCap) {
+    warnedCap = true;
+    console.warn("MAX_NEW_ORDERS_PER_DAY is missing or invalid; using 20");
+  }
+  return 20;
+}
 const fail = (status: number, error: string) => json(status, { error });
 
 async function readJson(request: Request): Promise<unknown | undefined> {
@@ -42,14 +54,19 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     const now = new Date();
     const dateProblem = checkIntakeDates(parsed.data, now);
     if (dateProblem) return fail(400, dateProblem);
-    const cap = Number(env.MAX_NEW_ORDERS_PER_DAY);
+    const cap = orderCap(env);
     if ((await countOrdersSince(env.DB, new Date(now.getTime() - 86_400_000))) >= cap) {
       return fail(429, "Swagpay is taking as many new orders as it can today. Please try again tomorrow.");
     }
     const { order, token } = await createOrder(env.DB, parsed.data, now);
-    const agent = await getAgentByName(env.OrderAgent, order.instance);
-    await agent.init(order.id, parsed.data);
-    return json(201, { token, url: `/o/${token}` });
+    try {
+      const agent = await getAgentByName(env.OrderAgent, order.instance);
+      await agent.init(order.id, parsed.data);
+    } catch (err) {
+      await deleteOrder(env.DB, order.id);
+      throw err;
+    }
+    return json(201, { token, url: `/o/${token}` }, NO_STORE);
   }
 
   const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork)?$/.exec(path);
@@ -60,7 +77,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
   const sub = m[2];
 
   if (!sub && request.method === "GET") {
-    return json(200, { order: publicOrder(order), view: await agent.getView() });
+    return json(200, { order: publicOrder(order), view: await agent.getView() }, NO_STORE);
   }
 
   if (sub === "/messages" && request.method === "POST") {
@@ -101,7 +118,12 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       key,
       at: new Date().toISOString(),
     };
-    await agent.addArtwork(meta);
+    try {
+      await agent.addArtwork(meta);
+    } catch (err) {
+      await env.ARTWORK.delete(key);
+      throw err;
+    }
     return json(201, { fileId });
   }
 

@@ -21,6 +21,7 @@ describe("API", () => {
     const token = await newOrder();
     const res = await SELF.fetch(`${base}/api/o/${token}`);
     expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
     const body = await res.json<{ order: { eventName: string; deliverBy: string }; view: { thread: Array<{ text: string }> } }>();
     expect(body.order.eventName).toBe("Builders meetup");
     expect(body.order.deliverBy).toBe("2099-10-08T15:00:00.000Z");
@@ -71,6 +72,31 @@ describe("API", () => {
     const big = new FormData();
     big.append("file", new File([new Uint8Array(10_000_001)], "big.png", { type: "image/png" }));
     expect((await SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: big })).status).toBe(413);
+  });
+
+  it("stops host messages at the per-order limit", async () => {
+    const token = await newOrder();
+    const post = () => SELF.fetch(`${base}/api/o/${token}/messages`, { method: "POST", body: JSON.stringify({ text: "hi" }) });
+    for (let i = 0; i < 59; i++) expect((await post()).status).toBe(201);
+    expect((await post()).status).toBe(429);
+  });
+
+  it("stops uploads at the per-order file limit", async () => {
+    const token = await newOrder();
+    const upload = () => {
+      const form = new FormData();
+      form.append("file", new File([new Uint8Array([137, 80, 78, 71])], "logo.png", { type: "image/png" }));
+      return SELF.fetch(`${base}/api/o/${token}/artwork`, { method: "POST", body: form });
+    };
+    for (let i = 0; i < 10; i++) expect((await upload()).status).toBe(201);
+    const res = await upload();
+    expect(res.status).toBe(400);
+    expect((await res.json<{ error: string }>()).error).toContain("up to 10 files");
+  });
+
+  it("rejects unsupported methods on an order", async () => {
+    const token = await newOrder();
+    expect((await SELF.fetch(`${base}/api/o/${token}`, { method: "PUT" })).status).toBe(405);
   });
 
   it("caps new orders per day", async () => {
