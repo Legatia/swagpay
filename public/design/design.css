@@ -38,7 +38,12 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 
 .editor { display: grid; gap: 12px; }
 /* The stage stays white in dark mode: garments, print areas and exports are drawn for white. */
-.stage-wrap { background: #ffffff; border: 1px solid var(--line, #d9dcea); border-radius: 12px; padding: 8px; }
+.stage-wrap { position: relative; background: #ffffff; border: 1px solid var(--line, #d9dcea); border-radius: 12px; padding: 8px; }
+/* Empty stage: the mascot invites the first logo. Clicks pass through to the stage. */
+.stage-empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; pointer-events: none; color: #4a4f72; font-weight: 700; text-align: center; }
+.stage-empty[hidden] { display: none; }
+.stage-empty img { width: min(120px, 30vw); height: auto; }
+.stage-empty p { margin: 0; padding: 6px 12px; background: rgba(255, 255, 255, 0.9); border-radius: 999px; }
 #stage { display: block; width: 100%; height: min(58vh, 560px); touch-action: none; user-select: none; -webkit-user-select: none; }
 #stage .garment { stroke: #171a38; stroke-width: 2; }
 #stage .print-area { fill: none; stroke: #2466c4; stroke-width: 1.5; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
@@ -48,7 +53,8 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 #stage .layer { cursor: move; }
 #stage .selection rect { fill: none; stroke: #d7266f; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 #stage .selection circle { fill: #ffffff; stroke: #d7266f; stroke-width: 2; vector-effect: non-scaling-stroke; cursor: pointer; }
-#stage .empty-hint { fill: #4a4f72; font-family: "Figtree", sans-serif; }
+/* The #stage-empty overlay carries this message now, with the mascot. */
+#stage .empty-hint { display: none; }
 
 .toolbar { position: sticky; bottom: 72px; display: flex; gap: 8px; flex-wrap: wrap; padding: 8px; background: var(--page, #f5f6f9); z-index: 2; }
 .tool { display: inline-flex; align-items: center; padding: 10px 14px; border-radius: 8px; font-weight: 700; cursor: pointer; }

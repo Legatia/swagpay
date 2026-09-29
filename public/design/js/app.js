@@ -231,6 +231,7 @@ function render() {
   $("undo").disabled = !store.canUndo();
   $("redo").disabled = !store.canRedo();
   if (s.step === "design" && s.product) {
+    $("stage-empty").hidden = (s.layers[s.side] || []).length > 0;
     renderStage(svg, ctx());
     renderQuality();
     requestAnimationFrame(syncTextWidths);
