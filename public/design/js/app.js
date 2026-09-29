@@ -264,7 +264,7 @@ function addText() {
 }
 
 function init() {
-  attachGestures({ svg, store, getContext: ctx, announce });
+  attachGestures({ svg, store, getContext: ctx, announce, notice });
   renderProducts();
   $("products").addEventListener("click", (e) => {
     const b = e.target.closest("[data-product]");

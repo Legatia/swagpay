@@ -4,7 +4,7 @@ import { svgPoint } from "./stage.js";
 
 // Touch: drag moves, pinch resizes, twist rotates. Mouse: drag, plus the resize and rotate handles.
 // Keyboard: arrows move (Shift ×10), + / - resize, [ / ] rotate, Delete removes, Escape deselects.
-export function attachGestures({ svg, store, getContext, announce }) {
+export function attachGestures({ svg, store, getContext, announce, notice = () => {} }) {
   const pointers = new Map();
   let gesture = null;
 
@@ -34,7 +34,10 @@ export function attachGestures({ svg, store, getContext, announce }) {
       const { layer: inside, clamped } = clampToArea(layer, getContext().area);
       if (clamped) checkpointOnce();
       put(inside, { record: false, persist: true });
-      if (clamped) announce("Moved back inside the print area.");
+      if (clamped) {
+        announce("Moved back inside the print area.");
+        notice("Moved back inside the print area.");
+      }
     }
     gesture = null;
   }
