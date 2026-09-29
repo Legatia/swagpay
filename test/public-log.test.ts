@@ -18,20 +18,28 @@ describe("public log and metrics", () => {
     expect(page.headers.get("cache-control")).toBe("public, max-age=60");
     const html = await page.text();
     expect(html).toContain("cost arrived &lt;b&gt;inside&lt;/b&gt; the band, mail [email]");
-    expect(html).toContain("0x1234567890123456789012345678901234567890");
+    expect(html).toContain("deposit covers the printer cost, paid to [address]");
+    expect(html).not.toContain("0x1234567890123456789012345678901234567890");
     expect(JSON.stringify(api)).not.toContain("example.com");
     expect(html).not.toContain("ana@example.com");
     expect(html).not.toContain('"secret"');
   });
 
-  it("redacts emails and phones but keeps addresses and order numbers", () => {
+  it("redacts emails, phones, amounts and wallet addresses but keeps tx hashes, dates and order numbers", () => {
     expect(redactReason("write to ana@example.com")).toBe("write to [email]");
     expect(redactReason("call +48 600 123 456 now")).toBe("call [phone] now");
     expect(redactReason("call 600-123-456 now")).toBe("call [phone] now");
     const a = "0x1234567890123456789012345678901234567890";
-    expect(redactReason(`sent to ${a}`)).toBe(`sent to ${a}`);
+    expect(redactReason(`sent to ${a}`)).toBe("sent to [address]");
+    expect(redactReason(`to 0x${"aB".repeat(20)}.`)).toBe("to [address].");
+    const tx = `0x${"ab".repeat(32)}`;
+    expect(redactReason(`tx ${tx} confirmed`)).toBe(`tx ${tx} confirmed`);
+    expect(redactReason("pay the 257.50 USDC printer cost")).toBe("pay the [amount] printer cost");
+    expect(redactReason("257.500000 USDC")).toBe("[amount]");
+    expect(redactReason("1,000.50 USDC in")).toBe("[amount] in");
+    expect(redactReason("cost 1000,50 PLN, or 1000 zł, or 380 usd and 12EURC; sweep 20% of it")).toBe("cost [amount], or [amount], or [amount] and [amount]; sweep 20% of it");
     expect(redactReason("Order 12 is paid")).toBe("Order 12 is paid");
-    for (const keep of ["257.500000 USDC", "2026-10-08", "1500.000000"]) expect(redactReason(keep)).toBe(keep);
+    for (const keep of ["2026-10-08", "1500.000000", "USDC only", "20 USDCx"]) expect(redactReason(keep)).toBe(keep);
     expect(redactReason("call 600 123 456")).toBe("call [phone]");
   });
 
