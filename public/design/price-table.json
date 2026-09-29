@@ -1,0 +1,22 @@
+{
+  "_notes": "Printer costs in PLN, meant as gross with delivery included, the same basis as the owner's /cost reply that the agent's quotes use. T-shirt print per side: NeoNadruki DTF table (21 x 29 cm print, 1-49 pcs 17 PLN, 50-99 pcs 15 PLN), read 2026-09-29 from event-swag/data/warsaw-printers.json; whether those are net or gross is unconfirmed. garmentPln and deliveryPln (one Warsaw courier run per order; GreenPrint lists 40-60 PLN net) are assumptions until the first printer quotes. Products or quantities without rows are quoted by the agent. The owner edits this file.",
+  "deliveryPln": 60,
+  "tshirt": {
+    "garmentPln": 20,
+    "setupPln": 0,
+    "print": {
+      "front": [
+        { "minQty": 1, "maxQty": 49, "unitPln": 17 },
+        { "minQty": 50, "maxQty": 99, "unitPln": 15 }
+      ],
+      "back": [
+        { "minQty": 1, "maxQty": 49, "unitPln": 17 },
+        { "minQty": 50, "maxQty": 99, "unitPln": 15 }
+      ]
+    }
+  },
+  "sticker": {},
+  "banner": {},
+  "rollup": {},
+  "flag": {}
+}
