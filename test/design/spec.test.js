@@ -86,6 +86,21 @@ describe("buildSpec", () => {
   });
 });
 
+describe("buildSpec size limits", () => {
+  const png = { name: "logo.png", vector: false, pixelWidth: 6000, pixelHeight: 3600 };
+  it("keeps effectiveDpi at or under 100000 for a tiny image", () => {
+    const { spec } = buildSpec({ ...base, assets: { "logo-1": png }, layers: { front: [{ ...logo, widthMm: 1, heightMm: 0.6 }], back: [] } });
+    const layer = spec.views[0].layers[0];
+    expect(layer.effectiveDpi).toBeLessThanOrEqual(100000);
+    expect(layer.widthMm).toBeGreaterThanOrEqual(0.1);
+  });
+  it("floors a sliver's height at 0.1 mm", () => {
+    const sliver = { ...png, pixelWidth: 5000, pixelHeight: 10 };
+    const { spec } = buildSpec({ ...base, assets: { "logo-1": sliver }, layers: { front: [{ ...logo, widthMm: 5, heightMm: 0.01 }], back: [] } });
+    expect(spec.views[0].layers[0].heightMm).toBeGreaterThanOrEqual(0.1);
+  });
+});
+
 describe("summarize", () => {
   it("writes a t-shirt order in plain words", () => {
     expect(summarize(buildSpec(base).spec)).toBe('60 black t-shirts (S 10, M 20, L 20, XL 10). Front: logo 20 × 12 cm, the text "Builders meetup". Back: blank. Estimate $410–450.');

@@ -9,21 +9,28 @@ export const SPEC_MAX_BYTES = 64 * 1024;
 export const MAX_LAYERS = 20;
 export const MAX_FILES = 10;
 
+// The backend wants every size above zero and effectiveDpi at most 100000, so tiny layers are
+// floored instead of sent as 0.
+const size1 = (v) => Math.max(0.1, round1(v));
 const whole = (n) => Math.max(0, Math.floor(Number(n) || 0));
 
 function specLayer(l, assets) {
   if (l.type === "image") {
     const asset = assets[l.file];
+    const widthMm = size1(l.widthMm);
     const out = {
       type: "image",
       file: l.file,
       xMm: round1(l.xMm),
       yMm: round1(l.yMm),
-      widthMm: round1(l.widthMm),
-      heightMm: round1(l.heightMm),
+      widthMm,
+      heightMm: size1(l.heightMm),
       rotationDeg: round1(l.rotationDeg),
     };
-    if (asset && !asset.vector) out.effectiveDpi = Math.round(effectiveDpi(asset.pixelWidth, l.widthMm));
+    if (asset && !asset.vector) {
+      const dpi = Math.round(effectiveDpi(asset.pixelWidth, widthMm));
+      if (Number.isFinite(dpi)) out.effectiveDpi = Math.min(100000, Math.max(0, dpi));
+    }
     return out;
   }
   return {
@@ -32,10 +39,10 @@ function specLayer(l, assets) {
     font: l.font,
     weight: l.weight,
     colour: l.colour,
-    sizeMm: round1(l.sizeMm),
+    sizeMm: size1(l.sizeMm),
     xMm: round1(l.xMm),
     yMm: round1(l.yMm),
-    widthMm: round1(l.widthMm),
+    widthMm: size1(l.widthMm),
     rotationDeg: round1(l.rotationDeg),
     align: l.align,
   };

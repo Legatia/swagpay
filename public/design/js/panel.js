@@ -54,13 +54,22 @@ export function renderPanel(container, state, { store, area, announce }) {
     const y = input("number", { step: "0.1", "data-k": "y" });
     const w = input("number", { step: "0.1", min: "0.5", "data-k": "w" });
     const r = input("number", { step: "1", "data-k": "r" });
-    x.addEventListener("change", () => commitNumber({ xMm: Number(x.value) * 10 }));
-    y.addEventListener("change", () => commitNumber({ yMm: Number(y.value) * 10 }));
+    // An emptied or invalid field goes back to the layer's real value instead of jumping to 0.
+    const resync = () => {
+      const s = store.get();
+      const cur = findLayer(s, s.side, layer.id);
+      if (cur) syncFields(container, cur, true);
+    };
+    const typed = (el) => (el.value.trim() !== "" && Number.isFinite(Number(el.value)) ? Number(el.value) * 10 : null);
+    x.addEventListener("change", () => (typed(x) === null ? resync() : commitNumber({ xMm: typed(x) })));
+    y.addEventListener("change", () => (typed(y) === null ? resync() : commitNumber({ yMm: typed(y) })));
     w.addEventListener("change", () => {
       const s = store.get();
       const cur = findLayer(s, s.side, layer.id);
-      const k = (Number(w.value) * 10) / cur.widthMm;
-      if (!(k > 0)) return syncFields(container, cur, true);
+      const wanted = typed(w);
+      if (wanted === null || !(wanted > 0)) return syncFields(container, cur, true);
+      // Same 5 mm floor as the keyboard resize, so the spec never carries a sliver.
+      const k = Math.max(wanted / cur.widthMm, 5 / cur.widthMm);
       commitNumber({ widthMm: cur.widthMm * k, heightMm: cur.heightMm * k, ...(cur.type === "text" ? { sizeMm: cur.sizeMm * k } : {}) });
     });
     r.addEventListener("change", () => commitNumber({ rotationDeg: normalizeDeg(Number(r.value) || 0) }));
