@@ -24,6 +24,8 @@ export interface RpcClient {
   chainId(): Promise<number>;
   blockNumber(): Promise<number>;
   getLogs(filter: LogFilter): Promise<RawLog[]>;
+  /** True once after a call fell back from the pinned URL to another one. */
+  takeSwitched?(): boolean;
 }
 
 const isStr = (v: unknown) => typeof v === "string";
@@ -34,15 +36,18 @@ function isLogArray(r: unknown): boolean {
 const hex = (n: number) => `0x${n.toString(16)}`;
 
 /**
- * JSON-RPC over fetch. Until a URL answers, each call tries the URLs in order and throws the last error; after that,
- * every call uses the URL that answered and throws when it fails, so one client (one watcher run) reads one node.
+ * JSON-RPC over fetch. Each call tries the URL that last answered first (pinned), then the others in order, and throws
+ * the last error. Moving the pin to another URL sets a flag the caller reads with takeSwitched, because that node's
+ * view of the chain (its head) may differ.
  */
 export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcClient {
   let id = 0;
   let pinned: string | null = null;
+  let switched = false;
   const call = async (method: string, params: unknown[], check: (result: unknown) => boolean): Promise<unknown> => {
     let last: Error = new Error("no RPC URL configured");
-    for (const url of pinned === null ? urls : [pinned]) {
+    const order = pinned === null ? urls : [pinned, ...urls.filter((u) => u !== pinned)];
+    for (const url of order) {
       try {
         const res = await fetchImpl(url, {
           method: "POST",
@@ -54,6 +59,7 @@ export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcC
         const body = (await res.json()) as { result?: unknown; error?: { code?: number; message?: string } };
         if (body.error) throw new Error(`${method}: ${body.error.code} ${body.error.message}`);
         if (!check(body.result)) throw new Error(`${method}: unexpected result`);
+        if (pinned !== null && pinned !== url) switched = true;
         pinned = url;
         return body.result;
       } catch (err) {
@@ -64,6 +70,11 @@ export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcC
   };
   const quantity = (r: unknown) => typeof r === "string" && /^0x[0-9a-fA-F]+$/.test(r);
   return {
+    takeSwitched() {
+      const was = switched;
+      switched = false;
+      return was;
+    },
     async chainId() {
       return Number(BigInt(String(await call("eth_chainId", [], quantity))));
     },

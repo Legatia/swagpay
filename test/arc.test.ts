@@ -82,7 +82,7 @@ describe("createRpc", () => {
     expect(methods).toEqual(["eth_chainId"]);
   });
 
-  it("keeps using the first URL that answered, and throws when it fails", async () => {
+  it("keeps using the first URL that answered, and falls back from it when it fails", async () => {
     const seen: string[] = [];
     let bUp = true;
     const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -90,14 +90,20 @@ describe("createRpc", () => {
       seen.push(url);
       const { id } = JSON.parse(String(init?.body));
       if (url === "https://a" || (url === "https://b" && !bUp)) return new Response("down", { status: 502 });
-      return Response.json({ jsonrpc: "2.0", id, result: "0x10" });
+      return Response.json({ jsonrpc: "2.0", id, result: url === "https://c" ? "0x20" : "0x10" });
     }) as typeof fetch;
     const rpc = createRpc(["https://a", "https://b", "https://c"], fetchImpl);
     expect(await rpc.chainId()).toBe(16);
     expect(await rpc.blockNumber()).toBe(16);
+    expect(rpc.takeSwitched?.()).toBe(false);
+    expect(seen).toEqual(["https://a", "https://b", "https://b"]);
     bUp = false;
-    await expect(rpc.blockNumber()).rejects.toThrow("HTTP 502");
-    expect(seen).toEqual(["https://a", "https://b", "https://b", "https://b"]);
+    expect(await rpc.blockNumber()).toBe(32);
+    expect(rpc.takeSwitched?.()).toBe(true);
+    expect(rpc.takeSwitched?.()).toBe(false);
+    expect(await rpc.blockNumber()).toBe(32);
+    expect(rpc.takeSwitched?.()).toBe(false);
+    expect(seen).toEqual(["https://a", "https://b", "https://b", "https://b", "https://a", "https://c", "https://c"]);
   });
 
   it("throws the last error when every URL fails", async () => {

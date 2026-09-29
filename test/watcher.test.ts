@@ -311,6 +311,30 @@ describe("runWatcher", () => {
     expect(stored?.n).toBe(0);
   });
 
+  it("re-reads the head on the node it fell back to and never records past it", async () => {
+    await setLastBlock(3400);
+    const kept = usdcLog(3450, 77_000_000, 23);
+    const beyond = usdcLog(3500, 77_000_000, 24);
+    const calls: { fromBlock: number; toBlock: number }[] = [];
+    const heads = [3540, 3520]; // the fallback node is 20 blocks behind the first
+    let switched = true;
+    const rpc: RpcClient = {
+      async chainId() { return 5042; },
+      async blockNumber() { return heads.shift() ?? 3520; },
+      async getLogs(f) {
+        calls.push({ fromBlock: f.fromBlock, toBlock: f.toBlock });
+        return [kept, beyond].filter((l) => Number(l.blockNumber) >= f.fromBlock && Number(l.blockNumber) <= f.toBlock);
+      },
+      takeSwitched() { const was = switched; switched = false; return was; },
+    };
+    const r = await runWatcher(env, { rpc, telegram: silent });
+    expect(calls).toEqual([{ fromBlock: 3401, toBlock: 3510 }, { fromBlock: 3401, toBlock: 3490 }]);
+    expect(r).toMatchObject({ from: 3401, to: 3490 });
+    expect((await env.DB.prepare("SELECT value FROM watcher_state WHERE key = 'last_block'").first<{ value: string }>())?.value).toBe("3490");
+    const stored = (await env.DB.prepare("SELECT tx_hash FROM transfers WHERE tx_hash IN (?, ?)").bind(kept.transactionHash, beyond.transactionHash).all<{ tx_hash: string }>()).results;
+    expect(stored.map((x) => x.tx_hash)).toEqual([kept.transactionHash]);
+  });
+
   describe("chain binding", () => {
     const state = async (key: string) => (await env.DB.prepare("SELECT value FROM watcher_state WHERE key = ?").bind(key).first<{ value: string }>())?.value ?? null;
     const systemAlerts = async (text: string) => (await listEscalations(env.DB)).filter((x) => x.kind === "system" && x.order_id === null && x.summary === text);

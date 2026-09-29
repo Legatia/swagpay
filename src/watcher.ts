@@ -210,18 +210,29 @@ export async function runWatcher(
       }
       await clearState(env.DB, "alert_cursor");
       if (stored === null) await setState(env.DB, "chain_id", String(chain));
-      const head = latest - HEAD_LAG_BLOCKS;
+      let head = latest - HEAD_LAG_BLOCKS;
       if (start0 === null) {
         await setState(env.DB, "last_block", String(head));
         return null;
       }
+      const filter = (fromBlock: number, toBlock: number) => ({
+        fromBlock, toBlock,
+        address: [USDC_SYSTEM_EMITTER, env.EURC_ADDRESS.toLowerCase()],
+        topics: [TRANSFER_TOPIC, null, addressTopic(env.RECEIVING_ADDRESS)],
+      });
       for (let chunk = 0; chunk < MAX_CHUNKS_PER_RUN && from <= head && clock() - startedAt < RUN_BUDGET_MS; chunk++) {
-        const to = Math.min(from + CHUNK_BLOCKS - 1, head);
-        const logs = await deps.rpc.getLogs({
-          fromBlock: from, toBlock: to,
-          address: [USDC_SYSTEM_EMITTER, env.EURC_ADDRESS.toLowerCase()],
-          topics: [TRANSFER_TOPIC, null, addressTopic(env.RECEIVING_ADDRESS)],
-        });
+        let to = Math.min(from + CHUNK_BLOCKS - 1, head);
+        let logs = await deps.rpc.getLogs(filter(from, to));
+        if (deps.rpc.takeSwitched?.()) {
+          // These logs came from a different node than the head: re-read the head there and never trust blocks past it.
+          const fresh = (await deps.rpc.blockNumber()) - HEAD_LAG_BLOCKS;
+          head = Math.min(head, fresh);
+          if (head < from) break;
+          if (to > head) {
+            to = head;
+            logs = await deps.rpc.getLogs(filter(from, to));
+          }
+        }
         const transfers: NewTransfer[] = [];
         for (const l of logs) {
           try {
