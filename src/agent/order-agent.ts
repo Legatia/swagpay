@@ -360,7 +360,11 @@ export class OrderAgent extends Agent<Env, OrderState> {
         },
         issueQuote: async (q, validUntil) => {
           const quote = await createQuote(this.env.DB, orderId, q, new Date(), validUntil);
-          await this.remindLater(new Date(Date.parse(quote.valid_until) - 12 * 3_600_000).toISOString(), { kind: "quote", id: quote.id });
+          try {
+            await this.remindLater(new Date(Date.parse(quote.valid_until) - 12 * 3_600_000).toISOString(), { kind: "quote", id: quote.id });
+          } catch (err) {
+            console.error("could not schedule the quote reminder", err);
+          }
           return quote;
         },
         now: () => new Date(),

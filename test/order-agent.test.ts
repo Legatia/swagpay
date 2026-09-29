@@ -392,6 +392,10 @@ describe("OrderAgent", () => {
       const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents: 25750, dueBy: new Date(Date.now() + 86_400_000) });
       await agent.remind({ kind: "payment", id: req.id });
       expect(agent.sql<{ text: string }>`SELECT text FROM inbox`[0].text).toContain(`Reminder: deposit request #${req.id}`);
+      agent.sql`DELETE FROM inbox`;
+      await env.DB.prepare("UPDATE payment_requests SET status = 'paid' WHERE id = ?").bind(req.id).run();
+      await agent.remind({ kind: "payment", id: req.id });
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM inbox`[0].n).toBe(0);
     });
   });
 
