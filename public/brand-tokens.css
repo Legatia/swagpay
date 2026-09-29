@@ -1,0 +1,42 @@
+/* Swagpay palette shared with event-swag/landing/landing.css. */
+:root {
+  --brand-ink: #171a38;
+  --brand-magenta: #d7266f;
+  --brand-usdc: #2466c4;
+  --brand-paper: #f5f6f9;
+  --brand-mark: #9aa0c0;
+
+  --page: #f5f6f9;
+  --surface: #ffffff;
+  --text: #171a38;
+  --text-muted: #4a4f72;
+  --line: #d9dcea;
+  --action: #d7266f;
+  --action-text: #ffffff;
+  --focus: #d7266f;
+  --error: #b91e5a;
+  --agent-bubble: #fbe3ee;
+  --payment-bubble: #e2ecfa;
+
+  --font-display: "Figtree", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-campaign: "Big Shoulders Display", "Arial Narrow", Arial, sans-serif;
+  --font-body: "Figtree", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0f1124;
+    --surface: #171a33;
+    --text: #eceef9;
+    --text-muted: #a9aecb;
+    --line: #2c3052;
+    --action: #ff5b9b;
+    --action-text: #0f1124;
+    --focus: #ff5b9b;
+    --error: #ff7dad;
+    --agent-bubble: #3a1830;
+    --payment-bubble: #182a4d;
+    color-scheme: dark;
+  }
+}
