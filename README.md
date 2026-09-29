@@ -75,3 +75,45 @@ Apply the new migration remotely before deploying: `npx wrangler d1 migrations a
 ## Design editor intake (plan 4a)
 
 The design editor (`/design/`, built separately) creates orders with `designPending: true`. It then uploads files with a `role` (`artwork`, `mockup`, `print`, `cutline`) and posts its v1 design JSON to `POST /api/o/<token>/design`. The schema lives in `src/design-spec.ts`: changing its shape means a new `version` and an update to the editor. A design is limited to 64 KB. `sizes` keys are XS, S, M, L, XL, XXL, 3XL (`"2XL"` is accepted as XXL); `sticker` is `null` for non-sticker products. Designs are refused once a quote has been accepted.
+
+## The agent runs the money (plan 4)
+
+Two agents run each order: the order agent talks to the host, and the treasury agent decides how money leaves the wallet. Every decision is public at `/log` (numbers at `/api/metrics`).
+
+The workflow:
+1. Quote.
+2. Deposit on Arc. The treasury agent moves the printer's cost to your payout account.
+3. You book and pay the printer by card, then send `/printed <order>` in Telegram.
+4. The balance request goes to the host.
+5. The balance is paid.
+6. The host presses "We received it".
+7. The treasury agent sweeps part of the margin to the reserve.
+
+Setup:
+- **Receiving address.** `RECEIVING_ADDRESS` is your Circle agent wallet on Arc (`circle wallet list --type agent --chain ARC`).
+- **Spending limits.** Set them with an email OTP, so the agent can never exceed them:
+
+      circle wallet limit set --address <wallet> --chain ARC --policy-type stablecoin --per-tx 500 --daily 1500
+
+- **Payout account.**
+  - `PAYOUT_ADDRESS` and `PAYOUT_CHAIN` are where printer costs go. For example, your Revolut USDC deposit address on Polygon with `PAYOUT_CHAIN=MATIC`: payouts then bridge with CCTP's forwarding service, with no gas needed on Polygon.
+  - Use `ARC` for an Arc address.
+- **Reserve.** `RESERVE_ADDRESS` is where reserve sweeps go, on Arc.
+- **Code limits.** `TREASURY_PER_TX_USDC`, `TREASURY_DAILY_USDC` and `TREASURY_RESERVE_MIN_BPS`/`MAX_BPS` are the code limits. Keep them at or below Circle's. Above them the agent asks you in Telegram.
+- **Runner token.** `wrangler secret put TREASURY_RUNNER_TOKEN` (a long random string).
+- **Runner.** Run it on the machine where `circle wallet login` is active (the session lasts about four weeks):
+
+      SWAGPAY_URL=https://<your-domain> TREASURY_RUNNER_TOKEN=<token> AGENT_WALLET_ADDRESS=<wallet> DRY_RUN=1 node scripts/treasury-runner.mjs
+
+  - Drop `DRY_RUN=1` once the printed commands look right.
+  - When Circle's limit refuses a payout, you get an approval request in Telegram.
+- **Refunds.** Refunds always wait for your approval.
+
+### Before real money
+
+- Apply migration 0004 remotely: `npx wrangler d1 migrations apply swagpay --remote`.
+- Rehearse a payout on Arc testnet first: run the runner with `CIRCLE_CHAIN=ARC-TESTNET` and `DRY_RUN=1`, then without `DRY_RUN`.
+- On testnet, send the same bridge twice with the same idempotency key and check it pays only once.
+- "Sent" means Circle accepted the transfer. Check the first payouts in the wallet's transaction history.
+- A bridge payout also burns a small forwarding fee on top of the amount. Keep a little extra USDC in the wallet.
+- A failed or denied payout always comes to you in Telegram. Check the wallet history before you approve a retry.
