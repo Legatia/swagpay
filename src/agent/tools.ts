@@ -172,7 +172,8 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         : { verdict: "allow", outcome: "done", result: { content: lines.join(" ") } };
     }),
 
-    escalate: logged(ctx, "escalate", EscalateInput, async ({ summary }) => {
+    escalate: logged(ctx, "escalate", EscalateInput, async ({ summary: raw }) => {
+      const summary = raw.replace(/\s+/g, " ");
       const e = await ctx.escalateOnce(`agent:${summary}`, "agent", summary, {});
       return {
         verdict: "escalate",

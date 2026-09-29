@@ -7,11 +7,13 @@ import { createTelegram, escalationButtons, escalationText, notifyOwner, type Te
 
 function recorder(result: unknown = { message_id: 5 }) {
   const calls: { url: string; body: Record<string, unknown> }[] = [];
+  const signals: (AbortSignal | null | undefined)[] = [];
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+    signals.push(init?.signal);
     return Response.json({ ok: true, result });
   }) as typeof fetch;
-  return { calls, fetchImpl };
+  return { calls, signals, fetchImpl };
 }
 
 const row = (o: Partial<EscalationRow>): EscalationRow => ({
@@ -21,13 +23,16 @@ const row = (o: Partial<EscalationRow>): EscalationRow => ({
 
 describe("createTelegram", () => {
   it("sends messages with inline buttons and returns the message id", async () => {
-    const { calls, fetchImpl } = recorder();
+    const { calls, signals, fetchImpl } = recorder();
     const t = createTelegram("TOKEN", fetchImpl);
     expect(await t.send("42", "hello", [[{ text: "Approve", data: "esc:7:approve" }]])).toBe(5);
     expect(calls[0].url).toBe("https://api.telegram.org/botTOKEN/sendMessage");
     expect(calls[0].body).toEqual({ chat_id: "42", text: "hello", reply_markup: { inline_keyboard: [[{ text: "Approve", callback_data: "esc:7:approve" }]] } });
     await t.answerCallback("cb1", "Approved");
     expect(calls[1]).toEqual({ url: "https://api.telegram.org/botTOKEN/answerCallbackQuery", body: { callback_query_id: "cb1", text: "Approved" } });
+    // Every call has a timeout, so a hung Telegram can't hold a request open.
+    expect(signals).toHaveLength(2);
+    for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal);
   });
 
   it("does nothing without a bot token", async () => {

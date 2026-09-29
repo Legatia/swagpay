@@ -331,4 +331,10 @@ describe("escalate", () => {
     expect(again.content).toBe("Already with the owner as #1 (open).");
     expect(state.decisions.map((d) => d.outcome)).toEqual(["escalated", "escalated"]);
   });
+
+  it("collapses whitespace in the summary", async () => {
+    const { h, state } = fakeCtx();
+    await h.escalate({ summary: "Host asks\nfor a   10%\tdiscount", reason: "discounts need the owner" });
+    expect(state.escalations).toEqual([{ key: "agent:Host asks for a 10% discount", kind: "agent", summary: "Host asks for a 10% discount" }]);
+  });
 });

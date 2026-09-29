@@ -18,6 +18,7 @@ export function createTelegram(token: string | undefined, fetchImpl: typeof fetc
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
     });
     const data = (await res.json()) as { ok?: boolean; result?: unknown; description?: string };
     if (!data.ok) throw new Error(`telegram ${method} failed: ${data.description ?? res.status}`);
