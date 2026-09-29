@@ -220,6 +220,21 @@ describe("Telegram webhook", () => {
     expect(t.sent[1]).toBe(`#${e.id} is already approved.`);
   });
 
+  it("asks again instead of recording an amount written with a thousands separator", async () => {
+    const { e, stub } = await orderWithCostRequest();
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1 200,50 Drukarnia X`)), env, t);
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 12 500`)), env, t);
+    expect(t.sent).toEqual([
+      `Did you mean 1200,50? Write the amount without spaces, e.g. /cost ${e.id} 1200.50`,
+      `Did you mean 12500? Write the amount without spaces, e.g. /cost ${e.id} 1200.50`,
+    ]);
+    expect((await getEscalation(env.DB, e.id))?.status).toBe("open");
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM printer_costs`[0].n).toBe(0);
+    });
+  });
+
   it("refuses bad amounts, other kinds and a plain approve on a cost request", async () => {
     const { e } = await orderWithCostRequest();
     const other = await orderWithEscalation();

@@ -187,8 +187,17 @@ export async function handleTelegram(request: Request, env: Env, deps: { telegra
       case "/cost": {
         const id = parseId(arg);
         const amount = parsePln(words[2]);
+        if (id === null || id <= 0 || amount === null) {
+          await reply("Usage: /cost <id> <PLN gross, delivery included> [note]");
+          break;
+        }
+        // "1 200,50" splits into "1" and "200,50": ask rather than record 1 PLN.
+        if (words[3] !== undefined && /^\d{3}([.,]\d{1,2})?$/.test(words[3])) {
+          await reply(`Did you mean ${words[2]}${words[3]}? Write the amount without spaces, e.g. /cost ${id} 1200.50`);
+          break;
+        }
         const costNote = words.slice(3).join(" ").trim().slice(0, 500) || null;
-        await reply(id !== null && id > 0 && amount !== null ? await giveCost(env, id, amount, costNote) : "Usage: /cost <id> <PLN gross, delivery included> [note]");
+        await reply(await giveCost(env, id, amount, costNote));
         break;
       }
       case "/order": {
