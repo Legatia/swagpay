@@ -51,11 +51,18 @@ function renderQuote(quote) {
 function renderPayments(payments, payTo) {
   $("pay-box").hidden = payments.length === 0;
   $("payments").replaceChildren(...payments.map((p) => {
-    const line = p.status === "paid" ? `${p.stage}: ${p.amount} ${p.token} — paid` : `${p.stage}: send ${p.due} ${p.token}${p.paid !== "0.000000" ? ` (received ${p.paid})` : ""}`;
+    const line = p.status === "paid"
+      ? `${p.stage}: ${p.amount} ${p.token} — paid`
+      : p.due !== p.amount
+        ? `${p.stage}: send exactly ${p.due} ${p.token} (the rest of this payment)`
+        : `${p.stage}: send exactly ${p.due} ${p.token}`;
     return el("p", p.status === "paid" ? "muted" : "", line);
   }));
   $("pay-address").textContent = payTo ? `${payTo.address} · ${payTo.network} (chain ${payTo.chainId})` : "Payment details will appear here soon.";
-  claimRequestId = payments.find((p) => p.status === "open")?.id ?? null;
+  const open = payments.find((p) => p.status === "open");
+  $("pay-token").textContent = payTo && open ? `Token: ${payTo.tokens[open.token]}` : "";
+  $("pay-token").hidden = !(payTo && open);
+  claimRequestId = open?.id ?? null;
   $("claim-form").hidden = claimRequestId === null;
 }
 
