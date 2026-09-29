@@ -31,6 +31,7 @@ export async function listPublicDecisions(db: D1Database, limit = 100): Promise<
   return rows.map((r) => ({ ...r, reason: redactReason(r.reason).slice(0, 300) }));
 }
 
+/** settledWithOwner: paid after the owner's approval, or settled by the owner by hand. open excludes settled (and the unused cancelled). */
 export interface Metrics {
   orders: Record<string, number>;
   received: { USDC: string; EURC: string };
@@ -50,7 +51,7 @@ export async function computeMetrics(db: D1Database): Promise<Metrics> {
   const obligations = await db
     .prepare(
       `SELECT COALESCE(SUM(status = 'paid' AND approved_by IS NULL), 0) AS agent,
-              COALESCE(SUM(status = 'paid' AND approved_by = 'owner'), 0) AS owner,
+              COALESCE(SUM((status = 'paid' AND approved_by = 'owner') OR status = 'settled'), 0) AS owner,
               COALESCE(SUM(status IN ('open', 'approved', 'queued', 'failed', 'escalated')), 0) AS open
        FROM obligations`,
     )

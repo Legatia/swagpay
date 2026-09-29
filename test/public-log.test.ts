@@ -37,7 +37,7 @@ describe("public log and metrics", () => {
 
   it("counts money in and out and decisions made against escalated", async () => {
     const get = async () => (await SELF.fetch("https://swagpay.test/api/metrics")).json<{
-      orders: Record<string, number>; received: { USDC: string }; paidOut: { USDC: string }; obligations: { settledByAgent: number }; decisions: { total: number; escalated: number };
+      orders: Record<string, number>; received: { USDC: string }; paidOut: { USDC: string }; obligations: { settledByAgent: number; settledWithOwner: number; open: number }; decisions: { total: number; escalated: number };
     }>();
     const before = await get();
     const { order } = await newOrderRow();
@@ -48,6 +48,11 @@ describe("public log and metrics", () => {
     const ob = await env.DB.prepare("SELECT id FROM obligations ORDER BY id DESC LIMIT 1").first<{ id: number }>();
     await env.DB.prepare("INSERT INTO payouts (obligation_id, method, chain, token, amount_units, destination, idempotency_key, status, created_at, updated_at) VALUES (?, 'transfer', 'ARC', 'USDC', 2000000, '0x3', ?, 'sent', ?, ?)")
       .bind(ob!.id, crypto.randomUUID(), new Date().toISOString(), new Date().toISOString()).run();
+    // Settled with the owner: paid after the owner's approval, or settled by the owner by hand.
+    for (const [status, by] of [["paid", "owner"], ["settled", null], ["settled", "owner"]] as const) {
+      await env.DB.prepare("INSERT INTO obligations (order_id, kind, token, amount_units, destination, chain, due_at, status, approved_by, source_ref, created_at) VALUES (?, 'refund', 'USDC', 1000000, '0x3', 'ARC', ?, ?, ?, ?, ?)")
+        .bind(order.id, new Date().toISOString(), status, by, `metrics:${crypto.randomUUID()}`, new Date().toISOString()).run();
+    }
     await insertDecision(env.DB, { orderId: order.id, tool: "escalate", reason: "discount asked", input: {}, verdict: "escalate", outcome: "escalated" });
     const m = await get();
     const d6 = (a: string, b: string) => Math.round((Number(a) - Number(b)) * 1e6) / 1e6;
@@ -55,6 +60,8 @@ describe("public log and metrics", () => {
     expect(d6(m.received.USDC, before.received.USDC)).toBe(0);
     expect(d6(m.paidOut.USDC, before.paidOut.USDC)).toBe(2);
     expect(m.obligations.settledByAgent - before.obligations.settledByAgent).toBe(1);
+    expect(m.obligations.settledWithOwner - before.obligations.settledWithOwner).toBe(3);
+    expect(m.obligations.open - before.obligations.open).toBe(0);
     expect(m.decisions.escalated - before.decisions.escalated).toBe(1);
     expect(m.decisions.total).toBeGreaterThanOrEqual(m.decisions.escalated);
   });
