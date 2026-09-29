@@ -70,7 +70,8 @@ function dropUnsavedImages(draft) {
   }
   if (!dropIds.size) return { draft, dropped: false };
   const selectedId = dropIds.has(draft.selectedId) ? null : draft.selectedId;
-  return { draft: { ...draft, layers, assets, selectedId }, dropped: true };
+  // The cut line was traced from the dropped logo, and the host adds the logo again anyway.
+  return { draft: { ...draft, layers, assets, selectedId, cutPathD: null, ...(draft.product ? { step: "design" } : {}) }, dropped: true };
 }
 
 const { storage, writable: storageWritable } = probeStorage();
@@ -286,6 +287,8 @@ function init() {
   beforeNext.details = () => {
     const s = store.get();
     const { error } = buildSpec({ ...s, estimate: currentEstimate(s) });
+    // A restored draft may have no cut line yet; start it so the next try works.
+    if (error && s.product === "sticker" && !s.cutPathD) updateCutPath(store);
     return error ?? null;
   };
   initPricing().then(() => store.set({}, { record: false, persist: false }));

@@ -82,6 +82,8 @@ export function buildSpec(state) {
   if (quantity < 1) return { error: "Enter how many you need." };
   if (quantity > 5000) return { error: "Orders go up to 5,000 pieces. For more, describe it to the agent." };
 
+  if (state.product === "sticker" && !state.cutPathD) return { error: "The sticker's cut line is still being prepared. Try again in a moment." };
+
   const files = {};
   for (const v of views) for (const l of v.layers) if (l.type === "image") files[l.file] = { role: "artwork" };
   for (const v of views) {

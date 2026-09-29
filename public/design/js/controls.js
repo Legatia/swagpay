@@ -27,11 +27,14 @@ function group(title, chips) {
 
 const PX_PER_MM = 8;
 let cutTimer;
+let cutTicket = 0;
 
 // Sticker cut line: rasterize the artwork at 8 px/mm with room for the border, trace, and convert to
 // whole-sticker millimetres. Circle and rounded square are exact shapes.
 export function updateCutPath(store) {
   clearTimeout(cutTimer);
+  // A newer request, or leaving the sticker, makes a slow trace stale: it must not land.
+  const ticket = ++cutTicket;
   cutTimer = setTimeout(async () => {
     const s = store.get();
     if (s.product !== "sticker") return;
@@ -39,7 +42,7 @@ export function updateCutPath(store) {
     const L = s.sticker.longestSideMm;
     const layers = s.layers.front || [];
     const shapes = allowedShapes(layers, s.assets);
-    const shape = shapes.includes(s.sticker.shape) ? s.sticker.shape : "rounded-square";
+    let shape = shapes.includes(s.sticker.shape) ? s.sticker.shape : "rounded-square";
     let d = null;
     if (!layers.length) d = null;
     else if (shape === "circle") d = circlePathD(L);
@@ -55,10 +58,17 @@ export function updateCutPath(store) {
         const pts = traceOutline(alpha, canvas.width, canvas.height, { dilatePx: borderPx });
         d = pts ? smoothPathD(simplify(pts, 1), { scale: PX_PER_MM, offsetX: pad - borderPx, offsetY: pad - borderPx }) : null;
       } catch {
+        d = null;
+      }
+      // No usable trace: cut a rounded square, and say so in the shape the spec carries.
+      if (!d) {
+        shape = "rounded-square";
         d = roundedSquarePathD(L);
       }
     }
+    if (ticket !== cutTicket) return;
     const now = store.get();
+    if (now.product !== "sticker") return;
     if (now.cutPathD !== d || now.sticker.shape !== shape) store.set({ cutPathD: d, sticker: { ...now.sticker, shape } }, { record: false });
   }, 250);
 }

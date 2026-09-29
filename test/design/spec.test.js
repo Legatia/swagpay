@@ -53,7 +53,7 @@ describe("buildSpec", () => {
     expect(buildSpec({ ...base, layers: { front: [], back: [] } })).toEqual({ error: "Add a logo or some text before continuing." });
   });
   it("describes a sticker and adds the cut line file", () => {
-    const { spec } = buildSpec({ ...base, product: "sticker", options: {}, areas: [{ side: "front", widthMm: 69, heightMm: 69 }], layers: { front: [{ ...logo, widthMm: 60, heightMm: 36 }] }, quantity: 500, estimate: { status: "quote" } });
+    const { spec } = buildSpec({ ...base, product: "sticker", options: {}, areas: [{ side: "front", widthMm: 69, heightMm: 69 }], layers: { front: [{ ...logo, widthMm: 60, heightMm: 36 }] }, quantity: 500, cutPathD: "M0 0Z", estimate: { status: "quote" } });
     expect(spec.sticker).toEqual({ longestSideMm: 75, shape: "contour", borderMm: 3 });
     expect(spec.sizes).toBeNull();
     expect(spec.estimate).toBeNull();
@@ -86,6 +86,16 @@ describe("buildSpec", () => {
   });
 });
 
+describe("buildSpec sticker cut line", () => {
+  const sticker = { ...base, product: "sticker", options: {}, areas: [{ side: "front", widthMm: 69, heightMm: 69 }], layers: { front: [{ ...logo, widthMm: 60, heightMm: 36 }] }, quantity: 500, estimate: { status: "quote" } };
+  it("waits for the cut line before building a sticker spec", () => {
+    expect(buildSpec({ ...sticker, cutPathD: null })).toEqual({ error: "The sticker's cut line is still being prepared. Try again in a moment." });
+  });
+  it("builds once the cut line exists", () => {
+    expect(buildSpec({ ...sticker, cutPathD: "M0 0Z" }).spec.files.cutline).toEqual({ role: "cutline" });
+  });
+});
+
 describe("buildSpec size limits", () => {
   const png = { name: "logo.png", vector: false, pixelWidth: 6000, pixelHeight: 3600 };
   it("keeps effectiveDpi at or under 100000 for a tiny image", () => {
@@ -106,7 +116,7 @@ describe("summarize", () => {
     expect(summarize(buildSpec(base).spec)).toBe('60 black t-shirts (S 10, M 20, L 20, XL 10). Front: logo 20 × 12 cm, the text "Builders meetup". Back: blank. Estimate $410–450.');
   });
   it("writes a sticker order", () => {
-    const { spec } = buildSpec({ ...base, product: "sticker", options: {}, areas: [{ side: "front", widthMm: 69, heightMm: 69 }], layers: { front: [{ ...logo, widthMm: 60, heightMm: 36 }] }, quantity: 500, estimate: { status: "quote" } });
+    const { spec } = buildSpec({ ...base, product: "sticker", options: {}, areas: [{ side: "front", widthMm: 69, heightMm: 69 }], layers: { front: [{ ...logo, widthMm: 60, heightMm: 36 }] }, quantity: 500, cutPathD: "M0 0Z", estimate: { status: "quote" } });
     expect(summarize(spec)).toBe("500 die-cut stickers, 7.5 cm on the longest side, following the logo, with a 3 mm white border. Front: logo 6 × 3.6 cm. The agent will quote the price.");
   });
   it("marks large format as needing the owner", () => {
