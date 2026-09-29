@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Design your swag · Swagpay</title>
+  <meta name="description" content="Design t-shirts, stickers, banners, roll-ups and flags for your event and send them to the Swagpay agent.">
+  <link rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@800&family=Figtree:wght@400;700;800&family=IBM+Plex+Mono:wght@400;700&display=swap">
+  <link rel="stylesheet" href="/design/design.css">
+</head>
+<body>
+  <main id="design-app" data-step="product">
+    <header class="top">
+      <a href="/" class="home"><img src="/logo.svg" alt="Swagpay" width="150" height="40"></a>
+      <ol class="steps" aria-label="Steps">
+        <li data-for="product">Product</li><li data-for="design">Design</li><li data-for="details">Details</li><li data-for="review">Review</li>
+      </ol>
+    </header>
+
+    <section id="step-product" class="step" aria-labelledby="h-product">
+      <h1 id="h-product">What are we making?</h1>
+      <div id="products" class="products"></div>
+      <p class="muted">Something else, like hoodies? <a href="/new">Describe it to the agent.</a></p>
+    </section>
+
+    <section id="step-design" class="step" aria-labelledby="h-design" hidden>
+      <h1 id="h-design" class="visually-hidden">Design</h1>
+      <div class="editor">
+        <div class="stage-wrap">
+          <svg id="stage" tabindex="0" role="application" aria-label="Design area. Select a layer, then use arrow keys to move, plus and minus to resize, square brackets to rotate, Delete to remove."></svg>
+        </div>
+        <aside class="side">
+          <div id="product-controls" class="controls"></div>
+          <div id="panel" class="panel"></div>
+          <ul id="quality" class="quality"></ul>
+        </aside>
+      </div>
+      <div class="toolbar" role="toolbar" aria-label="Design tools">
+        <label class="tool" for="logo-file">Add logo</label>
+        <input id="logo-file" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" class="visually-hidden">
+        <button type="button" class="tool" id="add-text">Add text</button>
+        <button type="button" class="tool" id="undo" aria-label="Undo">Undo</button>
+        <button type="button" class="tool" id="redo" aria-label="Redo">Redo</button>
+      </div>
+    </section>
+
+    <section id="step-details" class="step" aria-labelledby="h-details" hidden>
+      <h1 id="h-details">How many?</h1>
+      <div id="details" class="sheet"></div>
+    </section>
+
+    <section id="step-review" class="step" aria-labelledby="h-review" hidden>
+      <h1 id="h-review">Review</h1>
+      <div class="sheet">
+        <p id="summary"></p>
+        <p class="muted">Sending to the agent comes in the next update. For now you can download the files.</p>
+        <div id="downloads" class="downloads"></div>
+      </div>
+    </section>
+
+    <p id="notice" class="notice" role="status"></p>
+    <div id="live" class="visually-hidden" aria-live="polite"></div>
+
+    <nav class="bottom" aria-label="Step navigation">
+      <button type="button" id="back" class="secondary">Back</button>
+      <span id="estimate-bar" class="estimate-bar"></span>
+      <button type="button" id="next">Next</button>
+    </nav>
+  </main>
+  <script type="module" src="/design/js/app.js"></script>
+</body>
+</html>
