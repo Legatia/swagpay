@@ -111,9 +111,20 @@ Setup:
 
 ### Before real money
 
-- Apply migration 0004 remotely: `npx wrangler d1 migrations apply swagpay --remote`.
-- Rehearse a payout on Arc testnet first: run the runner with `CIRCLE_CHAIN=ARC-TESTNET` and `DRY_RUN=1`, then without `DRY_RUN`.
-- On testnet, send the same bridge twice with the same idempotency key and check it pays only once.
-- "Sent" means Circle accepted the transfer. Check the first payouts in the wallet's transaction history.
-- A bridge payout also burns a small forwarding fee on top of the amount. Keep a little extra USDC in the wallet.
-- A failed or denied payout always comes to you in Telegram. Check the wallet history before you approve a retry.
+1. **Rehearse on testnet.** Put the Worker and the wallet on testnet, not only the runner. Use a separate, empty D1 database with all migrations applied, and set:
+   - `ARC_CHAIN_ID=5042002`, `ARC_RPC_URL` (and `ARC_RPC_FALLBACK_URL`, if set) to testnet RPCs, and the testnet `EURC_ADDRESS` (see "Payments and quotes" above);
+   - `RECEIVING_ADDRESS` to a testnet agent wallet;
+   - `PAYOUT_CHAIN=MATIC-AMOY` with a Polygon Amoy `PAYOUT_ADDRESS`, or `PAYOUT_CHAIN=ARC` with an Arc testnet address. Use `ARC`, not `ARC-TESTNET`: the runner's `CIRCLE_CHAIN` picks the network;
+   - `RESERVE_ADDRESS` to an Arc testnet address.
+
+   Run the runner with `CIRCLE_CHAIN=ARC-TESTNET DRY_RUN=1` first. Read the printed commands, then drop `DRY_RUN`.
+2. **Check idempotency.** On testnet, run each command below twice with the same key. The wallet history must show one transfer per command:
+
+       circle bridge transfer MATIC-AMOY <your Amoy address> --amount 1 --address <wallet> --chain ARC-TESTNET --idempotency-key <one uuid> --output json
+       circle wallet transfer <an Arc testnet address> --token 0x3600000000000000000000000000000000000000 --amount 1 --address <wallet> --chain ARC-TESTNET --idempotency-key <another uuid> --output json
+
+   These are the runner's own commands; the `--token` is its default `USDC_ADDRESS`.
+3. **Fee.** A bridge payout burns the amount plus Circle's forwarding fee: `--amount` is what the recipient gets. Check the fee with `circle bridge get-fee MATIC --chain ARC`. Keep a little extra USDC in the wallet: the treasury's balance check counts only the amount.
+4. **"Sent".** It means Circle accepted the transfer. Check the first real payouts in the wallet history.
+5. **Failures.** A failed or denied payout never retries by itself. It comes to you in Telegram. Check the wallet history before you approve a retry.
+6. **Migration.** Apply migration 0004 remotely: `npx wrangler d1 migrations apply swagpay --remote`.
