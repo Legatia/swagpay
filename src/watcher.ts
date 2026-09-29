@@ -76,14 +76,14 @@ async function onUnmatched(env: Env, telegram: TelegramClient, t: TransferRow): 
 const LOCK_MS = 5 * 60_000;
 const MAX_NOTIFY_ATTEMPTS = 10;
 
-async function takeLock(db: D1Database, now: number): Promise<boolean> {
+async function takeLock(db: D1Database, now: number): Promise<string | null> {
   await db.prepare("INSERT OR IGNORE INTO watcher_state (key, value) VALUES ('lock_until', '0')").run();
   const res = await db.prepare("UPDATE watcher_state SET value = ? WHERE key = 'lock_until' AND CAST(value AS INTEGER) < ?").bind(String(now + LOCK_MS), now).run();
-  return res.meta.changes === 1;
+  return res.meta.changes === 1 ? String(now + LOCK_MS) : null;
 }
 
-async function releaseLock(db: D1Database): Promise<void> {
-  await db.prepare("UPDATE watcher_state SET value = '0' WHERE key = 'lock_until'").run();
+async function releaseLock(db: D1Database, value: string): Promise<void> {
+  await db.prepare("UPDATE watcher_state SET value = '0' WHERE key = 'lock_until' AND value = ?").bind(value).run();
 }
 
 async function notifyPass(env: Env, telegram: TelegramClient): Promise<void> {
@@ -104,9 +104,16 @@ async function notifyPass(env: Env, telegram: TelegramClient): Promise<void> {
         await env.DB.prepare("UPDATE transfers SET notify_attempts = notify_attempts + 1 WHERE tx_hash = ? AND log_index = ?").bind(t.tx_hash, t.log_index).run();
         if (t.notify_attempts + 1 >= MAX_NOTIFY_ATTEMPTS) {
           const request = t.request_id === null ? null : await getPaymentRequest(env.DB, t.request_id);
+          let detail = "";
+          if (request) {
+            detail = ` It was credited via ${t.via ?? "amount"}`;
+            const paid = t.paid_after ?? request.paid_units;
+            if (paid > request.amount_units) detail += `; surplus ${formatUnits(Math.min(t.amount_units, paid - request.amount_units))} ${t.token} to refund`;
+            detail += ".";
+          }
           const e = await createEscalation(env.DB, {
             orderId: request?.order_id ?? null, kind: "system",
-            summary: `Payment notification keeps failing for tx ${t.tx_hash} (${formatUnits(t.amount_units)} ${t.token}). The payment is recorded; check the order by hand.`,
+            summary: `Payment notification keeps failing for tx ${t.tx_hash} (${formatUnits(t.amount_units)} ${t.token}). The payment is recorded;${detail} Check the order by hand.`,
             payload: { txHash: t.tx_hash, logIndex: t.log_index },
           });
           await markNotified(env.DB, t);
@@ -125,7 +132,8 @@ export async function runWatcher(
   deps: { rpc: RpcClient; telegram?: TelegramClient; now?: Date },
 ): Promise<{ from: number; to: number; outcomes: TransferOutcome[] } | null> {
   if (!isAddress(env.RECEIVING_ADDRESS)) return null;
-  if (!(await takeLock(env.DB, (deps.now ?? new Date()).getTime()))) return null;
+  const lock = await takeLock(env.DB, (deps.now ?? new Date()).getTime());
+  if (lock === null) return null;
   try {
     const telegram = deps.telegram ?? createTelegram(env.TELEGRAM_BOT_TOKEN);
     const outcomes: TransferOutcome[] = [];
@@ -154,6 +162,16 @@ export async function runWatcher(
             if (t) transfers.push(t);
           } catch (err) {
             console.error("skipping malformed log", err);
+            try {
+              const e = await createEscalation(env.DB, {
+                orderId: null, kind: "system",
+                summary: `Skipped an unreadable Transfer log (tx ${l.transactionHash}, block ${l.blockNumber}); check it by hand.`,
+                payload: { txHash: l.transactionHash, logIndex: l.logIndex },
+              });
+              await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+            } catch (err2) {
+              console.error("could not escalate skipped log", err2);
+            }
           }
         }
         transfers.sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
@@ -162,16 +180,25 @@ export async function runWatcher(
         from = to + 1;
       }
     } catch (err) {
+      console.error("watcher scan failed", err);
       failed = true;
       scanError = err;
     } finally {
       // Claims and notifications don't wait on the RPC.
-      for (const o of await applyClaims(env.DB, deps.now)) outcomes.push(o);
-      await notifyPass(env, telegram);
+      try {
+        for (const o of await applyClaims(env.DB, deps.now)) outcomes.push(o);
+      } catch (err) {
+        console.error("applyClaims failed", err);
+      }
+      try {
+        await notifyPass(env, telegram);
+      } catch (err) {
+        console.error("notification pass failed", err);
+      }
     }
     if (failed) throw scanError;
     return { from: start, to: from - 1, outcomes };
   } finally {
-    await releaseLock(env.DB);
+    await releaseLock(env.DB, lock);
   }
 }

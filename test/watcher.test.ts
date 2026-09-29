@@ -177,23 +177,27 @@ describe("runWatcher", () => {
     expect((await listUnnotified(env.DB)).some((t) => t.tx_hash === paid.transactionHash)).toBe(false);
   });
 
-  it("skips a malformed log and records the good one", async () => {
+  it("skips an unreadable log, tells the owner, and records the good one", async () => {
     const { req } = await pendingDeposit(7474);
     await setLastBlock(1200);
     const good = usdcLog(1205, req.amount_units, 12);
     const bad = { ...usdcLog(1205, 1, 13), data: "0xzz" };
-    const empty = { topics: [] } as unknown as RawLog;
-    const r = await runWatcher(env, { rpc: fakeRpc(1240, [empty, bad, good]).rpc, telegram: silent });
+    const r = await runWatcher(env, { rpc: fakeRpc(1240, [bad, good]).rpc, telegram: silent });
     expect(r?.outcomes.map((o) => o.kind)).toEqual(["matched"]);
+    const e = (await listEscalations(env.DB, { status: "open" })).find((x) => x.kind === "system" && x.summary.includes(`Skipped an unreadable Transfer log (tx ${bad.transactionHash}`));
+    expect(e?.order_id).toBeNull();
   });
 
   it("runs one at a time", async () => {
     await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('lock_until', ?)").bind(String(Date.now() + 60_000)).run();
-    let called = false;
-    const rpc: RpcClient = { async blockNumber() { called = true; return 1; }, async getLogs() { return []; } };
-    expect(await runWatcher(env, { rpc, telegram: silent })).toBeNull();
-    expect(called).toBe(false);
-    await env.DB.prepare("UPDATE watcher_state SET value = '0' WHERE key = 'lock_until'").run();
+    try {
+      let called = false;
+      const rpc: RpcClient = { async blockNumber() { called = true; return 1; }, async getLogs() { return []; } };
+      expect(await runWatcher(env, { rpc, telegram: silent })).toBeNull();
+      expect(called).toBe(false);
+    } finally {
+      await env.DB.prepare("UPDATE watcher_state SET value = '0' WHERE key = 'lock_until'").run();
+    }
   });
 
   it("completes an order still in quoted", async () => {

@@ -25,6 +25,11 @@ export interface RpcClient {
   getLogs(filter: LogFilter): Promise<RawLog[]>;
 }
 
+const isStr = (v: unknown) => typeof v === "string";
+function isLogArray(r: unknown): boolean {
+  return Array.isArray(r) && r.every((l) => l && typeof l === "object" && ["address", "data", "blockNumber", "transactionHash", "logIndex"].every((k) => isStr((l as Record<string, unknown>)[k])) && Array.isArray(l.topics) && l.topics.every(isStr));
+}
+
 const hex = (n: number) => `0x${n.toString(16)}`;
 
 /** JSON-RPC over fetch; each call tries the URLs in order and throws the last error. */
@@ -56,7 +61,7 @@ export function createRpc(urls: string[], fetchImpl: typeof fetch = fetch): RpcC
       return Number(BigInt(String(await call("eth_blockNumber", [], (r) => typeof r === "string" && /^0x[0-9a-fA-F]+$/.test(r)))));
     },
     async getLogs(f) {
-      const result = await call("eth_getLogs", [{ fromBlock: hex(f.fromBlock), toBlock: hex(f.toBlock), address: f.address, topics: f.topics }], Array.isArray);
+      const result = await call("eth_getLogs", [{ fromBlock: hex(f.fromBlock), toBlock: hex(f.toBlock), address: f.address, topics: f.topics }], isLogArray);
       return result as RawLog[];
     },
   };

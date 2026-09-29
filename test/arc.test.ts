@@ -49,6 +49,18 @@ describe("createRpc", () => {
     expect(await createRpc(["https://a", "https://b"], fetchImpl).blockNumber()).toBe(16);
   });
 
+  it("falls back when a log is missing a field", async () => {
+    const good = { address: "0x1", topics: [], data: "0x", blockNumber: "0x1", transactionHash: "0x2", logIndex: "0x0" };
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const { id } = JSON.parse(String(init?.body));
+      const bad = { ...good, data: undefined };
+      return Response.json({ jsonrpc: "2.0", id, result: String(input) === "https://a" ? [bad] : [good] });
+    }) as typeof fetch;
+    const logs = await createRpc(["https://a", "https://b"], fetchImpl).getLogs({ fromBlock: 1, toBlock: 2, address: [], topics: [] });
+    expect(logs).toHaveLength(1);
+    expect(logs[0].data).toBe("0x");
+  });
+
   it("throws the last error when every URL fails", async () => {
     const fetchImpl = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
     await expect(createRpc(["https://a"], fetchImpl).blockNumber()).rejects.toThrow("HTTP 503");
