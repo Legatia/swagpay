@@ -107,3 +107,12 @@ export async function deleteOrder(db: D1Database, id: number): Promise<void> {
 export async function listRecentOrders(db: D1Database, limit: number): Promise<OrderRow[]> {
   return (await db.prepare(`SELECT ${ORDER_COLUMNS} FROM orders ORDER BY id DESC LIMIT ?`).bind(limit).all<OrderRow>()).results;
 }
+
+/** Moves an order to `to` only from one of the `from` states. Returns whether it moved. */
+export async function setOrderStatus(db: D1Database, id: number, from: string[], to: string): Promise<boolean> {
+  const res = await db
+    .prepare(`UPDATE orders SET status = ? WHERE id = ? AND status IN (${from.map(() => "?").join(", ")})`)
+    .bind(to, id, ...from)
+    .run();
+  return res.meta.changes === 1;
+}
