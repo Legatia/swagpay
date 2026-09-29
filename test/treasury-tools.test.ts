@@ -66,6 +66,8 @@ describe("treasury tools", () => {
       [ob({ kind: "refund", destination: "0x9999999999999999999999999999999999999999", chain: "ARC" }), {}, "refunds need the owner's approval"],
       [ob({ destination: "0x9999999999999999999999999999999999999999" }), {}, "is not the configured address"],
       [ob({ token: "EURC" }), {}, "only USDC payouts are configured"],
+      [ob({ chain: "ARC" }), {}, "the obligation's chain ARC is not the configured chain"],
+      [ob({ kind: "reserve", destination: RESERVE, chain: "MATIC" }), {}, "the obligation's chain MATIC is not the configured chain"],
       [ob({ status: "paid" }), {}, "obligation #1 is paid"],
       [ob({ status: "failed" }), {}, "last payout failed"],
       [ob(), { balance: 300_000_000, queued: 100_000_000 }, "not enough USDC: the wallet holds 300.000000 and 100.000000 is already queued"],
@@ -78,6 +80,12 @@ describe("treasury tools", () => {
       expect(String(r.content)).toContain(text);
       expect(state.queued).toEqual([]);
     }
+  });
+
+  it("pays a reserve on Arc and a refund on its own chain", async () => {
+    expect((await fake([ob({ kind: "reserve", destination: RESERVE, chain: "ARC" })]).h.pay_obligation({ obligationId: 1, reason: "reserve share" })).content).toMatch(/^Queued payout/);
+    const refund = ob({ kind: "refund", destination: "0x9999999999999999999999999999999999999999", chain: "ARC", approved_by: "owner", status: "approved" });
+    expect((await fake([refund]).h.pay_obligation({ obligationId: 1, reason: "owner approved the refund" })).content).toMatch(/^Queued payout/);
   });
 
   it("holds an obligation for a number of hours", async () => {

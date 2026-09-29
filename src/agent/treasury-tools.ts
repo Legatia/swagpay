@@ -27,7 +27,7 @@ const SweepInput = z.object({ orderId: z.number().int().positive(), bps: z.numbe
 const EscalateInput = z.object({ summary: z.string().trim().min(3).max(500).describe("What the owner needs to decide or know"), reason });
 
 export const TREASURY_TOOLS: BetaTool[] = [
-  { name: "pay_obligation", description: "Queue the payout of an existing obligation from the agent wallet. Checked against the destination, per-payout and 24-hour limits, and the wallet balance.", input_schema: inputSchema(PayInput) },
+  { name: "pay_obligation", description: "Queue the payout of an existing obligation from the agent wallet. Checked against the destination and its chain, per-payout and 24-hour limits, and the wallet balance.", input_schema: inputSchema(PayInput) },
   { name: "hold_obligation", description: "Decide not to pay an obligation yet, and be reminded after some hours.", input_schema: inputSchema(HoldInput) },
   { name: "sweep_to_reserve", description: "For a closed order, create a reserve obligation for a share of its margin. Pay it with pay_obligation.", input_schema: inputSchema(SweepInput) },
   { name: "escalate", description: "Ask the owner about something you may not decide. Their decision arrives as an event.", input_schema: inputSchema(EscalateInput) },
@@ -60,6 +60,9 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
       if (ob.kind === "refund" && ob.approved_by !== "owner") return blocked("refunds need the owner's approval");
       const expected = ob.kind === "printer_cost" ? ctx.policy.payoutAddress : ob.kind === "reserve" ? ctx.policy.reserveAddress : ob.destination;
       if (!expected || expected.toLowerCase() !== ob.destination.toLowerCase()) return blocked(`the destination ${ob.destination} is not the configured address`);
+      // The same address on another chain may belong to someone else.
+      const chain = ob.kind === "printer_cost" ? ctx.policy.payoutChain : ob.kind === "reserve" ? "ARC" : ob.chain;
+      if (ob.chain !== chain) return blocked(`the obligation's chain ${ob.chain} is not the configured chain`);
       if (ob.approved_by !== "owner") {
         if (ob.amount_units > ctx.policy.perTxUnits) return overLimit(ob, `above the per-payout limit of ${formatUnits(ctx.policy.perTxUnits)} USDC`);
         if ((await ctx.payoutsLast24h()) + ob.amount_units > ctx.policy.dailyUnits) return overLimit(ob, `above the 24-hour budget of ${formatUnits(ctx.policy.dailyUnits)} USDC`);
