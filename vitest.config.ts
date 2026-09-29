@@ -15,6 +15,7 @@ export default defineConfig(async () => {
             MAX_NEW_ORDERS_PER_DAY: "50",
             REQUIRE_TURNSTILE: "0",
             TELEGRAM_OWNER_CHAT_ID: "42",
+            TELEGRAM_BOT_TOKEN: "",
           },
         },
       }),

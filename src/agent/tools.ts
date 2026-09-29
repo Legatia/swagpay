@@ -144,7 +144,9 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
       const lines = ["Saved."];
       let waiting = false;
       for (const r of reasons) {
-        const e = await ctx.escalateOnce(`approval:${r}`, "approval", `Approve: ${r}`, { reason: r });
+        const items = spec.items.filter((_, i) => verdicts[i].kind === "escalate" && (verdicts[i] as { reason: string }).reason === r);
+        const detail = items.map((it) => `${it.quantity} × ${it.description}`).join("; ");
+        const e = await ctx.escalateOnce(`approval:${r}`, "approval", `Approve: ${r}${detail ? ` (${detail})` : ""}`, { reason: r });
         if (e.status === "approved") {
           lines.push(`Approved by the owner (#${e.id}): ${r}.`);
         } else if (e.status === "rejected") {

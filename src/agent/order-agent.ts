@@ -108,7 +108,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     }
     this.sql`UPDATE escalated SET status = ${decision} WHERE escalation_id = ${e.id}`;
     const notePart = note ? ` Note from the owner: ${JSON.stringify(note)}.` : "";
-    this.addInbox({ kind: "event", text: `Owner decision on escalation #${e.id} (${e.summary}): ${decision}.${notePart}` });
+    this.addInbox({ kind: "event", text: `Owner decision on escalation #${e.id} (summary: ${JSON.stringify(e.summary)}): ${decision}.${notePart}` });
     await this.trigger();
   }
 

@@ -120,7 +120,7 @@ describe("update_order", () => {
     expect(r.isError).toBeFalsy();
     expect(state.spec.items).toHaveLength(2);
     expect(r.content).toContain("Sent to the owner (#1)");
-    expect(state.escalations).toEqual([{ key: 'approval:"banner" is not on the item list; the owner must approve it', kind: "approval", summary: 'Approve: "banner" is not on the item list; the owner must approve it' }]);
+    expect(state.escalations).toEqual([{ key: 'approval:"banner" is not on the item list; the owner must approve it', kind: "approval", summary: 'Approve: "banner" is not on the item list; the owner must approve it (1 × 2 m banner)' }]);
     expect(state.decisions[0]).toMatchObject({ verdict: "escalate", outcome: "escalated" });
 
     const again = await h.update_order({ spec, reason: "sizes updated" });
