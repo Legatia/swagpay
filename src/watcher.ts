@@ -4,6 +4,7 @@ import { getOrderById, setOrderStatus } from "./db";
 import { createEscalation } from "./escalations";
 import { formatCents, formatUnits, isAddress } from "./money";
 import { applyClaims, depositPaid, getPaymentRequest, listUnnotified, markNotified, recordTransfer, type NewTransfer, type PaymentRequestRow, type TransferOutcome, type TransferRow } from "./payments";
+import { warsawTime } from "./quote-text";
 import { getQuote } from "./quotes";
 import { createTelegram, notifyOwner, type TelegramClient } from "./telegram";
 
@@ -33,12 +34,16 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
   let text = `Payment received on Arc: ${got} for ${r.stage} request #${r.id} (tx ${t.tx_hash}). Paid ${formatUnits(paid)} of ${formatUnits(r.amount_units)}.`;
   if (paid < r.amount_units) text += ` Still due: ${formatUnits(r.amount_units - paid)} ${r.token}.`;
   let completedDeposit = false;
+  // Late means this transfer reached Swagpay after the request's due time; it is still credited.
+  const late = Date.parse(t.created_at) > Date.parse(r.due_by);
   if (r.stage === "deposit" && (await depositPaid(env.DB, order.id))) {
     // "quoted" too: if the accept route could not move the order to deposit_pending, the deposit still completes it. Idempotent.
     await setOrderStatus(env.DB, order.id, ["quoted", "deposit_pending"], "deposit_paid");
     if (paid - t.amount_units < r.amount_units && paid >= r.amount_units) {
       completedDeposit = true;
-      text += " The deposit is fully paid.";
+      text += late
+        ? " The deposit arrived after it was due; the owner will confirm whether printing is still possible before anything is booked."
+        : " The deposit is fully paid.";
     }
   }
   const surplus = paid > r.amount_units ? Math.min(t.amount_units, paid - r.amount_units) : 0;
@@ -67,9 +72,12 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     // Last: the owner books the printer only after everything above has been recorded.
     const quote = await getQuote(env.DB, r.quote_id);
     const cost = quote ? `cost ${formatCents(quote.cost_pln_grosze)} PLN gross (quote #${quote.id})` : `quote #${r.quote_id} is missing; check the cost by hand`;
+    const summary = late
+      ? `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Check printing is still possible, then book the printer: ${cost}.`
+      : `Order ${order.id}: deposit paid (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Book the printer: ${cost}.`;
     const e = await createEscalation(env.DB, {
       orderId: order.id, kind: "payment",
-      summary: `Order ${order.id}: deposit paid (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Book the printer: ${cost}.`,
+      summary,
       payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id },
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);

@@ -6,7 +6,7 @@ import { OrderSpecSchema, itemsKey, missingInfo, specErrors, type OrderSpec } fr
 import type { Rates } from "../fx";
 import { formatCents, type Currency } from "../money";
 import { checkItem, checkLeadTime, checkQuote, depositFor, type Policy, type PrintMethod, type Verdict } from "../policy";
-import { businessDaysBetween } from "../time";
+import { businessDaysBetween, leadTimeCutoff } from "../time";
 import type { NewQuote, QuoteRow } from "../quotes";
 import { countPdfPages, imageSize, sniffMediaType } from "../sniff";
 import { costRequestText, priceBand, quoteText } from "../quote-text";
@@ -46,7 +46,7 @@ export interface ToolContext {
   printerCost(specKey: string): Promise<number | null>;
   escalateOnce(key: string, kind: "approval" | "agent" | "cost", summary: string, payload: unknown): Promise<{ id: number; status: "open" | "approved" | "rejected"; created: boolean }>;
   rates(currency: Currency): Promise<Rates | null>;
-  issueQuote(q: NewQuote): Promise<QuoteRow>;
+  issueQuote(q: NewQuote, validUntil: Date): Promise<QuoteRow>;
   now(): Date;
 }
 
@@ -285,6 +285,11 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
       if (order.deliverBy.getTime() <= now.getTime()) return blocked("the delivery deadline has passed; ask the host for a new date and escalate");
       const verdicts: Verdict[] = [verdict];
       const strictest = Math.max(...Object.values(ctx.policy.minLeadBusinessDays));
+      // The lead time the whole order needs: each listed item's method, the strictest standard for off-list items.
+      const required = Math.max(...spec.items.map((item) => {
+        const min = Object.hasOwn(ctx.policy.allowedItems, item.kind) ? ctx.policy.minLeadBusinessDays[item.method as PrintMethod] : undefined;
+        return min ?? strictest;
+      }));
       for (const item of spec.items) {
         if (Object.hasOwn(ctx.policy.allowedItems, item.kind)) {
           verdicts.push(checkLeadTime(now, order.deliverBy, item.method as PrintMethod, ctx.policy));
@@ -310,7 +315,13 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         };
       }
       const depositCents = Math.round(depositFor(q, ctx.policy) * 100);
-      const quote = await ctx.issueQuote({ currency, priceCents, depositCents, costPln, plnPerUnit: rates.plnPerUnit, usdPerUnit: rates.usdPerUnit, markup, itemsKey: key });
+      // Valid while the lead time still fits; a quote approved with the deadline already close lasts until tonight's midnight.
+      const validUntil = new Date(Math.min(
+        now.getTime() + ctx.policy.quoteValidityHours * 3_600_000,
+        leadTimeCutoff(now, order.deliverBy, required).getTime(),
+        order.deliverBy.getTime(),
+      ));
+      const quote = await ctx.issueQuote({ currency, priceCents, depositCents, costPln, plnPerUnit: rates.plnPerUnit, usdPerUnit: rates.usdPerUnit, markup, itemsKey: key }, validUntil);
       await ctx.postToHost(`${message}\n\n${quoteText(quote)}`);
       return {
         verdict: "allow", outcome: "done", detail: `quote #${quote.id}`,

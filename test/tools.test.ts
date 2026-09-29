@@ -11,7 +11,7 @@ import type { NewQuote, QuoteRow } from "../src/quotes";
 function fakeCtx(files: ArtworkFile[] = []) {
   const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[], costs: new Map<string, number>(),
     rates: { USD: { plnPerUnit: 4, usdPerUnit: 1 }, EUR: { plnPerUnit: 4.3, usdPerUnit: 1.075 } } as Record<string, { plnPerUnit: number; usdPerUnit: number } | null>,
-    quotes: [] as NewQuote[], status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"),
+    quotes: [] as (NewQuote & { validUntil: Date })[], status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"),
     withdrawn: null as number | null, withdrawCalls: [] as string[] };
   const statuses = new Map<string, "open" | "approved" | "rejected">();
   const previews = new Map<string, number>();
@@ -36,11 +36,11 @@ function fakeCtx(files: ArtworkFile[] = []) {
     async orderSummary() { return { number: 7, status: state.status, deliverBy: state.deliverBy, deliveryPlace: "Kolektyw3" }; },
     async printerCost(key) { return state.costs.get(key) ?? null; },
     async rates(c) { return state.rates[c] ?? null; },
-    async issueQuote(q) {
-      state.quotes.push(q);
+    async issueQuote(q, validUntil) {
+      state.quotes.push({ ...q, validUntil });
       return { id: state.quotes.length, order_id: 7, currency: q.currency, price_cents: q.priceCents, deposit_cents: q.depositCents,
         cost_pln_grosze: Math.round(q.costPln * 100), pln_per_unit: q.plnPerUnit, usd_per_unit: q.usdPerUnit, markup: q.markup, items_key: q.itemsKey,
-        status: "open", issued_at: "2099-10-01T10:00:00.000Z", valid_until: "2099-10-03T10:00:00.000Z", accepted_at: null } as QuoteRow;
+        status: "open", issued_at: "2099-10-01T10:00:00.000Z", valid_until: validUntil.toISOString(), accepted_at: null } as QuoteRow;
     },
     now() { return new Date("2099-10-01T10:00:00Z"); },
   };
@@ -473,6 +473,31 @@ describe("send_quote", () => {
     const r = await h.send_quote(ask);
     expect(r.content).toContain("only 1 business days before the deadline; screen needs 4");
     expect(state.quotes).toHaveLength(0);
+  });
+
+  it("keeps a quote valid only while the lead time still fits", async () => {
+    // Thursday 12:00 in Warsaw, deadline next Thursday: exactly 4 business days (Fri, Mon, Tue, Wed), screen's minimum.
+    const { h, state } = await priced();
+    expect((await h.send_quote(ask)).content).toMatch(/^Quote #1 sent/);
+    expect(state.quotes[0].validUntil.toISOString()).toBe("2099-10-01T22:00:00.000Z"); // Friday 00:00 Warsaw, not now + 48 h
+    expect(state.posted[0]).toContain("Valid until 2 Oct 2099, 00:00 (Warsaw time)");
+    const roomy = await priced();
+    roomy.state.deliverBy = new Date("2099-10-20T15:00:00Z");
+    await roomy.h.send_quote(ask);
+    expect(roomy.state.quotes[0].validUntil.toISOString()).toBe("2099-10-03T10:00:00.000Z"); // now + 48 h
+  });
+
+  it("makes an approved close-deadline quote valid until the end of today", async () => {
+    const { h, state, statuses } = await priced();
+    state.deliverBy = new Date("2099-10-05T15:00:00Z");
+    await h.send_quote(ask);
+    expect(state.escalations.map((e) => e.key)).toEqual([
+      "approval:only 1 business days before the deadline; screen needs 4",
+      "approval:only 1 business days before the deadline; diecut needs 2",
+    ]);
+    for (const e of state.escalations) statuses.set(e.key, "approved");
+    expect((await h.send_quote(ask)).content).toMatch(/^Quote #1 sent/);
+    expect(state.quotes[0].validUntil.toISOString()).toBe("2099-10-01T22:00:00.000Z");
   });
 
   it("refuses while an off-list item is not approved", async () => {

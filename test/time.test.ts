@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { businessDaysBetween, isPolishBusinessDay, warsawDate, warsawLocalToUtc } from "../src/time";
+import { businessDaysBetween, isPolishBusinessDay, leadTimeCutoff, warsawDate, warsawLocalToUtc } from "../src/time";
 
 describe("warsaw time", () => {
   it("reads the Warsaw calendar date", () => {
@@ -30,5 +30,24 @@ describe("warsaw time", () => {
     expect(businessDaysBetween(monday, new Date("2026-10-13T15:00:00Z"))).toBe(5); // Tue-Fri, Mon
     expect(businessDaysBetween(new Date("2026-11-09T08:00:00Z"), new Date("2026-11-13T15:00:00Z"))).toBe(2); // Tue, Thu (Wed 11 Nov is a holiday)
     expect(businessDaysBetween(monday, new Date("2026-10-05T18:00:00Z"))).toBe(0);
+  });
+
+  it("finds the first Warsaw midnight from which the lead time no longer fits", () => {
+    const monday = new Date("2026-10-05T08:00:00Z");
+    // Tue-Fri and Mon are 5 business days; from Wednesday 00:00 only Thu, Fri, Mon (3) remain.
+    expect(leadTimeCutoff(monday, new Date("2026-10-13T15:00:00Z"), 4).toISOString()).toBe("2026-10-06T22:00:00.000Z");
+    // Already short: the cutoff is tonight's midnight.
+    expect(leadTimeCutoff(monday, new Date("2026-10-08T15:00:00Z"), 4).toISOString()).toBe("2026-10-05T22:00:00.000Z");
+    // A deadline before that midnight is the cutoff itself.
+    expect(leadTimeCutoff(monday, new Date("2026-10-05T18:00:00Z"), 2).toISOString()).toBe("2026-10-05T18:00:00.000Z");
+  });
+
+  it("uses the right offset across the DST change", () => {
+    // From Tuesday 27 Oct 00:00 (CET, 23:00 UTC the day before) only Wed and Thu remain before Friday 30 Oct.
+    expect(leadTimeCutoff(new Date("2026-10-23T08:00:00Z"), new Date("2026-10-30T15:00:00Z"), 3).toISOString()).toBe("2026-10-26T23:00:00.000Z");
+  });
+
+  it("stops looking 60 days ahead", () => {
+    expect(leadTimeCutoff(new Date("2026-10-05T08:00:00Z"), new Date("2027-06-01T10:00:00Z"), 4).toISOString()).toBe(warsawLocalToUtc("2026-12-04T00:00").toISOString());
   });
 });

@@ -6,6 +6,7 @@ import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, type RawLog, type Rp
 import { getOrderById, setOrderStatus } from "../src/db";
 import { listEscalations } from "../src/escalations";
 import { addClaim, createPaymentRequest, listUnnotified } from "../src/payments";
+import { warsawTime } from "../src/quote-text";
 import type { TelegramClient } from "../src/telegram";
 import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, runWatcher } from "../src/watcher";
 import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
@@ -35,13 +36,14 @@ async function setLastBlock(n: number) {
   await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('last_block', ?)").bind(String(n)).run();
 }
 
-async function pendingDeposit(tag: number, opts: { init?: boolean; pending?: boolean } = {}) {
+async function pendingDeposit(tag: number, opts: { init?: boolean; pending?: boolean; dueBy?: Date } = {}) {
   const { order } = await newOrderRow();
   const stub = await getAgentByName(env.OrderAgent, order.instance);
   if (opts.init !== false) await stub.init(order.id, intakeFor());
   const quoteId = await insertQuote(env.DB, order.id);
   if (opts.pending !== false) await setOrderStatus(env.DB, order.id, ["draft"], "deposit_pending");
-  const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents: 25750 }, new Date(), () => tag);
+  const dueBy = opts.dueBy ?? new Date(Date.now() + 48 * 3_600_000);
+  const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents: 25750, dueBy }, new Date(), () => tag);
   return { order, stub, req };
 }
 
@@ -81,6 +83,24 @@ describe("runWatcher", () => {
     await setLastBlock(100);
     const again = await runWatcher(env, { rpc, telegram: silent });
     expect(again?.outcomes).toEqual([{ kind: "duplicate" }]);
+  });
+
+  it("credits a late deposit but has the owner confirm printing before booking", async () => {
+    const due = new Date(Date.now() - 3_600_000);
+    const { order, stub, req } = await pendingDeposit(4545, { dueBy: due });
+    await setLastBlock(1400);
+    const paid = usdcLog(1405, req.amount_units, 15);
+    await runWatcher(env, { rpc: fakeRpc(1440, [paid]).rpc, telegram: silent });
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("deposit_paid");
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((x) => x.text).join("\n");
+      expect(inbox).toContain("The deposit arrived after it was due; the owner will confirm whether printing is still possible before anything is booked.");
+      expect(inbox).not.toContain("The deposit is fully paid.");
+    });
+    const late = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.kind === "payment");
+    expect(late).toHaveLength(1);
+    expect(late[0].summary).toContain(`Order ${order.id}: deposit paid LATE (due ${warsawTime(due)} Warsaw time)`);
+    expect(late[0].summary).toContain("cost 1000.00 PLN gross");
   });
 
   it("opens an escalation without an order for a transfer that matches nothing", async () => {

@@ -336,7 +336,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
           }
           return ratesFor(this.env.DB, currency, new Date());
         },
-        issueQuote: (q) => createQuote(this.env.DB, orderId, q, new Date(), policy.quoteValidityHours),
+        issueQuote: (q, validUntil) => createQuote(this.env.DB, orderId, q, new Date(), validUntil),
         now: () => new Date(),
       });
     } catch (err) {

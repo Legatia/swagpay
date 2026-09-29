@@ -17,7 +17,8 @@ async function depositRequest(cents = 25750, tags: number[] = []) {
   const { order } = await newOrderRow();
   const quoteId = await insertQuote(env.DB, order.id, { depositCents: cents });
   const next = [...tags];
-  const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents }, new Date(), next.length ? () => next.shift()! : undefined);
+  const dueBy = new Date(Date.now() + 48 * 3_600_000);
+  const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents, dueBy }, new Date(), next.length ? () => next.shift()! : undefined);
   return { order, quoteId, req };
 }
 
@@ -25,6 +26,7 @@ describe("payment requests", () => {
   it("creates a tagged request", async () => {
     const { req } = await depositRequest(25750, [42]);
     expect(req).toMatchObject({ stage: "deposit", token: "USDC", tag: 42, amount_units: 257500042, paid_units: 0, status: "open", paid_at: null });
+    expect(Date.parse(req.due_by)).toBeGreaterThan(Date.now());
   });
 
   it("picks another tag when the first is taken by an open request of the same token", async () => {

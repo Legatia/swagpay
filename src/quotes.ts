@@ -30,8 +30,7 @@ export interface NewQuote {
   itemsKey: string;
 }
 
-export async function createQuote(db: D1Database, orderId: number, q: NewQuote, now: Date, validityHours: number): Promise<QuoteRow> {
-  const validUntil = new Date(now.getTime() + validityHours * 3_600_000);
+export async function createQuote(db: D1Database, orderId: number, q: NewQuote, now: Date, validUntil: Date): Promise<QuoteRow> {
   const quotable = "EXISTS (SELECT 1 FROM orders WHERE id = ? AND status IN ('draft', 'quoted'))";
   const results = await db.batch([
     db.prepare(`UPDATE quotes SET status = 'superseded' WHERE order_id = ? AND status = 'open' AND ${quotable}`).bind(orderId, orderId),

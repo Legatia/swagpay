@@ -34,6 +34,7 @@ CREATE TABLE payment_requests (
   paid_units INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'open',
   created_at TEXT NOT NULL,
+  due_by TEXT NOT NULL,
   paid_at TEXT
 );
 CREATE UNIQUE INDEX payment_requests_open_tag ON payment_requests(token, tag) WHERE status = 'open';

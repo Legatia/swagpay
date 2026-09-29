@@ -121,13 +121,13 @@ describe("API", () => {
     expect((await r2.json<{ error: string }>()).error).toContain("empty");
   });
 
-  async function quotedOrder(issuedAt = new Date()) {
+  async function quotedOrder(issuedAt = new Date(), validUntil = new Date(issuedAt.getTime() + 48 * 3_600_000)) {
     const token = await newOrder();
     const order = (await getOrderByToken(env.DB, token))!;
     await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?), ('EUR', 4.3, '2099-09-30', ?)")
       .bind(new Date().toISOString(), new Date().toISOString()).run();
     // The order has no saved spec yet, so the quote is for the empty item list.
-    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: await itemsKey(EMPTY_SPEC) }, issuedAt, 48);
+    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: await itemsKey(EMPTY_SPEC) }, issuedAt, validUntil);
     return { token, order, quote };
   }
   const accept = (token: string, quoteId: unknown) =>
@@ -157,6 +157,26 @@ describe("API", () => {
       expect(inbox).toContain(`The host accepted quote #${quote.id}. Deposit request #${requestId}: ${view.payments[0].amount} USDC on Arc.`);
       expect((await agent.getView()).thread.at(-1)).toMatchObject({ from: "system", text: `Quote #${quote.id} accepted. Deposit due: ${view.payments[0].amount} USDC.` });
     });
+  });
+
+  it("gives the deposit 48 hours, at most a day past the quote, and never past the deadline", async () => {
+    const dueBy = async (requestId: number) =>
+      (await env.DB.prepare("SELECT due_by FROM payment_requests WHERE id = ?").bind(requestId).first<{ due_by: string }>())!.due_by;
+    const before = Date.now();
+    const plain = await quotedOrder();
+    const { requestId: a } = await (await accept(plain.token, plain.quote.id)).json<{ requestId: number }>();
+    expect(Date.parse(await dueBy(a))).toBeGreaterThanOrEqual(before + 48 * 3_600_000);
+    expect(Date.parse(await dueBy(a))).toBeLessThanOrEqual(Date.now() + 48 * 3_600_000);
+
+    const short = await quotedOrder(new Date(), new Date(Date.now() + 2 * 3_600_000));
+    const { requestId: b } = await (await accept(short.token, short.quote.id)).json<{ requestId: number }>();
+    expect(Date.parse(await dueBy(b))).toBe(Date.parse(short.quote.valid_until) + 24 * 3_600_000);
+
+    const soon = await quotedOrder();
+    const deliverBy = new Date(Date.now() + 10 * 3_600_000).toISOString();
+    await env.DB.prepare("UPDATE orders SET deliver_by = ? WHERE id = ?").bind(deliverBy, soon.order.id).run();
+    const { requestId: c } = await (await accept(soon.token, soon.quote.id)).json<{ requestId: number }>();
+    expect(await dueBy(c)).toBe(deliverBy);
   });
 
   it("refuses a quote whose items changed", async () => {
@@ -226,7 +246,7 @@ describe("API", () => {
     const token = await newOrder();
     const order = (await getOrderByToken(env.DB, token))!;
     await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('USD', 4, '2099-09-30', ?)").bind(new Date().toISOString()).run();
-    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 0, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: await itemsKey(EMPTY_SPEC) }, new Date(), 48);
+    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 0, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: await itemsKey(EMPTY_SPEC) }, new Date(), new Date(Date.now() + 48 * 3_600_000));
     expect((await accept(token, quote.id)).status).toBe(500);
     expect((await getQuote(env.DB, quote.id))?.status).toBe("open");
   });

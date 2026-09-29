@@ -11,6 +11,8 @@ export interface PaymentRequestRow {
   paid_units: number;
   status: "open" | "paid" | "cancelled";
   created_at: string;
+  /** When the payment should have arrived; a later one is still credited, but the owner confirms before acting on it. */
+  due_by: string;
   paid_at: string | null;
 }
 
@@ -49,7 +51,7 @@ const randomTag = () => 1 + Math.floor(Math.random() * MAX_TAG);
 
 export async function createPaymentRequest(
   db: D1Database,
-  r: { orderId: number; quoteId: number; stage: "deposit" | "balance"; token: Token; cents: number },
+  r: { orderId: number; quoteId: number; stage: "deposit" | "balance"; token: Token; cents: number; dueBy: Date },
   now: Date = new Date(),
   nextTag: () => number = randomTag,
 ): Promise<PaymentRequestRow> {
@@ -63,8 +65,8 @@ export async function createPaymentRequest(
     if (busy) continue;
     try {
       const row = await db
-        .prepare("INSERT INTO payment_requests (order_id, quote_id, stage, token, amount_units, tag, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *")
-        .bind(r.orderId, r.quoteId, r.stage, r.token, taggedUnits(r.cents, tag), tag, now.toISOString())
+        .prepare("INSERT INTO payment_requests (order_id, quote_id, stage, token, amount_units, tag, created_at, due_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
+        .bind(r.orderId, r.quoteId, r.stage, r.token, taggedUnits(r.cents, tag), tag, now.toISOString(), r.dueBy.toISOString())
         .first<PaymentRequestRow>();
       if (!row) throw new Error("payment request insert returned no row");
       return row;

@@ -209,7 +209,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     if (Date.parse(quote.valid_until) <= now.getTime() || !quoteStillValid({ issuedAt: new Date(quote.issued_at), plnPerUnit: quote.pln_per_unit }, now, rates.plnPerUnit, policy)) {
       await expireQuote(env.DB, quote.id);
       try {
-        await agent.pushEvent(`Quote #${quote.id} expired before the host accepted it: it is older than ${policy.quoteValidityHours} hours or the złoty moved more than the FX buffer. Send a new quote with send_quote.`);
+        await agent.pushEvent(`Quote #${quote.id} expired before the host accepted it: its validity ended (at most ${policy.quoteValidityHours} hours, less when the deadline is close) or the złoty moved more than the FX buffer. Send a new quote with send_quote.`);
       } catch (err) {
         console.error("could not tell the agent about the expired quote", err);
       }
@@ -219,7 +219,9 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     if (!accepted) return fail(409, "This quote is no longer open.");
     let payment: PaymentRequestRow;
     try {
-      payment = await createPaymentRequest(env.DB, { orderId: order.id, quoteId: quote.id, stage: "deposit", token: TOKEN_FOR[quote.currency], cents: quote.deposit_cents }, now);
+      // The deposit is due within 48 hours, at most a day after the quote's validity, and never after the delivery deadline.
+      const dueBy = new Date(Math.min(now.getTime() + 48 * 3_600_000, Date.parse(quote.valid_until) + 24 * 3_600_000, Date.parse(order.deliver_by)));
+      payment = await createPaymentRequest(env.DB, { orderId: order.id, quoteId: quote.id, stage: "deposit", token: TOKEN_FOR[quote.currency], cents: quote.deposit_cents, dueBy }, now);
     } catch (err) {
       await reopenQuote(env.DB, quote.id);
       throw err;

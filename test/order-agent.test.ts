@@ -349,7 +349,7 @@ describe("OrderAgent", () => {
 
   it("withdraws an open quote when update_order changes the items", async () => {
     const { order, stub } = await newAgent();
-    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: "old-items" }, new Date(), 48);
+    const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: "old-items" }, new Date(), new Date(Date.now() + 48 * 3_600_000));
     expect((await getOrderById(env.DB, order.id))?.status).toBe("quoted");
     const tee = { kind: "tshirt", description: "Black tee", method: "screen", quantity: 80, colour: "black", sizes: { M: 80 }, printAreas: ["front"] };
     await runInDurableObject(stub, async (agent: OrderAgent) => {
