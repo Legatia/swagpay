@@ -1,0 +1,109 @@
+import { getAgentByName } from "agents";
+import { countOrdersSince, createOrder, getOrderByToken, type OrderRow } from "./db";
+import { newFileId } from "./ids";
+import { IntakeSchema, checkIntakeDates, issueText } from "./intake";
+import type { ArtworkMeta } from "./agent/order-agent";
+
+export const MAX_UPLOAD_BYTES = 10_000_000;
+export const MAX_FILES_PER_ORDER = 10;
+export const UPLOAD_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml", "application/pdf"];
+
+const json = (status: number, body: unknown) => Response.json(body, { status });
+const fail = (status: number, error: string) => json(status, { error });
+
+async function readJson(request: Request): Promise<unknown | undefined> {
+  try {
+    return await request.json();
+  } catch {
+    return undefined;
+  }
+}
+
+function publicOrder(o: OrderRow) {
+  return {
+    number: o.id,
+    eventName: o.event_name,
+    eventDate: o.event_date,
+    deliverBy: o.deliver_by,
+    deliveryPlace: o.delivery_place,
+    status: o.status,
+  };
+}
+
+export async function handleApi(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  if (path === "/api/orders" && request.method === "POST") {
+    const body = await readJson(request);
+    if (body === undefined) return fail(400, "body must be JSON");
+    const parsed = IntakeSchema.safeParse(body);
+    if (!parsed.success) return fail(400, issueText(parsed.error));
+    const now = new Date();
+    const dateProblem = checkIntakeDates(parsed.data, now);
+    if (dateProblem) return fail(400, dateProblem);
+    const cap = Number(env.MAX_NEW_ORDERS_PER_DAY);
+    if ((await countOrdersSince(env.DB, new Date(now.getTime() - 86_400_000))) >= cap) {
+      return fail(429, "Swagpay is taking as many new orders as it can today. Please try again tomorrow.");
+    }
+    const { order, token } = await createOrder(env.DB, parsed.data, now);
+    const agent = await getAgentByName(env.OrderAgent, order.instance);
+    await agent.init(order.id, parsed.data);
+    return json(201, { token, url: `/o/${token}` });
+  }
+
+  const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork)?$/.exec(path);
+  if (!m) return fail(404, "not found");
+  const order = await getOrderByToken(env.DB, m[1]);
+  if (!order) return fail(404, "order not found");
+  const agent = await getAgentByName(env.OrderAgent, order.instance);
+  const sub = m[2];
+
+  if (!sub && request.method === "GET") {
+    return json(200, { order: publicOrder(order), view: await agent.getView() });
+  }
+
+  if (sub === "/messages" && request.method === "POST") {
+    const body = (await readJson(request)) as { text?: unknown } | undefined;
+    const text = typeof body?.text === "string" ? body.text.trim() : "";
+    if (!text) return fail(400, "text is required");
+    if (text.length > 4000) return fail(400, "messages can be up to 4,000 characters");
+    try {
+      return json(201, { entry: await agent.postHostMessage(text) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("message limit reached")) return fail(429, "This order has reached its message limit. The owner will contact you.");
+      throw err;
+    }
+  }
+
+  if (sub === "/artwork" && request.method === "POST") {
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return fail(400, "send the file as multipart form data");
+    }
+    const file = form.get("file");
+    if (!(file instanceof File)) return fail(400, "file is required");
+    if (!UPLOAD_TYPES.includes(file.type)) return fail(400, "send PNG, JPEG, WebP, GIF, SVG or PDF");
+    if (file.size > MAX_UPLOAD_BYTES) return fail(413, "files can be up to 10 MB");
+    const view = await agent.getView();
+    if (view.artwork.length >= MAX_FILES_PER_ORDER) return fail(400, "an order can have up to 10 files");
+    const fileId = newFileId();
+    const key = `artwork/${order.instance}/${fileId}`;
+    await env.ARTWORK.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
+    const meta: ArtworkMeta = {
+      fileId,
+      name: file.name.slice(0, 120),
+      mediaType: file.type,
+      size: file.size,
+      key,
+      at: new Date().toISOString(),
+    };
+    await agent.addArtwork(meta);
+    return json(201, { fileId });
+  }
+
+  return fail(405, "method not allowed");
+}
