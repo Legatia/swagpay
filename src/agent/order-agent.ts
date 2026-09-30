@@ -16,6 +16,7 @@ import { runTurn, type ConversationStore, type TurnResult } from "./loop";
 import { previewsIn } from "./previews";
 import { createModel, type ModelClient } from "./model";
 import { SYSTEM_PROMPT } from "./prompt";
+import { cityFromPlace, suggestVendors } from "../vendors";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile } from "./tools";
 
@@ -337,6 +338,20 @@ export class OrderAgent extends Agent<Env, OrderState> {
         wasPreviewed: async (fileId) => this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM previews WHERE file_id = ${fileId}`[0].n > 0,
         logDecision: (d) => log({ orderId, ...d }),
         escalateOnce: (key, kind, summary, payload) => this.escalateOnce(orderId, key, kind, summary, payload),
+        suggestPrinters: async () => {
+          const row = await getOrderById(this.env.DB, orderId);
+          const city = row ? cityFromPlace(row.delivery_place) : null;
+          if (!city) return null;
+          const methods = [...new Set(this.readSpec().items.map((i) => i.method).filter((m): m is string => !!m))];
+          const found = await suggestVendors(this.env.DB, city, methods, 3);
+          return found.map(({ vendor, covers, score }) => {
+            let have: string[] = [];
+            try { const m: unknown = JSON.parse(vendor.methods); have = Array.isArray(m) ? m.map(String) : []; } catch { /* no methods listed */ }
+            const n = methods.filter((m) => have.includes(m)).length;
+            const name = vendor.name.replace(/\s+/g, " ").trim().slice(0, 40);
+            return `v${vendor.id} ${name} (${have.join(", ")}; ${covers ? "covers all" : `covers ${n} of ${methods.length}`}; ${score.jobs} jobs, ${score.onTime} on time)`;
+          });
+        },
         orderSummary: async () => {
           const row = await getOrderById(this.env.DB, orderId);
           if (!row) throw new Error("order row missing");

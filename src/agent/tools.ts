@@ -44,6 +44,8 @@ export interface ToolContext extends DecisionLogger {
   hasArtwork(fileId: string): Promise<boolean>;
   previewedBytes(): Promise<number>;
   wasPreviewed(fileId: string): Promise<boolean>;
+  /** Up to 3 printer lines for the delivery city; null when the city cannot be read from the delivery place. */
+  suggestPrinters(): Promise<string[] | null>;
   orderSummary(): Promise<{ number: number; status: string; deliverBy: Date; deliveryPlace: string }>;
   /** PLN gross (delivery included) the owner gave for these items, or null. */
   printerCost(specKey: string): Promise<number | null>;
@@ -241,7 +243,7 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         return { verdict: "none", outcome: "done", result: { content: `The owner already gave the printer cost for this order: ${known.toFixed(2)} PLN gross, delivery included. Use send_quote.` } };
       }
       const order = await ctx.orderSummary();
-      const e = await ctx.escalateOnce(`cost:${key}`, "cost", costRequestText(order.number, spec, order.deliverBy, order.deliveryPlace, note), { specKey: key });
+      const e = await ctx.escalateOnce(`cost:${key}`, "cost", costRequestText(order.number, spec, order.deliverBy, order.deliveryPlace, note, await ctx.suggestPrinters()), { specKey: key });
       const content = e.status === "rejected"
         ? `The owner declined to price this order (#${e.id}). Tell the host a person will contact them.`
         : e.created

@@ -25,13 +25,16 @@ export function itemLine(item: OrderSpec["items"][number]): string {
   return parts.join(", ");
 }
 
-export function costRequestText(orderNumber: number, spec: OrderSpec, deliverBy: Date, place: string, note?: string): string {
+export function costRequestText(orderNumber: number, spec: OrderSpec, deliverBy: Date, place: string, note?: string, suggestions?: string[] | null): string {
   return [
     `Printer cost needed for order ${orderNumber}.`,
     ...spec.items.map((i) => `- ${itemLine(i)}`),
     `Deliver by ${warsawTime(deliverBy)} (Warsaw) to ${oneLine(place)}.`,
     ...(note ? [`Agent's note: ${oneLine(note)}`] : []),
-    "Reply /cost <this #> <PLN gross, delivery included> [printer]",
+    ...(suggestions === undefined ? [] : suggestions === null
+      ? ["City not recognised from the delivery place; pick a printer yourself."]
+      : suggestions.length ? ["Suggested printers:", ...suggestions] : ["No screened printer found for this city yet."]),
+    "Reply /cost <this #> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]",
   ].join("\n");
 }
 

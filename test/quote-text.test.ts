@@ -13,15 +13,27 @@ describe("quote texts", () => {
   it("describes items and asks the owner for a cost", () => {
     expect(itemLine(completeSpec.items[0])).toBe("60 × Black tee (screen), black, S 10, M 20, L 20, XL 10, print: front");
     expect(itemLine(completeSpec.items[1])).toBe("500 × Round logo sticker (diecut), 5 × 5 cm");
-    const text = costRequestText(7, completeSpec, new Date("2099-10-08T15:00:00Z"), "Kolektyw3", "two colours");
+    const text = costRequestText(7, completeSpec, new Date("2099-10-08T15:00:00Z"), "Kolektyw3", "two colours", null);
     expect(text.split("\n")).toEqual([
       "Printer cost needed for order 7.",
       "- 60 × Black tee (screen), black, S 10, M 20, L 20, XL 10, print: front",
       "- 500 × Round logo sticker (diecut), 5 × 5 cm",
       expect.stringMatching(/^Deliver by 8 Oct 2099,? 17:00 \(Warsaw\) to Kolektyw3\.$/),
       "Agent's note: two colours",
-      "Reply /cost <this #> <PLN gross, delivery included> [printer]",
+      "City not recognised from the delivery place; pick a printer yourself.",
+      "Reply /cost <this #> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]",
     ]);
+  });
+
+  it("lists suggested printers, or says none was found", () => {
+    const by = new Date("2099-10-08T15:00:00Z");
+    const some = costRequestText(7, completeSpec, by, "Kolektyw3", undefined, ["v3 A (screen; covers all; 0 jobs, 0 on time)", "v4 B (screen; covers 1 of 2; 2 jobs, 1 on time)"]).split("\n");
+    expect(some.slice(-4)).toEqual([
+      "Suggested printers:", "v3 A (screen; covers all; 0 jobs, 0 on time)", "v4 B (screen; covers 1 of 2; 2 jobs, 1 on time)",
+      "Reply /cost <this #> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]",
+    ]);
+    const none = costRequestText(7, completeSpec, by, "Kolektyw3", undefined, []).split("\n");
+    expect(none.slice(-2)).toEqual(["No screened printer found for this city yet.", "Reply /cost <this #> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]"]);
   });
 
   it("writes the quote the host sees", () => {

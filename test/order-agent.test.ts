@@ -357,6 +357,32 @@ describe("OrderAgent", () => {
     });
   });
 
+  it("suggests the partner printer first, then the screened one, for the delivery city", async () => {
+    const { order, stub } = await newAgent();
+    const now = new Date().toISOString();
+    for (const [name, status, methods] of [["Screened Shop", "screened", ["screen"]], ["Partner Press", "partner", ["screen", "diecut"]], ["Paused Co", "paused", ["screen"]]]) {
+      await env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, source_ref, created_at, updated_at) VALUES (?, 'Warsaw', 'PL', ?, ?, ?, ?, ?)")
+        .bind(name, JSON.stringify(methods), status, `t:${name}`, now, now).run();
+    }
+    const ids = (await env.DB.prepare("SELECT id, name FROM vendors WHERE name IN ('Partner Press', 'Screened Shop')").all<{ id: number; name: string }>()).results;
+    const idOf = (n: string) => ids.find((v) => v.name === n)!.id;
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.telegramOverride = { async send() { return 1; }, async answerCallback() {} };
+      await agent.init(order.id, intake);
+      agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(completeSpec)})`;
+      agent.modelOverride = scriptedModel([msg([toolUse("request_printer_cost", { reason: "order complete" })], "tool_use"), msg([], "end_turn")]);
+      await agent.processTurn();
+    });
+    const summary = (await env.DB.prepare("SELECT summary FROM escalations WHERE kind = 'cost' AND order_id = ?").bind(order.id).first<{ summary: string }>())!.summary;
+    const lines = summary.split("\n");
+    const at = lines.indexOf("Suggested printers:");
+    expect(at).toBeGreaterThan(0);
+    expect(lines[at + 1]).toBe(`v${idOf("Partner Press")} Partner Press (screen, diecut; covers all; 0 jobs, 0 on time)`);
+    expect(lines[at + 2]).toBe(`v${idOf("Screened Shop")} Screened Shop (screen; covers 1 of 2; 0 jobs, 0 on time)`);
+    expect(lines).toHaveLength(at + 4);
+    expect(summary).not.toContain("Paused Co");
+  });
+
   it("withdraws an open quote when update_order changes the items", async () => {
     const { order, stub } = await newAgent();
     const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: "old-items" }, new Date(), new Date(Date.now() + 48 * 3_600_000));

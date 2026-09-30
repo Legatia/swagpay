@@ -9,7 +9,7 @@ import { toBase64 } from "../src/ids";
 import type { NewQuote, QuoteRow } from "../src/quotes";
 
 function fakeCtx(files: ArtworkFile[] = []) {
-  const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[], costs: new Map<string, number>(),
+  const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[], costs: new Map<string, number>(), printers: null as string[] | null,
     rates: { USD: { plnPerUnit: 4, usdPerUnit: 1 }, EUR: { plnPerUnit: 4.3, usdPerUnit: 1.075 } } as Record<string, { plnPerUnit: number; usdPerUnit: number } | null>,
     quotes: [] as (NewQuote & { validUntil: Date })[], status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"),
     withdrawn: null as number | null, withdrawCalls: [] as string[] };
@@ -33,6 +33,7 @@ function fakeCtx(files: ArtworkFile[] = []) {
       state.escalations.push({ key, kind, summary });
       return { id: state.escalations.length, status: "open", created: true };
     },
+    async suggestPrinters() { return state.printers; },
     async orderSummary() { return { number: 7, status: state.status, deliverBy: state.deliverBy, deliveryPlace: "Kolektyw3" }; },
     async printerCost(key) { return state.costs.get(key) ?? null; },
     async rates(c) { return state.rates[c] ?? null; },
@@ -98,6 +99,7 @@ describe("ask_host", () => {
       async wasPreviewed() { return false; },
       async logDecision(d) { state.decisions.push(d); },
       async escalateOnce() { return { id: 1, status: "open" as const, created: true }; },
+      async suggestPrinters() { return null; },
       async orderSummary() { return { number: 7, status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"), deliveryPlace: "Kolektyw3" }; },
       async printerCost() { return null; },
       async rates() { return null; },
@@ -397,6 +399,28 @@ describe("request_printer_cost", () => {
     expect(state.escalations[0].summary).toContain("Agent's note: two colours");
     expect((await h.request_printer_cost({ reason: "asking again" })).content).toBe("Still waiting for the owner's printer cost (#1).");
     expect(state.escalations).toHaveLength(1);
+  });
+
+  it("puts the suggested printers and the /cost syntax in the request", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    state.printers = ["v3 Druk (screen; covers all; 2 jobs, 2 on time)"];
+    await h.request_printer_cost({ reason: "order complete" });
+    const lines = state.escalations[0].summary.split("\n");
+    expect(lines.slice(-3)).toEqual(["Suggested printers:", "v3 Druk (screen; covers all; 2 jobs, 2 on time)", "Reply /cost <this #> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]"]);
+  });
+
+  it("says so when no printer is screened or the city is unknown", async () => {
+    const a = fakeCtx();
+    a.state.spec = structuredClone(completeSpec);
+    a.state.printers = [];
+    await a.h.request_printer_cost({ reason: "order complete" });
+    expect(a.state.escalations[0].summary).toContain("No screened printer found for this city yet.");
+    const b = fakeCtx();
+    b.state.spec = structuredClone(completeSpec);
+    b.state.printers = null;
+    await b.h.request_printer_cost({ reason: "order complete" });
+    expect(b.state.escalations[0].summary).toContain("City not recognised from the delivery place; pick a printer yourself.");
   });
 
   it("points to send_quote once the cost is known", async () => {
