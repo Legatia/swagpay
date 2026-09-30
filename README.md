@@ -27,6 +27,26 @@ tools go as JSON Schema (`parametersJsonSchema`), artwork previews as inline dat
 are kept on each call and sent back, which multi-step tool use needs. Switching providers keeps existing
 conversations working. The key only ever travels in the `x-goog-api-key` header; errors never include it.
 
+## Printers (vendor network)
+
+Apply migration 0006 BEFORE `wrangler deploy` (`npx wrangler d1 migrations apply swagpay --remote`): the new code reads the vendor tables.
+
+Import the researched printers, run from the swagpay folder. It never demotes a partner or paused printer and never overwrites a payout address:
+
+    node scripts/vendors-import.mjs ../event-swag/data/*-printers.json > /tmp/vendors.sql && npx wrangler d1 execute swagpay --remote --file /tmp/vendors.sql
+
+Owner commands in Telegram:
+- `/vendors [city]` lists printers.
+- `/vendor <#> partner|screened|paused` sets a printer's status.
+- `/vendor <#> pay <0x address> <CHAIN>` registers where a printer is paid.
+- `/cost <#> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]` records an order's printer cost, optionally against a printer.
+
+How a partner is paid: the printer cost goes out as two milestones, half at deposit and half after `/printed`. The second never goes out before `/printed`, and together they add up to the printer cost. Money goes only to the printer's registered address and chain, only while it is a `partner`, and within the per-payout and 24-hour limits.
+
+If a printer is paused, or its address changes, its queued payouts are withheld and come to you as approvals.
+
+Lead times still count Polish business days. `/log` and `/api/metrics` show vendor counts and USDC paid only, never a printer's name.
+
 ## Deploy (owner)
 
     npx wrangler d1 create swagpay            # put the printed database_id into wrangler.jsonc

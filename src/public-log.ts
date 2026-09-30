@@ -43,6 +43,8 @@ export interface Metrics {
   paidOut: { USDC: string; EURC: string };
   obligations: { settledByAgent: number; settledWithOwner: number; open: number };
   decisions: { total: number; escalated: number; blocked: number };
+  /** Counts only: no vendor name, city or address ever reaches a public page. onTimeRate is a percentage of delivered jobs, or null when none. */
+  vendors: { cities: number; screened: number; partners: number; jobs: number; paidToVendors: { USDC: string }; onTimeRate: number | null };
 }
 
 export async function computeMetrics(db: D1Database): Promise<Metrics> {
@@ -67,12 +69,32 @@ export async function computeMetrics(db: D1Database): Promise<Metrics> {
        FROM (SELECT verdict FROM decisions UNION ALL SELECT verdict FROM treasury_decisions)`,
     )
     .first<{ total: number; escalated: number; blocked: number }>();
+  const vendors = await db
+    .prepare(
+      `SELECT (SELECT COUNT(DISTINCT city) FROM vendors WHERE status IN ('screened', 'partner')) AS cities,
+              (SELECT COUNT(*) FROM vendors WHERE status = 'screened') AS screened,
+              (SELECT COUNT(*) FROM vendors WHERE status = 'partner') AS partners,
+              (SELECT COUNT(*) FROM vendor_jobs WHERE status <> 'proposed') AS jobs,
+              (SELECT COALESCE(SUM(p.amount_units), 0) FROM payouts p JOIN obligations o ON o.id = p.obligation_id
+                WHERE p.status = 'sent' AND p.token = 'USDC' AND o.vendor_id IS NOT NULL) AS paid,
+              (SELECT COUNT(*) FROM vendor_jobs WHERE status = 'delivered' AND on_time IS NOT NULL) AS delivered,
+              (SELECT COUNT(*) FROM vendor_jobs WHERE status = 'delivered' AND on_time = 1) AS on_time`,
+    )
+    .first<{ cities: number; screened: number; partners: number; jobs: number; paid: number; delivered: number; on_time: number }>();
   return {
     orders,
     received: await sums("SELECT token, SUM(amount_units) AS n FROM transfers WHERE request_id IS NOT NULL GROUP BY token"),
     paidOut: await sums("SELECT token, SUM(amount_units) AS n FROM payouts WHERE status = 'sent' GROUP BY token"),
     obligations: { settledByAgent: obligations?.agent ?? 0, settledWithOwner: obligations?.owner ?? 0, open: obligations?.open ?? 0 },
     decisions: { total: decisions?.total ?? 0, escalated: decisions?.escalated ?? 0, blocked: decisions?.blocked ?? 0 },
+    vendors: {
+      cities: vendors?.cities ?? 0,
+      screened: vendors?.screened ?? 0,
+      partners: vendors?.partners ?? 0,
+      jobs: vendors?.jobs ?? 0,
+      paidToVendors: { USDC: formatUnits(vendors?.paid ?? 0) },
+      onTimeRate: vendors?.delivered ? Math.round((100 * vendors.on_time) / vendors.delivered) : null,
+    },
   };
 }
 
@@ -97,6 +119,8 @@ export function renderLog(decisions: PublicDecision[], m: Metrics): string {
 <h1>What the agents decided</h1>
 <p class="muted">Every action of the order agent and the treasury agent, with the reason it gave. Spending limits are enforced in code; anything above them goes to the owner. Amounts and addresses in reasons are masked.</p>
 <div class="stats">${tile("Orders", String(ordersTotal))}${tile("USDC received", usdc(m.received.USDC))}${tile("USDC paid out", usdc(m.paidOut.USDC))}${tile("Settled by the agent", String(m.obligations.settledByAgent))}${tile("Decisions", String(m.decisions.total))}${tile("Escalated to the owner", String(m.decisions.escalated))}</div>
+<h2>Vendor network</h2>
+<div class="stats">${tile("Cities", String(m.vendors.cities))}${tile("Screened printers", String(m.vendors.screened))}${tile("Partner printers", String(m.vendors.partners))}${tile("Printer jobs", String(m.vendors.jobs))}${tile("USDC paid to printers", usdc(m.vendors.paidToVendors.USDC))}${tile("On time", m.vendors.onTimeRate === null ? "—" : `${m.vendors.onTimeRate}%`)}</div>
 <section class="sheet"><h2>Decisions</h2><div class="table-wrap"><table class="log-table"><thead><tr><th>When (UTC)</th><th>Order</th><th>Agent</th><th>Action</th><th>Reason</th><th>Outcome</th></tr></thead><tbody>${rows}</tbody></table></div></section>
 </main></body></html>`;
 }

@@ -84,9 +84,58 @@ describe("renderLog", () => {
     const html = renderLog([], {
       orders: {}, received: { USDC: "1234.500000", EURC: "0.000000" }, paidOut: { USDC: "0.000000", EURC: "0.000000" },
       obligations: { settledByAgent: 0, settledWithOwner: 0, open: 0 }, decisions: { total: 0, escalated: 0, blocked: 0 },
+      vendors: { cities: 3, screened: 4, partners: 2, jobs: 5, paidToVendors: { USDC: "12.500000" }, onTimeRate: null },
     });
     expect(html).toContain("No decisions yet.");
     expect(html).toContain("<strong>1234.50</strong>");
     expect(html).toContain("Escalated to the owner");
+    expect(html).toContain("Vendor network");
+    expect(html).toContain("<strong>12.50</strong>");
+    expect(html).toContain("<strong>—</strong>");
+  });
+});
+
+describe("vendor network numbers", () => {
+  type V = { cities: number; screened: number; partners: number; jobs: number; paidToVendors: { USDC: string }; onTimeRate: number | null };
+  const get = async () => (await SELF.fetch("https://swagpay.test/api/metrics")).json<{ vendors: V }>();
+
+  it("counts vendors, jobs and payouts and never shows a name", async () => {
+    const before = (await get()).vendors;
+    const now = new Date().toISOString();
+    const city = `Zzcity${crypto.randomUUID().slice(0, 8)}`;
+    const addVendor = async (name: string, status: string) =>
+      (await env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, source_ref, created_at, updated_at) VALUES (?, ?, 'PL', 'dtg', ?, ?, ?, ?) RETURNING id")
+        .bind(name, city, status, `pl:${crypto.randomUUID()}`, now, now).first<{ id: number }>())!.id;
+    await addVendor("Secret Print Co", "screened");
+    const partner = await addVendor("Partner Print Ltd", "partner");
+    await addVendor("Candidate Only Sp", "candidate");
+    const { order } = await newOrderRow();
+    const { order: order2 } = await newOrderRow();
+    for (const [o, status, onTime] of [[order.id, "delivered", 1], [order2.id, "proposed", null]] as const)
+      await env.DB.prepare("INSERT INTO vendor_jobs (order_id, vendor_id, status, cost_currency, cost_cents, deliver_by, on_time, created_at) VALUES (?, ?, ?, 'PLN', 1000, '2099-01-01', ?, ?)")
+        .bind(o, partner, status, onTime, now).run();
+    await env.DB.prepare("INSERT INTO obligations (order_id, kind, token, amount_units, destination, chain, due_at, status, vendor_id, source_ref, created_at) VALUES (?, 'printer_cost', 'USDC', 3000000, '0x3', 'ARC', ?, 'paid', ?, ?, ?)")
+      .bind(order.id, now, partner, `metrics:${crypto.randomUUID()}`, now).run();
+    const ob = await env.DB.prepare("SELECT id FROM obligations ORDER BY id DESC LIMIT 1").first<{ id: number }>();
+    await env.DB.prepare("INSERT INTO payouts (obligation_id, method, chain, token, amount_units, destination, idempotency_key, status, created_at, updated_at) VALUES (?, 'transfer', 'ARC', 'USDC', 3000000, '0x3', ?, 'sent', ?, ?)")
+      .bind(ob!.id, crypto.randomUUID(), now, now).run();
+
+    const after = (await get()).vendors;
+    expect(after.cities - before.cities).toBe(1);
+    expect(after.screened - before.screened).toBe(1);
+    expect(after.partners - before.partners).toBe(1);
+    expect(after.jobs - before.jobs).toBe(1);
+    expect(Math.round((Number(after.paidToVendors.USDC) - Number(before.paidToVendors.USDC)) * 1e6)).toBe(3000000);
+    expect(after.onTimeRate).not.toBeNull();
+
+    const api = await (await SELF.fetch("https://swagpay.test/api/metrics")).text();
+    const html = await (await SELF.fetch("https://swagpay.test/log")).text();
+    for (const name of ["Secret Print Co", "Partner Print Ltd", "Candidate Only Sp", city]) {
+      expect(api).not.toContain(name);
+      expect(html).not.toContain(name);
+    }
+    expect(html).toContain("Vendor network");
+    expect(html).toContain("Partner printers");
+    expect(html).toContain("USDC paid to printers");
   });
 });
