@@ -40,10 +40,10 @@ A printer is `screened` when it has an email and its tax check passed: an active
 Owner commands in Telegram:
 - `/vendors [city]` lists printers.
 - `/vendor <#> partner|screened|paused` sets a printer's status.
-- `/vendor <#> pay <0x address> <CHAIN>` registers where a printer is paid.
+- `/vendor <#> pay <0x address> <CHAIN>` registers where a printer is paid. `ARC` means a direct transfer on Arc (use `ARC` on testnet too); any other Circle chain code (`MATIC`, `BASE`, `ARB`, `ETH`, `OP`, `AVAX`, `UNI`) means a CCTP bridge to that chain.
 - `/cost <#> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]` records an order's printer cost, optionally against a printer.
 
-How a partner is paid: the printer cost goes out as two milestones, half at deposit and half after `/printed`. The second never goes out before `/printed`, and together they add up to the printer's cost at the quote's rate, without the FX buffer: the buffer stays in the wallet as margin. Agree that USDC amount with the printer when you book it. Money goes only to the printer's registered address and chain, only while it is a `partner`, and within the per-payout and 24-hour limits.
+How a partner is paid: the printer cost goes out as two milestones, half at deposit and half after `/printed`. The second never goes out before `/printed`, and together they add up to the printer's cost at the quote's rate, without the FX buffer: the buffer stays in the wallet as margin. Agree that USDC amount with the printer when you book it. Money goes only to the printer's registered address and chain, only while it is a `partner`, and within the per-payout and 24-hour limits. One exception: when you approve a late deposit, its first milestone is owner-approved and skips those limits (Circle's own limit still applies); the approval shows the amounts. While that approval is open, the second milestone is held, even after `/printed`.
 
 A milestone stays fixed to the address and chain the printer had when the deposit came in. When the printer is paused, or registers another address or chain, the treasury stops paying it, and you decide in Telegram:
 - **Already queued.** When the wallet runner next fetches payouts, the payout is withheld and comes to you as an approval. Withholding is best-effort: if the runner fetched that batch just before, the payout may still go out, so check the wallet history first. Approve to retry once the printer is registered again, or reject to settle it by hand.
