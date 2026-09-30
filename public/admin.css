@@ -1,0 +1,23 @@
+/* Admin pages: always light, wider, tables that scroll on phones. */
+@media (prefers-color-scheme: dark) {
+  html.light {
+    --page: #f5f6f9; --surface: #ffffff; --text: #171a38; --text-muted: #4a4f72; --line: #d9dcea;
+    --action: #d7266f; --action-text: #ffffff; --focus: #d7266f; --error: #b91e5a; --link: #2466c4; --success: #1f7a4d;
+    color-scheme: light;
+  }
+}
+body.admin main { max-width: 1100px; }
+.admin-nav { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+.admin-nav a { font-weight: 600; text-decoration: none; }
+.admin-nav .label { margin-left: auto; }
+.flash { background: var(--payment-bubble); border-radius: 8px; padding: 10px 12px; margin: 0; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+form.inline { display: inline-flex; gap: 6px; align-items: center; margin: 2px 0; }
+form.inline input, form.inline select { width: auto; padding: 6px 8px; }
+form.inline button { padding: 6px 10px; font-size: 0.85rem; }
+button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
+.status { font-family: var(--font-mono); font-size: 0.8rem; white-space: nowrap; }
+.how { color: var(--text-muted); font-size: 0.85rem; }

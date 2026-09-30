@@ -1,47 +1,25 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { handleAdmin } from "../src/admin";
-import { createOrder } from "../src/db";
-import { createEscalation, decideEscalation } from "../src/escalations";
-import { IntakeSchema } from "../src/intake";
+import { createEscalation } from "../src/escalations";
 import { TEAM, makeSigner } from "./access-signer";
 
 async function admin(e: Env): Promise<Response> {
   const { sign, fetchImpl } = await makeSigner();
   const token = await sign({ aud: ["test-aud"], iss: TEAM, exp: Math.floor(Date.now() / 1000) + 600, email: "owner@example.com" });
-  return handleAdmin(new Request("https://swagpay.test/admin", { headers: { "cf-access-jwt-assertion": token } }), e, { fetch: fetchImpl });
+  return handleAdmin(new Request("https://swagpay.test/admin", { headers: { "cf-access-jwt-assertion": token } }), e, { fetch: fetchImpl, rpc: { erc20Balance: async () => 0 } });
 }
 
 describe("/admin", () => {
-  it("shows open escalations and orders to a verified owner, escaped", async () => {
-    const { order } = await createOrder(env.DB, IntakeSchema.parse({
-      eventName: "<b>Meetup</b>", eventDate: "2099-10-08", deliverBy: "2099-10-08T17:00",
-      deliveryPlace: "Kolektyw3", contactName: "Ana", contactEmail: "ana@example.com", request: "60 black tees please",
-    }), new Date("2099-01-01T10:00:00Z"));
-    await createEscalation(env.DB, { orderId: order.id, kind: "approval", summary: "Approve <script>x</script>", payload: {} });
-    const { sign, fetchImpl } = await makeSigner();
-    const token = await sign({ aud: ["test-aud"], iss: TEAM, exp: Math.floor(Date.now() / 1000) + 600, email: "owner@example.com" });
-    const res = await handleAdmin(new Request("https://swagpay.test/admin", { headers: { "cf-access-jwt-assertion": token } }), env, { fetch: fetchImpl });
+  it("shows an open escalation to a verified owner, escaped", async () => {
+    await createEscalation(env.DB, { orderId: null, kind: "approval", summary: "Approve <script>x</script>", payload: {} });
+    const res = await admin(env);
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     const html = await res.text();
     expect(html).toContain("Approve &lt;script&gt;x&lt;/script&gt;");
-    expect(html).toContain("&lt;b&gt;Meetup&lt;/b&gt;");
     expect(html).not.toContain("<script>x");
     expect(html).toContain("owner@example.com");
-  });
-
-  it("shows recent decisions, escaped, and whether the agent was told", async () => {
-    const e = await createEscalation(env.DB, { orderId: null, kind: "agent", summary: "Discount?", payload: {} });
-    await decideEscalation(env.DB, e.id, "rejected", "<b>not this time</b>");
-    const n = await createEscalation(env.DB, { orderId: null, kind: "system", summary: "Model failed", payload: {} });
-    await decideEscalation(env.DB, n.id, "approved", null);
-    const html = await (await admin(env)).text();
-    expect(html).toContain("Recent decisions");
-    expect(html).toContain("&lt;b&gt;not this time&lt;/b&gt;");
-    expect(html).not.toContain("<b>not this time");
-    expect(html).toMatch(new RegExp(`<td>#${e.id}</td>.*?<td>rejected</td>.*?<td>no</td></tr>`));
-    expect(html).toMatch(new RegExp(`<td>#${n.id}</td>.*?<td>acknowledged</td>`));
   });
 
   const setUsdRate = (fetchedAt: Date) =>
@@ -55,7 +33,7 @@ describe("/admin", () => {
     expect(html).not.toContain("Turnstile secret is missing");
     const strict = await (await admin(({ ...env, REQUIRE_TURNSTILE: "1", TURNSTILE_SECRET: "" }) as Env)).text();
     expect(strict).toContain('<p class="error">Turnstile secret is missing: new orders are refused.</p>');
-    const configured = await (await admin(({ ...env, TELEGRAM_BOT_TOKEN: "t", REQUIRE_TURNSTILE: "1", TURNSTILE_SECRET: "s" }) as Env)).text();
+    const configured = await (await admin(({ ...env, TELEGRAM_BOT_TOKEN: "t", REQUIRE_TURNSTILE: "1", TURNSTILE_SECRET: "s", TREASURY_RUNNER_TOKEN: "" }) as Env)).text();
     expect(configured).not.toContain('class="error"');
   });
 

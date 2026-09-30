@@ -46,7 +46,7 @@ export default {
         return new Response("Something went wrong.", { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
       }
     }
-    if (url.pathname === "/admin" || url.pathname === "/admin/") return handleAdmin(request, env);
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return handleAdmin(request, env);
     if (/^\/o\/[A-Za-z0-9_-]{43}$/.test(url.pathname)) {
       return env.ASSETS.fetch(new Request(new URL("/order", url), request));
     }
