@@ -109,6 +109,18 @@ export async function getObligation(db: D1Database, id: number): Promise<Obligat
   return db.prepare("SELECT * FROM obligations WHERE id = ?").bind(id).first<ObligationRow>();
 }
 
+export async function getObligationByRef(db: D1Database, sourceRef: string): Promise<ObligationRow | null> {
+  return db.prepare("SELECT * FROM obligations WHERE source_ref = ?").bind(sourceRef).first<ObligationRow>();
+}
+
+/** An order's obligations to a printer that wait for /printed (milestone 2). */
+export async function waitingVendorObligations(db: D1Database, orderId: number): Promise<ObligationRow[]> {
+  return (await db
+    .prepare("SELECT * FROM obligations WHERE order_id = ? AND status = 'waiting' AND vendor_id IS NOT NULL ORDER BY id")
+    .bind(orderId)
+    .all<ObligationRow>()).results;
+}
+
 export async function listObligations(db: D1Database, statuses: ObligationStatus[], limit = 50): Promise<ObligationRow[]> {
   return (await db
     .prepare(`SELECT * FROM obligations WHERE status IN (${statuses.map(() => "?").join(", ")}) ORDER BY id LIMIT ?`)

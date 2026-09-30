@@ -2,6 +2,7 @@ import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
+import type { TreasuryAgent } from "../src/agent/treasury-agent";
 import { createOrder, getOrderById } from "../src/db";
 import { createEscalation, getEscalation, listEscalations } from "../src/escalations";
 import { NBP_BASE } from "../src/fx";
@@ -9,6 +10,7 @@ import { IntakeSchema } from "../src/intake";
 import { listPaymentRequests } from "../src/payments";
 import { HELP, handleTelegram, parseCostArgs } from "../src/telegram-webhook";
 import type { TelegramClient } from "../src/telegram";
+import { createObligation, getObligation } from "../src/treasury";
 import { getVendor, markJob, proposeVendorJob, vendorJobFor, type VendorStatus } from "../src/vendors";
 import { completeSpec, insertQuote, newOrderRow } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
@@ -145,6 +147,80 @@ describe("Telegram webhook", () => {
     await handleTelegram(update(fromOwner(`/printed ${order.id}`)), env, t);
     expect(t.sent[0]).toBe(`Order ${order.id}: printed; nothing more is due.`);
     expect((await getOrderById(env.DB, order.id))?.status).toBe("balance_paid");
+  });
+
+  describe("/printed with a partner printer's milestones", () => {
+    const VADDR = "0x" + "ab".repeat(20);
+    const treasuryInbox = async () => runInDurableObject(await getAgentByName(env.TreasuryAgent, "treasury"), async (agent: TreasuryAgent) =>
+      agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n"));
+    /** A deposit-paid order booked with a partner printer: milestone 1 open, milestone 2 waiting. */
+    async function bookedWithPartner(o: { priceCents?: number; depositCents?: number } = {}) {
+      const paid = await paidDepositOrder(o);
+      const v = await addVendor({ name: "Drukarnia Partner", status: "partner" });
+      await env.DB.prepare("UPDATE vendors SET payout_address = ?, payout_chain = 'BASE' WHERE id = ?").bind(VADDR, v).run();
+      await proposeVendorJob(env.DB, { orderId: paid.order.id, vendorId: v, deliverBy: paid.order.deliver_by, currency: "PLN", cents: 100_000 });
+      await markJob(env.DB, paid.order.id, "booked");
+      const base = { orderId: paid.order.id, kind: "printer_cost" as const, token: "USDC" as const, destination: VADDR, chain: "BASE", dueAt: new Date(), vendorId: v };
+      const m1 = await createObligation(env.DB, { ...base, amountUnits: 128_750_000, sourceRef: `printer_cost:quote:${paid.quoteId}:m1` });
+      const m2 = await createObligation(env.DB, { ...base, amountUnits: 128_750_000, sourceRef: `printer_cost:quote:${paid.quoteId}:m2`, status: "waiting" });
+      return { ...paid, v, m1, m2 };
+    }
+
+    it("opens this order's waiting milestone, marks the job printed and tells the treasury", async () => {
+      const { order, v, m1, m2 } = await bookedWithPartner();
+      // Another order's waiting milestone, and a waiting obligation of this order that pays no printer: both stay waiting.
+      const other = await bookedWithPartner();
+      const notPrinter = await createObligation(env.DB, {
+        orderId: order.id, kind: "printer_cost", token: "USDC", amountUnits: 1_000_000, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC",
+        dueAt: new Date(), sourceRef: `t:${crypto.randomUUID()}`, status: "waiting",
+      });
+      const t = fakeTelegram();
+      await handleTelegram(update(fromOwner(`/printed ${order.id}`)), env, t);
+      expect(t.sent[0]).toMatch(new RegExp(`^Order ${order.id}: printed; balance request #\\d+ for 122\\.50\\d{4} USDC is on the order page\\. Printer #${v}'s milestone #${m2.id} \\(128\\.750000 USDC\\) is now due; the treasury pays it\\.$`));
+      expect(await getObligation(env.DB, m2.id)).toMatchObject({ status: "open", approved_by: null });
+      expect((await getObligation(env.DB, m1.id))?.status).toBe("open");
+      expect((await getObligation(env.DB, other.m2.id))?.status).toBe("waiting");
+      expect((await getObligation(env.DB, notPrinter.id))?.status).toBe("waiting");
+      const job = await vendorJobFor(env.DB, order.id);
+      expect(job).toMatchObject({ vendor_id: v, status: "printed" });
+      expect(job?.printed_at).not.toBeNull();
+      expect((await vendorJobFor(env.DB, other.order.id))?.status).toBe("booked");
+      const inbox = await treasuryInbox();
+      expect(inbox).toContain(`Order ${order.id} printed: milestone obligation #${m2.id} (128.750000 USDC to printer #${v}) is now due.`);
+      expect(inbox).not.toContain(`obligation #${other.m2.id} `);
+      expect(inbox).not.toContain(`obligation #${notPrinter.id} `);
+    });
+
+    it("opens the milestone when nothing more is due, and on a repeated /printed after the release failed", async () => {
+      const none = await bookedWithPartner({ priceCents: 25750, depositCents: 25750 });
+      const t = fakeTelegram();
+      await handleTelegram(update(fromOwner(`/printed ${none.order.id}`)), env, t);
+      expect(t.sent[0]).toBe(`Order ${none.order.id}: printed; nothing more is due. Printer #${none.v}'s milestone #${none.m2.id} (128.750000 USDC) is now due; the treasury pays it.`);
+      expect((await getObligation(env.DB, none.m2.id))?.status).toBe("open");
+      expect((await vendorJobFor(env.DB, none.order.id))?.status).toBe("printed");
+
+      // The order moved on, but its milestone is still waiting (the first /printed stopped after the status move).
+      const stuck = await bookedWithPartner();
+      await env.DB.prepare("UPDATE orders SET status = 'balance_pending' WHERE id = ?").bind(stuck.order.id).run();
+      await handleTelegram(update(fromOwner(`/printed ${stuck.order.id}`)), env, t);
+      expect(t.sent[1]).toBe(`Order ${stuck.order.id} was already printed. Printer #${stuck.v}'s milestone #${stuck.m2.id} (128.750000 USDC) is now due; the treasury pays it.`);
+      expect((await getObligation(env.DB, stuck.m2.id))?.status).toBe("open");
+      expect((await vendorJobFor(env.DB, stuck.order.id))?.status).toBe("printed");
+      expect(await listPaymentRequests(env.DB, stuck.order.id)).toEqual([]);
+      // Once released, a repeat is the usual answer.
+      await handleTelegram(update(fromOwner(`/printed ${stuck.order.id}`)), env, t);
+      expect(t.sent[2]).toBe(`Order ${stuck.order.id} is balance_pending; /printed works once the deposit is paid.`);
+    });
+
+    it("never opens a milestone before the deposit is paid", async () => {
+      const early = await bookedWithPartner();
+      await env.DB.prepare("UPDATE orders SET status = 'deposit_pending' WHERE id = ?").bind(early.order.id).run();
+      const t = fakeTelegram();
+      await handleTelegram(update(fromOwner(`/printed ${early.order.id}`)), env, t);
+      expect(t.sent[0]).toBe(`Order ${early.order.id} is deposit_pending; /printed works once the deposit is paid.`);
+      expect((await getObligation(env.DB, early.m2.id))?.status).toBe("waiting");
+      expect((await vendorJobFor(env.DB, early.order.id))?.status).toBe("booked");
+    });
   });
 
   it("rejects a wrong secret and ignores other chats", async () => {

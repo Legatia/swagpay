@@ -7,6 +7,7 @@ import { EMPTY_SPEC, itemsKey } from "../src/order-spec";
 import { acceptQuoteForOrder, createQuote, getQuote } from "../src/quotes";
 import { createPaymentRequest } from "../src/payments";
 import { handleApi } from "../src/api";
+import { markJob, proposeVendorJob, vendorJobFor } from "../src/vendors";
 import { completeSpec } from "./fixtures";
 
 const intake = {
@@ -423,6 +424,24 @@ describe("API", () => {
     await runInDurableObject(stub, async (agent: OrderAgent) => {
       expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).toContain("The host confirmed the swag arrived.");
     });
+  });
+
+  it("marks the order's printer job delivered, with its on-time score, when the host confirms delivery", async () => {
+    const token = await newOrder();
+    const order = (await getOrderByToken(env.DB, token))!;
+    const at = "2099-01-01T10:00:00.000Z";
+    const vendor = await env.DB.prepare(
+      "INSERT INTO vendors (name, city, country, methods, status, source_ref, created_at, updated_at) VALUES ('Drukarnia', 'Warsaw', 'PL', '[]', 'partner', ?, ?, ?)",
+    ).bind(`api:${crypto.randomUUID()}`, at, at).run();
+    await proposeVendorJob(env.DB, { orderId: order.id, vendorId: vendor.meta.last_row_id as number, deliverBy: order.deliver_by, currency: "PLN", cents: 100_000 });
+    await markJob(env.DB, order.id, "booked");
+    await markJob(env.DB, order.id, "printed");
+    await env.DB.prepare("UPDATE orders SET status = 'balance_paid' WHERE id = ?").bind(order.id).run();
+    expect((await SELF.fetch(`${base}/api/o/${token}/received`, { method: "POST" })).status).toBe(201);
+    const job = await vendorJobFor(env.DB, order.id);
+    // Delivered today, well before the 2099 deadline.
+    expect(job).toMatchObject({ status: "delivered", on_time: 1 });
+    expect(job?.delivered_at).not.toBeNull();
   });
 
   it("caps new orders per day", async () => {

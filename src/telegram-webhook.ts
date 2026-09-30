@@ -8,9 +8,9 @@ import { createPaymentRequest } from "./payments";
 import { warsawTime } from "./quote-text";
 import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
-import { decideObligation, setObligationStatus } from "./treasury";
+import { decideObligation, setObligationStatus, waitingVendorObligations } from "./treasury";
 import {
-  cityFromPlace, getVendor, listVendors, proposeVendorJob, setVendorPayout, setVendorStatus, vendorJobFor, vendorScore,
+  cityFromPlace, getVendor, listVendors, markJob, proposeVendorJob, setVendorPayout, setVendorStatus, vendorJobFor, vendorScore,
   type VendorJobRow, type VendorRow, type VendorStatus,
 } from "./vendors";
 
@@ -29,7 +29,7 @@ export const HELP = [
   "/resend <id> — re-send a decision the agent missed",
   `${COST_SYNTAX} — printer cost (gross, delivery included) for a cost request`,
   "/order <number> — order status",
-  "/printed <order> — the printer finished; send the balance request",
+  "/printed <order> — the printer finished; send the balance request (and release a partner printer's second milestone)",
   "/vendors [city] — printers, partners first",
   "/vendor <#> partner|screened|paused",
   "/vendor <#> pay <0x address> <CHAIN> — where a partner printer is paid (USDC)",
@@ -262,24 +262,55 @@ export async function resend(env: Env, id: number): Promise<string> {
     : `#${id}: the agent could not be told. Try /resend ${id} again later.`;
 }
 
-/** The owner reports the printer finished: request the balance (or mark the order paid when nothing is left). */
+/** Statuses only /printed leads to: balance requests are created by /printed alone. */
+const PRINTED_STATUSES = ["balance_pending", "balance_paid", "closed"];
+
+/**
+ * After /printed: opens this order's printer milestones that wait for it, marks its printer job printed, and tells the treasury.
+ * Returns a line for the owner ("" when nothing was waiting).
+ */
+async function releaseMilestones(env: Env, orderId: number, now: Date): Promise<string> {
+  const lines: string[] = [];
+  for (const ob of await waitingVendorObligations(env.DB, orderId)) {
+    if (!(await setObligationStatus(env.DB, ob.id, ["waiting"], "open"))) continue;
+    const due = `${formatUnits(ob.amount_units)} ${ob.token}`;
+    lines.push(`Printer #${ob.vendor_id}'s milestone #${ob.id} (${due}) is now due; the treasury pays it.`);
+    try {
+      await (await getAgentByName(env.TreasuryAgent, TREASURY_NAME)).notify(`Order ${orderId} printed: milestone obligation #${ob.id} (${due} to printer #${ob.vendor_id}) is now due.`);
+    } catch (err) {
+      // The treasury still sees the open milestone in its next snapshot.
+      console.error("could not tell the treasury a milestone is due", ob.id, err);
+    }
+  }
+  await markJob(env.DB, orderId, "printed", now);
+  return lines.join(" ");
+}
+
+/** The owner reports the printer finished: request the balance (or mark the order paid when nothing is left), and open the printer's second milestone. */
 export async function markPrinted(env: Env, n: number, now: Date = new Date()): Promise<string> {
   const order = await getOrderById(env.DB, n);
   if (!order) return `Order ${n} doesn't exist.`;
-  if (order.status !== "deposit_paid") return `Order ${n} is ${order.status}; /printed works once the deposit is paid.`;
+  if (order.status !== "deposit_paid") {
+    // Printed already, but a milestone still waits: the first /printed stopped after the status move. Open it now.
+    const released = PRINTED_STATUSES.includes(order.status) ? await releaseMilestones(env, n, now) : "";
+    if (released) return `Order ${n} was already printed. ${released}`;
+    return `Order ${n} is ${order.status}; /printed works once the deposit is paid.`;
+  }
   const quote = await acceptedQuote(env.DB, n);
   if (!quote) return `Order ${n} has no accepted quote.`;
   const agent = await getAgentByName(env.OrderAgent, order.instance);
   const balanceCents = quote.price_cents - quote.deposit_cents;
   if (balanceCents <= 0) {
     if (!(await setOrderStatus(env.DB, n, ["deposit_paid"], "balance_paid"))) return `Order ${n} changed; try again.`;
+    const released = await releaseMilestones(env, n, now);
     await agent.pushEvent('The owner reports the job is printed. Nothing more is due. When the swag arrives, ask the host to press "We received it" on the order page.', "Printing done. Nothing more is due.");
-    return `Order ${n}: printed; nothing more is due.`;
+    return `Order ${n}: printed; nothing more is due.${released ? ` ${released}` : ""}`;
   }
   // Due before delivery, but never less than a day away.
   const dueBy = new Date(Math.max(Date.parse(order.deliver_by), now.getTime() + 24 * 3_600_000));
   const request = await createPaymentRequest(env.DB, { orderId: n, quoteId: quote.id, stage: "balance", token: TOKEN_FOR[quote.currency], cents: balanceCents, dueBy }, now);
   if (!(await setOrderStatus(env.DB, n, ["deposit_paid"], "balance_pending"))) return `Order ${n} changed; try again.`;
+  const released = await releaseMilestones(env, n, now);
   const amount = `${formatUnits(request.amount_units)} ${request.token}`;
   await agent.pushEvent(
     `The owner reports the job is printed. Balance request #${request.id}: ${amount} on Arc, due by ${warsawTime(new Date(request.due_by))} (Warsaw time). Tell the host the balance is on the order page.`,
@@ -290,7 +321,7 @@ export async function markPrinted(env: Env, n: number, now: Date = new Date()): 
   } catch (err) {
     console.error("could not schedule the balance reminder", err);
   }
-  return `Order ${n}: printed; balance request #${request.id} for ${amount} is on the order page.`;
+  return `Order ${n}: printed; balance request #${request.id} for ${amount} is on the order page.${released ? ` ${released}` : ""}`;
 }
 
 const parseId = (arg: string | undefined): number | null => (arg !== undefined && /^\d{1,9}$/.test(arg) ? Number(arg) : null);

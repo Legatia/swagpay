@@ -1,15 +1,16 @@
 import { getAgentByName } from "agents";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, decodeTransfer, type RpcClient } from "./arc";
-import { getOrderById, setOrderStatus } from "./db";
+import { getOrderById, setOrderStatus, type OrderRow } from "./db";
 import { createEscalation } from "./escalations";
-import { formatCents, formatUnits, isAddress } from "./money";
+import { formatCents, formatUnits, isAddress, type Token } from "./money";
 import { applyClaims, depositPaid, getPaymentRequest, listUnnotified, markNotified, recordTransfer, type NewTransfer, type PaymentRequestRow, type TransferOutcome, type TransferRow } from "./payments";
 import { DEFAULT_POLICY, loadPolicy } from "./policy";
 import { warsawTime } from "./quote-text";
-import { getQuote } from "./quotes";
+import { getQuote, type QuoteRow } from "./quotes";
 import { createTelegram, notifyOwner, type TelegramClient } from "./telegram";
 import { TREASURY_NAME } from "./agent/treasury-agent";
-import { createObligation, loadTreasuryPolicy, printerCostUnits, type TreasuryPolicy } from "./treasury";
+import { createObligation, getObligationByRef, loadTreasuryPolicy, printerCostUnits, type ObligationRow, type TreasuryPolicy } from "./treasury";
+import { getVendor, markJob, vendorJobFor, type VendorJobRow, type VendorRow } from "./vendors";
 
 export const CHUNK_BLOCKS = 5000;
 export const MAX_CHUNKS_PER_RUN = 20;
@@ -42,6 +43,73 @@ async function alertOnce(env: Env, telegram: TelegramClient, key: string, summar
 export const RUN_BUDGET_MS = 120_000;
 /** A cursor this far past the chain head belongs to another chain or database. */
 export const MAX_CURSOR_AHEAD_BLOCKS = 1000;
+
+/** A chain code the wallet runner accepts (as `/vendor <#> pay` stores it). */
+const CHAIN_CODE = /^[A-Z][A-Z0-9-]{1,23}$/;
+
+type Milestones = { vendor: VendorRow | null; m1: ObligationRow; m2: ObligationRow };
+
+/**
+ * A partner printer with a registered USDC payout is paid by the treasury directly, in two printer_cost obligations that add up to
+ * the printer cost: m1 = ceil(total / 2), open (escalated when the deposit is late), and m2 = the rest, waiting for /printed.
+ * Null when the owner's payout account takes the cost as one obligation instead. A retried notification takes the path its first
+ * attempt took, so one printer cost is never recorded both ways.
+ */
+async function createMilestones(
+  env: Env,
+  o: { orderId: number; quote: QuoteRow; job: VendorJobRow | null; token: Token; total: number; late: boolean; configErrors: string[] },
+): Promise<Milestones | null> {
+  const ref = `printer_cost:quote:${o.quote.id}`;
+  if (await getObligationByRef(env.DB, ref)) return null;
+  let m1 = await getObligationByRef(env.DB, `${ref}:m1`);
+  let vendor: VendorRow | null;
+  if (m1) {
+    vendor = m1.vendor_id === null ? null : await getVendor(env.DB, m1.vendor_id);
+  } else {
+    // Both milestones must be positive.
+    if (!o.job || o.configErrors.length > 0 || o.token !== "USDC" || !(o.total >= 2)) return null;
+    vendor = await getVendor(env.DB, o.job.vendor_id);
+    const address = vendor?.payout_address;
+    const chain = vendor?.payout_chain;
+    if (!vendor || vendor.status !== "partner" || !isAddress(address) || typeof chain !== "string" || !CHAIN_CODE.test(chain)) return null;
+    m1 = await createObligation(env.DB, {
+      orderId: o.orderId, kind: "printer_cost", token: "USDC", amountUnits: Math.ceil(o.total / 2), destination: address, chain,
+      dueAt: new Date(), sourceRef: `${ref}:m1`, status: o.late ? "escalated" : "open", vendorId: vendor.id,
+    });
+  }
+  // Milestone 2 goes where milestone 1 goes, and takes the rest of the cost.
+  const m2 = await createObligation(env.DB, {
+    orderId: o.orderId, kind: "printer_cost", token: m1.token, amountUnits: Math.max(0, o.total - m1.amount_units), destination: m1.destination, chain: m1.chain,
+    dueAt: new Date(), sourceRef: `${ref}:m2`, status: "waiting", ...(m1.vendor_id !== null ? { vendorId: m1.vendor_id } : {}),
+  });
+  return { vendor, m1, m2 };
+}
+
+/** Tells the owner and the treasury that a partner printer is paid in milestones. A late deposit's approval carries milestone 1. */
+async function announceMilestones(
+  env: Env, telegram: TelegramClient,
+  o: { order: OrderRow; request: PaymentRequestRow; transfer: TransferRow; paid: number; late: boolean; milestones: Milestones },
+): Promise<void> {
+  const { order, request: r, transfer: t, paid, late } = o;
+  const { vendor, m1, m2 } = o.milestones;
+  const units = (ob: ObligationRow) => `${formatUnits(ob.amount_units)} ${ob.token}`;
+  const plan = `Printer #${m1.vendor_id}${vendor ? ` ${vendor.name} (${vendor.status})` : ""} is paid by the treasury in two milestones: #${m1.id} (${units(m1)}) ${late ? "once you approve" : "now"}, #${m2.id} (${units(m2)}) after /printed.`;
+  const got = `(${formatUnits(paid)} ${r.token}, tx ${t.tx_hash})`;
+  // obligationId: on the late approval, the owner's decision moves milestone 1 (deliver()); on the notice it is a reference only.
+  const payload = { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, obligationId: m1.id };
+  const e = late
+    ? await createEscalation(env.DB, {
+      orderId: order.id, kind: "approval", payload,
+      summary: `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) ${got}. ${plan} Approve if printing is still possible, then send the job to the printer with the files from the order page. Reject to handle it yourself; #${m2.id} still waits for /printed.`,
+    })
+    : await createEscalation(env.DB, {
+      orderId: order.id, kind: "payment", payload,
+      summary: `Order ${order.id}: deposit paid ${got}. ${plan} Send the job to the printer with the files from the order page.`,
+    });
+  await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
+  // No printer name: the treasury's reasons are public.
+  await tellTreasury(env, `Order ${order.id}: deposit completed${late ? " LATE (the owner must first confirm printing is still possible)" : ""}. The printer cost goes straight to printer #${m1.vendor_id} in two milestones: obligation #${m1.id} ${units(m1)} now (${m1.status}), and obligation #${m2.id} ${units(m2)} once the owner reports the job printed (${m2.status}).`);
+}
 
 /** Tells the order's agent (and the host's thread) about a credited transfer; escalates overpayment. Reports the request as it stood when this transfer was credited. */
 async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: TransferRow; request: PaymentRequestRow; via: "amount" | "claim" }): Promise<void> {
@@ -116,7 +184,15 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   }
+  let milestones: Milestones | null = null;
   if (completedDeposit) {
+    const job = await vendorJobFor(env.DB, order.id);
+    if (quote) milestones = await createMilestones(env, { orderId: order.id, quote, job, token: r.token, total: printerCostUnits(quote, fxBuffer), late, configErrors });
+    // Booked however the printer is paid; before the owner's notices, which a retry would repeat.
+    if (job) await markJob(env.DB, order.id, "booked");
+    if (milestones) await announceMilestones(env, telegram, { order, request: r, transfer: t, paid, late, milestones });
+  }
+  if (completedDeposit && !milestones) {
     const cost = quote ? `cost ${formatCents(quote.cost_pln_grosze)} PLN gross (quote #${quote.id})` : `quote #${r.quote_id} is missing; check the cost by hand`;
     let costOb: { id: number; amount_units: number; status: string } | null = null;
     let why = "";

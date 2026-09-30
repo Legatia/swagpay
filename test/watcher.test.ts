@@ -9,8 +9,11 @@ import { listEscalations } from "../src/escalations";
 import { addClaim, createPaymentRequest, listUnnotified } from "../src/payments";
 import { handleTelegram } from "../src/telegram-webhook";
 import { warsawTime } from "../src/quote-text";
-import { getObligation, type ObligationRow } from "../src/treasury";
+import { formatUnits } from "../src/money";
+import { getQuote } from "../src/quotes";
+import { createObligation, getObligation, orderMargin, printerCostUnits, type ObligationRow } from "../src/treasury";
 import type { TelegramClient } from "../src/telegram";
+import { proposeVendorJob, setVendorStatus, vendorJobFor, type VendorStatus } from "../src/vendors";
 import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, MIN_ESCALATION_UNITS, runWatcher } from "../src/watcher";
 import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
 
@@ -522,5 +525,199 @@ describe("runWatcher", () => {
         await setLastBlock(2200);
       }
     });
+  });
+});
+
+describe("partner printers paid in two milestones", () => {
+  const VADDR = "0x" + "ab".repeat(20);
+  const PAYOUT = "0x3333333333333333333333333333333333333333";
+  let vendorSeq = 0;
+  async function addVendor(o: { status: VendorStatus; name?: string; address?: string | null; chain?: string | null }): Promise<number> {
+    const at = "2099-01-01T10:00:00.000Z";
+    const res = await env.DB.prepare(
+      "INSERT INTO vendors (name, city, country, methods, status, payout_address, payout_chain, source_ref, created_at, updated_at) VALUES (?, 'Warsaw', 'PL', '[\"screen\"]', ?, ?, ?, ?, ?, ?)",
+    ).bind(o.name ?? "Drukarnia Partner", o.status, o.address ?? null, o.chain ?? null, `w:${++vendorSeq}`, at, at).run();
+    return res.meta.last_row_id as number;
+  }
+  const partner = (name = "Drukarnia Partner") => addVendor({ status: "partner", name, address: VADDR, chain: "BASE" });
+  const propose = (orderId: number, vendorId: number) =>
+    proposeVendorJob(env.DB, { orderId, vendorId, deliverBy: "2099-10-08T15:00:00.000Z", currency: "PLN", cents: 100_000 });
+  const obligationsOf = async (orderId: number) =>
+    (await env.DB.prepare("SELECT * FROM obligations WHERE order_id = ? ORDER BY id").bind(orderId).all<ObligationRow>()).results;
+  const treasuryInbox = async () => runInDurableObject(await getAgentByName(env.TreasuryAgent, "treasury"), async (agent: TreasuryAgent) =>
+    agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text));
+
+  it("pays a partner printer directly: half now, the rest (waiting) after /printed, adding up to the printer cost", async () => {
+    const { order, req } = await pendingDeposit(3131);
+    const v = await partner();
+    await propose(order.id, v);
+    await setLastBlock(5100);
+    const paid = usdcLog(5105, req.amount_units, 3131);
+    // An FX buffer that makes the printer cost odd: 257.500001 USDC.
+    const odd = ({ ...env, POLICY_FX_BUFFER: "0.030000004" }) as unknown as Env;
+    await runWatcher(odd, { rpc: fakeRpc(5140, [paid]).rpc, telegram: silent });
+    const total = printerCostUnits((await getQuote(env.DB, req.quote_id))!, 0.030000004);
+    expect(total).toBe(257_500_001);
+    const obs = await obligationsOf(order.id);
+    expect(obs).toHaveLength(2);
+    const [m1, m2] = obs;
+    expect(m1).toMatchObject({
+      kind: "printer_cost", token: "USDC", amount_units: 128_750_001, destination: VADDR, chain: "BASE", status: "open", vendor_id: v,
+      source_ref: `printer_cost:quote:${req.quote_id}:m1`,
+    });
+    expect(m2).toMatchObject({
+      kind: "printer_cost", token: "USDC", amount_units: 128_750_000, destination: VADDR, chain: "BASE", status: "waiting", vendor_id: v,
+      source_ref: `printer_cost:quote:${req.quote_id}:m2`,
+    });
+    expect(m1.amount_units + m2.amount_units).toBe(total);
+    // Nothing goes to the owner's payout account.
+    expect(obs.some((o) => o.destination === PAYOUT || o.source_ref === `printer_cost:quote:${req.quote_id}`)).toBe(false);
+    // The margin still counts the whole printer cost once.
+    expect((await orderMargin(env.DB, order.id))?.printerCostUnits).toBe(total);
+    const job = await vendorJobFor(env.DB, order.id);
+    expect(job).toMatchObject({ vendor_id: v, status: "booked" });
+    expect(job?.booked_at).not.toBeNull();
+    const notices = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.summary.includes("deposit paid"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0].kind).toBe("payment");
+    expect(notices[0].summary).toBe(
+      `Order ${order.id}: deposit paid (${formatUnits(req.amount_units)} USDC, tx ${paid.transactionHash}). Printer #${v} Drukarnia Partner (partner) is paid by the treasury in two milestones: #${m1.id} (128.750001 USDC) now, #${m2.id} (128.750000 USDC) after /printed. Send the job to the printer with the files from the order page.`,
+    );
+    expect(notices[0].summary).not.toContain("Book the printer");
+    // Acknowledging the notice settles nothing: the treasury pays the milestones.
+    expect(JSON.parse(notices[0].payload_json)).toMatchObject({ obligationId: m1.id });
+    expect(JSON.parse(notices[0].payload_json).manual).toBeUndefined();
+    const told = (await treasuryInbox()).filter((x) => x.startsWith(`Order ${order.id}: deposit completed`));
+    expect(told).toHaveLength(1);
+    expect(told[0]).toContain(`obligation #${m1.id}`);
+    expect(told[0]).toContain(`obligation #${m2.id}`);
+    expect(told[0]).toContain(`printer #${v}`);
+    // The treasury's events carry no printer names (its reasons are public).
+    expect(told[0]).not.toContain("Drukarnia");
+  });
+
+  it("escalates the first milestone of a late deposit with the late approval; the second stays waiting", async () => {
+    const due = new Date(Date.now() - 3_600_000);
+    const { order, req } = await pendingDeposit(3232, { dueBy: due });
+    const v = await partner("Drukarnia Late");
+    await propose(order.id, v);
+    await setLastBlock(5200);
+    await runWatcher(env, { rpc: fakeRpc(5240, [usdcLog(5205, req.amount_units, 3232)]).rpc, telegram: silent });
+    const [m1, m2] = await obligationsOf(order.id);
+    expect(m1).toMatchObject({ amount_units: 128_750_000, status: "escalated", vendor_id: v, destination: VADDR, chain: "BASE" });
+    expect(m2).toMatchObject({ amount_units: 128_750_000, status: "waiting", vendor_id: v });
+    const approvals = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.kind === "approval");
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].summary).toContain(`Order ${order.id}: deposit paid LATE (due ${warsawTime(due)} Warsaw time)`);
+    expect(approvals[0].summary).toContain(`Printer #${v} Drukarnia Late (partner) is paid by the treasury in two milestones: #${m1.id} (128.750000 USDC) once you approve, #${m2.id} (128.750000 USDC) after /printed.`);
+    expect(JSON.parse(approvals[0].payload_json).obligationId).toBe(m1.id);
+    expect((await listEscalations(env.DB)).some((x) => x.order_id === order.id && x.kind === "payment" && x.summary.includes("deposit paid"))).toBe(false);
+    expect((await vendorJobFor(env.DB, order.id))?.status).toBe("booked");
+    const ack = new Request("https://swagpay.test/api/telegram", {
+      method: "POST", headers: { "x-telegram-bot-api-secret-token": "test-secret" },
+      body: JSON.stringify({ message: { chat: { id: 42 }, text: `/approve ${approvals[0].id}` } }),
+    });
+    await handleTelegram(ack, env, { telegram: silent });
+    expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "approved", approved_by: "owner" });
+    expect(await getObligation(env.DB, m2.id)).toMatchObject({ status: "waiting", approved_by: null });
+  });
+
+  it("keeps the owner's single printer cost for a screened printer, and still books the job", async () => {
+    const { order, req } = await pendingDeposit(3333);
+    const v = await addVendor({ status: "screened", name: "Drukarnia Screened" });
+    await propose(order.id, v);
+    await setLastBlock(5300);
+    const paid = usdcLog(5305, req.amount_units, 3333);
+    await runWatcher(env, { rpc: fakeRpc(5340, [paid]).rpc, telegram: silent });
+    const obs = await obligationsOf(order.id);
+    expect(obs).toHaveLength(1);
+    expect(obs[0]).toMatchObject({
+      kind: "printer_cost", amount_units: 257_500_000, destination: PAYOUT, chain: "MATIC", status: "open", vendor_id: null,
+      source_ref: `printer_cost:quote:${req.quote_id}`,
+    });
+    const book = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.summary.includes("Book the printer"));
+    expect(book).toHaveLength(1);
+    expect(book[0].summary).toBe(`Order ${order.id}: deposit paid (257.503333 USDC, tx ${paid.transactionHash}). Book the printer: cost 1000.00 PLN gross (quote #${req.quote_id}). Printer cost obligation #${obs[0].id}: 257.500000 USDC to the payout account.`);
+    expect((await vendorJobFor(env.DB, order.id))?.status).toBe("booked");
+  });
+
+  it("keeps the owner path for a partner without a payout, an EURC deposit, or an invalid treasury config", async () => {
+    // A partner that has not registered where it is paid.
+    const a = await pendingDeposit(3434);
+    await propose(a.order.id, await addVendor({ status: "partner", name: "No Payout" }));
+    await setLastBlock(5400);
+    await runWatcher(env, { rpc: fakeRpc(5440, [usdcLog(5405, a.req.amount_units, 3434)]).rpc, telegram: silent });
+    expect((await obligationsOf(a.order.id)).map((o) => [o.source_ref, o.destination, o.status, o.vendor_id])).toEqual([[`printer_cost:quote:${a.req.quote_id}`, PAYOUT, "open", null]]);
+    expect((await vendorJobFor(env.DB, a.order.id))?.status).toBe("booked");
+
+    // EURC: the treasury only pays USDC.
+    const b = await pendingDeposit(3535, { currency: "EUR" });
+    await propose(b.order.id, await partner());
+    await setLastBlock(5500);
+    const eurc: RawLog = {
+      address: env.EURC_ADDRESS, topics: [TRANSFER_TOPIC, addressTopic("0x2222222222222222222222222222222222222222"), addressTopic(TO)],
+      data: "0x" + BigInt(b.req.amount_units).toString(16).padStart(64, "0"),
+      blockNumber: "0x" + (5505).toString(16), transactionHash: "0x" + (3535).toString(16).padStart(64, "0"), logIndex: "0x1",
+    };
+    await runWatcher(env, { rpc: fakeRpc(5540, [eurc]).rpc, telegram: silent });
+    const eurcObs = await obligationsOf(b.order.id);
+    expect(eurcObs).toHaveLength(1);
+    expect(eurcObs[0]).toMatchObject({ source_ref: `printer_cost:quote:${b.req.quote_id}`, token: "EURC", status: "escalated", vendor_id: null, note: "only USDC payouts are configured" });
+
+    // Invalid treasury config: the printer cost can't be split safely.
+    const c = await pendingDeposit(3636);
+    await propose(c.order.id, await partner());
+    await setLastBlock(5600);
+    const bad = ({ ...env, TREASURY_DAILY_USDC: "1,500" as string }) as unknown as Env;
+    await runWatcher(bad, { rpc: fakeRpc(5640, [usdcLog(5605, c.req.amount_units, 3636)]).rpc, telegram: silent });
+    const badObs = await obligationsOf(c.order.id);
+    expect(badObs).toHaveLength(1);
+    // As before plan 5: the policy didn't load, so the owner pays it by hand.
+    expect(badObs[0]).toMatchObject({ source_ref: `printer_cost:quote:${c.req.quote_id}`, destination: "", status: "escalated", vendor_id: null });
+    expect(badObs[0].note).toMatch(/^treasury config is invalid/);
+  });
+
+  it("creates no second set of milestones when the notification is retried", async () => {
+    const { order, req } = await pendingDeposit(3737);
+    const v = await partner();
+    await propose(order.id, v);
+    await setLastBlock(5700);
+    const paid = usdcLog(5705, req.amount_units, 3737);
+    await runWatcher(env, { rpc: fakeRpc(5740, [paid]).rpc, telegram: silent });
+    const first = await obligationsOf(order.id);
+    expect(first.map((o) => o.status)).toEqual(["open", "waiting"]);
+    await env.DB.prepare("UPDATE transfers SET notified_at = NULL WHERE tx_hash = ?").bind(paid.transactionHash).run();
+    await runWatcher(env, { rpc: fakeRpc(5740).rpc, telegram: silent });
+    expect(await obligationsOf(order.id)).toEqual(first);
+  });
+
+  it("a retry keeps the path its first attempt took, so one printer cost is never recorded both ways", async () => {
+    // The first attempt recorded the owner's printer cost; the printer became a partner with a payout since.
+    const a = await pendingDeposit(3838);
+    await propose(a.order.id, await partner());
+    const owner = await createObligation(env.DB, {
+      orderId: a.order.id, kind: "printer_cost", token: "USDC", amountUnits: 257_500_000, destination: PAYOUT, chain: "MATIC",
+      dueAt: new Date(), sourceRef: `printer_cost:quote:${a.req.quote_id}`,
+    });
+    await setLastBlock(5800);
+    await runWatcher(env, { rpc: fakeRpc(5840, [usdcLog(5805, a.req.amount_units, 3838)]).rpc, telegram: silent });
+    expect((await obligationsOf(a.order.id)).map((o) => o.id)).toEqual([owner.id]);
+
+    // The first attempt recorded milestone 1 and stopped; the printer was paused (its payout cleared) since.
+    const b = await pendingDeposit(3939);
+    const v = await partner();
+    await propose(b.order.id, v);
+    const m1 = await createObligation(env.DB, {
+      orderId: b.order.id, kind: "printer_cost", token: "USDC", amountUnits: 128_750_000, destination: VADDR, chain: "BASE",
+      dueAt: new Date(), sourceRef: `printer_cost:quote:${b.req.quote_id}:m1`, vendorId: v,
+    });
+    await setVendorStatus(env.DB, v, "paused");
+    await setLastBlock(5900);
+    await runWatcher(env, { rpc: fakeRpc(5940, [usdcLog(5905, b.req.amount_units, 3939)]).rpc, telegram: silent });
+    const obs = await obligationsOf(b.order.id);
+    expect(obs.map((o) => o.source_ref)).toEqual([`printer_cost:quote:${b.req.quote_id}:m1`, `printer_cost:quote:${b.req.quote_id}:m2`]);
+    expect(obs[0].id).toBe(m1.id);
+    // Milestone 2 goes where milestone 1 goes, and the two add up to the printer cost.
+    expect(obs[1]).toMatchObject({ amount_units: 128_750_000, destination: VADDR, chain: "BASE", vendor_id: v, status: "waiting" });
   });
 });

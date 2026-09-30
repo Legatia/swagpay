@@ -13,6 +13,7 @@ import { runTurn, type TurnResult } from "./loop";
 import { createModel, type ModelClient } from "./model";
 import { TREASURY_PROMPT } from "./treasury-prompt";
 import { TREASURY_TOOLS, makeTreasuryHandlers } from "./treasury-tools";
+import { getVendor } from "../vendors";
 
 export const TREASURY_NAME = "treasury";
 export const MAX_TREASURY_CALLS_PER_DAY = 60;
@@ -103,7 +104,7 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
     // Settled (and cancelled) obligations are done: they are not listed.
     const [balance, queued, used, open, unswept, stale] = await Promise.all([
       this.walletUnits(), queuedUnits(this.env.DB), payoutsLast24h(this.env.DB, now),
-      listObligations(this.env.DB, ["open", "approved", "failed", "escalated", "queued"], 200),
+      listObligations(this.env.DB, ["open", "approved", "failed", "escalated", "queued", "waiting"], 200),
       unsweptClosedOrders(this.env.DB), staleQueuedPayouts(this.env.DB, now),
     ]);
     // Oldest first from the ledger: show the newest, so stuck ones don't push new ones out.
@@ -113,7 +114,10 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
       `Treasury snapshot: wallet ${balance === null ? "unknown" : formatUnits(balance)} USDC; queued payouts ${formatUnits(queued)} USDC; paid out in the last 24 hours ${formatUnits(used)} of the ${formatUnits(policy.dailyUnits)} USDC budget; per-payout limit ${formatUnits(policy.perTxUnits)} USDC; reserve share ${policy.reserveMinBps}–${policy.reserveMaxBps} bps.`,
       open.length ? "Obligations:" : "No open obligations.",
       ...(hidden > 0 ? [`(${hidden} older obligations not shown)`] : []),
-      ...shown.map((o) => `- #${o.id} ${o.kind}${o.order_id !== null ? ` order ${o.order_id}` : ""}: ${formatUnits(o.amount_units)} ${o.token} to ${o.chain} ${o.kind === "refund" ? "the payer's address" : o.destination}, ${o.status}${o.approved_by ? ` (approved by ${o.approved_by})` : ""}${o.note ? ` — note: ${o.note}` : ""}`),
+      ...shown.map((o) => {
+        const to = o.vendor_id !== null ? `printer #${o.vendor_id}` : o.kind === "refund" ? "the payer's address" : o.destination;
+        return `- #${o.id} ${o.kind}${o.order_id !== null ? ` order ${o.order_id}` : ""}: ${formatUnits(o.amount_units)} ${o.token} to ${o.chain} ${to}, ${o.status}${o.status === "waiting" ? " (due after printing)" : ""}${o.approved_by ? ` (approved by ${o.approved_by})` : ""}${o.note ? ` — note: ${o.note}` : ""}`;
+      }),
       ...(unswept.length ? [`Closed orders not yet swept: ${unswept.map((id) => `#${id}`).join(", ")}`] : []),
       ...(stale.length ? [`Payouts queued over 2 hours: ${stale.map((p) => `#${p.id} (${Math.floor((now.getTime() - Date.parse(p.created_at)) / 3_600_000)} h)`).join(", ")}`] : []),
     ];
@@ -144,6 +148,7 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
       handlers = makeTreasuryHandlers({
         policy: p,
         getObligation: (id) => getObligation(this.env.DB, id),
+        getVendor: (id) => getVendor(this.env.DB, id),
         walletUnits: () => this.walletUnits(),
         payoutsLast24h: () => payoutsLast24h(this.env.DB),
         queuedUnits: () => queuedUnits(this.env.DB),

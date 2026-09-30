@@ -2,12 +2,14 @@ import { z } from "zod";
 import type { BetaTool } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { formatUnits, type Token } from "../money";
 import type { ObligationRow, PayoutRow, TreasuryPolicy } from "../treasury";
+import type { VendorRow } from "../vendors";
 import type { ToolHandler } from "./loop";
 import { inputSchema, logged, type DecisionLogger, type Logged } from "./tools";
 
 export interface TreasuryContext extends DecisionLogger {
   policy: TreasuryPolicy;
   getObligation(id: number): Promise<ObligationRow | null>;
+  getVendor(id: number): Promise<VendorRow | null>;
   walletUnits(): Promise<number | null>;
   payoutsLast24h(): Promise<number>;
   queuedUnits(): Promise<number>;
@@ -60,11 +62,20 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
       if (ob.kind === "refund" && ob.approved_by !== "owner") return blocked("refunds need the owner's approval");
       // A refund of a bridge mint would go to the zero address and burn the money.
       if (/^0x0{40}$/i.test(ob.destination)) return blocked("the destination is the zero address");
-      const expected = ob.kind === "printer_cost" ? ctx.policy.payoutAddress : ob.kind === "reserve" ? ctx.policy.reserveAddress : ob.destination;
-      if (!expected || expected.toLowerCase() !== ob.destination.toLowerCase()) return blocked(`the destination ${ob.destination} is not the configured address`);
-      // The same address on another chain may belong to someone else.
-      const chain = ob.kind === "printer_cost" ? ctx.policy.payoutChain : ob.kind === "reserve" ? "ARC" : ob.chain;
-      if (ob.chain !== chain) return blocked(`the obligation's chain ${ob.chain} is not the configured chain`);
+      if (ob.vendor_id !== null) {
+        // A printer is paid only while it is a partner, and only where it is registered now (a pause clears that).
+        const vendor = await ctx.getVendor(ob.vendor_id);
+        const printer = `printer #${ob.vendor_id}`;
+        if (!vendor || vendor.status !== "partner") return blocked(`${printer} is not a partner`);
+        if (!vendor.payout_address || vendor.payout_address.toLowerCase() !== ob.destination.toLowerCase()) return blocked(`the destination is not ${printer}'s registered address`);
+        if (!vendor.payout_chain || vendor.payout_chain !== ob.chain) return blocked(`the chain is not ${printer}'s registered chain`);
+      } else {
+        const expected = ob.kind === "printer_cost" ? ctx.policy.payoutAddress : ob.kind === "reserve" ? ctx.policy.reserveAddress : ob.destination;
+        if (!expected || expected.toLowerCase() !== ob.destination.toLowerCase()) return blocked(`the destination ${ob.destination} is not the configured address`);
+        // The same address on another chain may belong to someone else.
+        const chain = ob.kind === "printer_cost" ? ctx.policy.payoutChain : ob.kind === "reserve" ? "ARC" : ob.chain;
+        if (ob.chain !== chain) return blocked(`the obligation's chain ${ob.chain} is not the configured chain`);
+      }
       if (ob.approved_by !== "owner") {
         if (ob.amount_units > ctx.policy.perTxUnits) return overLimit(ob, `above the per-payout limit of ${formatUnits(ctx.policy.perTxUnits)} USDC`);
         if ((await ctx.payoutsLast24h()) + ob.amount_units > ctx.policy.dailyUnits) return overLimit(ob, `above the 24-hour budget of ${formatUnits(ctx.policy.dailyUnits)} USDC`);

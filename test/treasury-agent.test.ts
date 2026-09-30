@@ -195,4 +195,21 @@ describe("TreasuryAgent", () => {
     expect(line).not.toContain(`#${recent.id} `);
     expect(TREASURY_PROMPT).toContain("If payouts have been queued for hours, the wallet runner may be down: escalate.");
   });
+
+  it("the snapshot names a printer's milestones by printer number, and a waiting one as due after printing", async () => {
+    const { order } = await newOrderRow();
+    const at = "2099-01-01T10:00:00.000Z";
+    const address = "0x" + "ab".repeat(20);
+    const v = (await env.DB.prepare(
+      "INSERT INTO vendors (name, city, country, methods, status, payout_address, payout_chain, source_ref, created_at, updated_at) VALUES ('Drukarnia Secret', 'Warsaw', 'PL', '[]', 'partner', ?, 'BASE', ?, ?, ?)",
+    ).bind(address, `ta:${crypto.randomUUID()}`, at, at).run()).meta.last_row_id as number;
+    const base = { orderId: order.id, kind: "printer_cost" as const, token: "USDC" as const, amountUnits: 128_750_000, destination: address, chain: "BASE", dueAt: new Date(), vendorId: v };
+    const m1 = await createObligation(env.DB, { ...base, sourceRef: `m1:${crypto.randomUUID()}` });
+    const m2 = await createObligation(env.DB, { ...base, sourceRef: `m2:${crypto.randomUUID()}`, status: "waiting" });
+    const lines = await snapshotLines();
+    expect(lines).toContain(`- #${m1.id} printer_cost order ${order.id}: 128.750000 USDC to BASE printer #${v}, open`);
+    expect(lines).toContain(`- #${m2.id} printer_cost order ${order.id}: 128.750000 USDC to BASE printer #${v}, waiting (due after printing)`);
+    expect(lines.join("\n")).not.toContain("Drukarnia Secret");
+    expect(TREASURY_PROMPT).toContain("Printer costs for a partner printer go straight to the printer in two milestones: pay the first when the deposit completes and the second once it is due after printing. Pay only to the printer's registered address; if a printer is paused or its address changed, escalate.");
+  });
 });

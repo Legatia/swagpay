@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ObligationRow, PayoutRow, TreasuryPolicy } from "../src/treasury";
+import type { VendorRow } from "../src/vendors";
 import { TREASURY_TOOLS, makeTreasuryHandlers, type TreasuryContext } from "../src/agent/treasury-tools";
 
 const PAYOUT = "0x3333333333333333333333333333333333333333";
@@ -11,11 +12,12 @@ function ob(o: Partial<ObligationRow> = {}): ObligationRow {
     status: "open", approved_by: null, source_ref: "x", note: null, vendor_id: null, created_at: "2099-01-01T00:00:00.000Z", settled_at: null, ...o };
 }
 
-function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null; last24h: number; queued: number; margin: { status: string; token: "USDC"; receivedUnits: number; printerCostUnits: number } | null }> = {}) {
+function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null; last24h: number; queued: number; margin: { status: string; token: "USDC"; receivedUnits: number; printerCostUnits: number } | null; vendors: VendorRow[] }> = {}) {
   const state = { queued: [] as number[], held: [] as [number, number][], reserves: [] as [number, number][], escalations: [] as string[], escalated: [] as number[], decisions: [] as Array<Record<string, unknown>> };
   const ctx: TreasuryContext = {
     policy,
     async getObligation(id) { return obligations.find((x) => x.id === id) ?? null; },
+    async getVendor(id) { return (o.vendors ?? []).find((v) => v.id === id) ?? null; },
     async walletUnits() { return o.balance === undefined ? 10_000_000_000 : o.balance; },
     async payoutsLast24h() { return o.last24h ?? 0; },
     async queuedUnits() { return o.queued ?? 0; },
@@ -131,5 +133,68 @@ describe("treasury tools", () => {
     const { h } = fake([]);
     expect((await h.escalate({ summary: "Printer asked for a higher price", reason: "outside my limits" })).content).toBe("Sent to the owner as #9; their decision arrives as an event.");
     expect((await h.escalate({ summary: "Printer asked for a higher price", reason: "again" })).content).toBe("Already with the owner as #9.");
+  });
+
+  describe("a partner printer's milestones", () => {
+    const VADDR = "0x" + "ab".repeat(20);
+    const vendor = (o: Partial<VendorRow> = {}): VendorRow => ({
+      id: 3, name: "Drukarnia", city: "Warsaw", country: "PL", methods: "[\"screen\"]", email: null, website: null, tax_id_type: null, tax_id: null,
+      tax_status: null, tax_checked_at: null, lead_days: null, lat: null, lng: null, status: "partner", payout_address: VADDR, payout_chain: "BASE",
+      source_ref: "v:3", created_at: "2099-01-01T00:00:00.000Z", updated_at: "2099-01-01T00:00:00.000Z", ...o,
+    });
+    const milestone = (o: Partial<ObligationRow> = {}) => ob({ vendor_id: 3, destination: VADDR, chain: "BASE", amount_units: 128_750_000, ...o });
+
+    it("pays a milestone to the printer's registered address and chain, not the payout account", async () => {
+      const { h, state } = fake([milestone()], { vendors: [vendor()] });
+      const r = await h.pay_obligation({ obligationId: 1, reason: "deposit paid; first milestone to the printer" });
+      expect(r.content).toBe("Queued payout #101: 128.750000 USDC to BASE. The wallet runner sends it; its result arrives as an event.");
+      expect(state.queued).toEqual([1]);
+      // The address is compared without regard to case (a checksummed destination is the same address).
+      const mixed = fake([milestone({ destination: "0x" + "AB".repeat(20) })], { vendors: [vendor()] });
+      expect((await mixed.h.pay_obligation({ obligationId: 1, reason: "first milestone" })).content).toMatch(/^Queued payout/);
+    });
+
+    it("blocks a milestone for a printer that isn't a partner, whose address or chain changed, or that is still waiting", async () => {
+      const cases: Array<[ObligationRow, VendorRow[], string]> = [
+        // Pausing clears the payout, as the registry does.
+        [milestone(), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner"],
+        [milestone(), [vendor({ status: "screened", payout_address: null, payout_chain: null })], "printer #3 is not a partner"],
+        [milestone(), [], "printer #3 is not a partner"],
+        // The owner's approval of a late deposit doesn't pass a paused printer.
+        [milestone({ status: "approved", approved_by: "owner" }), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner"],
+        [milestone(), [vendor({ payout_address: "0x" + "cd".repeat(20) })], "the destination is not printer #3's registered address"],
+        [milestone(), [vendor({ payout_address: null, payout_chain: null })], "the destination is not printer #3's registered address"],
+        [milestone(), [vendor({ payout_chain: "ARC" })], "the chain is not printer #3's registered chain"],
+        [milestone({ chain: "MATIC" }), [vendor()], "the chain is not printer #3's registered chain"],
+        [milestone({ status: "waiting" }), [vendor()], "obligation #1 is waiting"],
+        [milestone({ token: "EURC" }), [vendor()], "only USDC payouts are configured"],
+        [milestone(), [vendor()], "not enough USDC"],
+      ];
+      for (const [o, vendors, text] of cases) {
+        const { h, state } = fake([o], { vendors, ...(text === "not enough USDC" ? { balance: 100_000_000 } : {}) });
+        const r = await h.pay_obligation({ obligationId: 1, reason: "try" });
+        expect(r.isError, text).toBe(true);
+        expect(String(r.content)).toContain(text);
+        expect(state.queued).toEqual([]);
+        expect(state.decisions[0]).toMatchObject({ verdict: "block", outcome: "blocked" });
+      }
+    });
+
+    it("keeps the per-payout and 24-hour limits for a milestone", async () => {
+      const big = fake([milestone({ amount_units: 600_000_000 })], { vendors: [vendor()] });
+      expect((await big.h.pay_obligation({ obligationId: 1, reason: "pay it" })).content).toContain("Not paid: above the per-payout limit of 500.000000 USDC");
+      expect(big.state.queued).toEqual([]);
+      expect(big.state.escalated).toEqual([1]);
+      const daily = fake([milestone()], { vendors: [vendor()], last24h: 1_400_000_000 });
+      expect((await daily.h.pay_obligation({ obligationId: 1, reason: "pay it" })).content).toContain("above the 24-hour budget");
+      expect(daily.state.queued).toEqual([]);
+    });
+
+    it("never pays an owner's printer cost to a printer's address", async () => {
+      const { h, state } = fake([ob({ destination: VADDR, chain: "BASE" })], { vendors: [vendor()] });
+      const r = await h.pay_obligation({ obligationId: 1, reason: "try" });
+      expect(r.content).toContain(`the destination ${VADDR} is not the configured address`);
+      expect(state.queued).toEqual([]);
+    });
   });
 });

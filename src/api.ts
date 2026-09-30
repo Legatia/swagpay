@@ -15,6 +15,7 @@ import { EMPTY_SPEC, itemsKey, type OrderSpec } from "./order-spec";
 import { loadPolicy, quoteStillValid } from "./policy";
 import { CREATE_KEY, completeCreateKey, intakeHash, lookupCreateKey, releaseCreateKey, reserveCreateKey, type KeyLookup } from "./order-create-keys";
 import { acceptQuoteForOrder, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
+import { markJob } from "./vendors";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -329,6 +330,12 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
   if (sub === "/received" && request.method === "POST") {
     if (order.status !== "balance_paid" || !(await setOrderStatus(env.DB, order.id, ["balance_paid"], "closed"))) {
       return fail(409, "The order can be marked received once it is fully paid.");
+    }
+    try {
+      // The printer job's on-time score counts from here.
+      await markJob(env.DB, order.id, "delivered");
+    } catch (err) {
+      console.error("could not mark the printer job delivered", err);
     }
     try {
       await agent.pushEvent("The host confirmed the swag arrived. The order is closed: thank the host briefly.", "Delivery confirmed. The order is closed.");
