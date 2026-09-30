@@ -21,4 +21,11 @@ describe("scheduled jobs", () => {
     await handleScheduled("17 * * * *", env, new Date("2026-10-01T12:17:00Z"), async (job) => { none.push(job); });
     expect(none).toEqual([]);
   });
+
+  it("adds the sandbox runner every minute and cleanup at :37, only in the sandbox", () => {
+    const sb = { ...env, SANDBOX: "1" } as unknown as Env;
+    expect(jobsDue(new Date("2026-10-01T12:03:00Z"), sb)).toEqual(["watcher", "sandbox-runner"]);
+    expect(jobsDue(new Date("2026-10-01T12:37:00Z"), sb)).toEqual(["watcher", "sandbox-runner", "sandbox-cleanup"]);
+    expect(jobsDue(new Date("2026-10-01T12:37:00Z"), env)).toEqual(["watcher"]);
+  });
 });
