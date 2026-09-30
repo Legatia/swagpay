@@ -141,7 +141,7 @@ describe("treasury tools", () => {
     const VADDR = "0x" + "ab".repeat(20);
     const vendor = (o: Partial<VendorRow> = {}): VendorRow => ({
       id: 3, name: "Drukarnia", city: "Warsaw", country: "PL", methods: "[\"screen\"]", email: null, website: null, tax_id_type: null, tax_id: null,
-      tax_status: null, tax_checked_at: null, lead_days: null, lat: null, lng: null, status: "partner", payout_address: VADDR, payout_chain: "BASE",
+      tax_status: null, tax_checked_at: null, lead_days: null, lat: null, lng: null, status: "partner", payout_address: VADDR, payout_chain: "BASE", pay_currency: null, how_to_pay: null,
       source_ref: "v:3", created_at: "2099-01-01T00:00:00.000Z", updated_at: "2099-01-01T00:00:00.000Z", ...o,
     });
     const milestone = (o: Partial<ObligationRow> = {}) => ob({ vendor_id: 3, destination: VADDR, chain: "BASE", amount_units: 128_750_000, ...o });

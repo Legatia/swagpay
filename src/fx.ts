@@ -17,16 +17,29 @@ export async function fetchNbpRate(code: string, fetchImpl: typeof fetch = fetch
   return { plnPerUnit: mid, effectiveDate: rate.effectiveDate };
 }
 
+const OPTIONAL = ["GBP", "INR"];
+
 export async function refreshRates(db: D1Database, fetchImpl: typeof fetch = fetch, now: Date = new Date()): Promise<void> {
   const [usd, eur] = await Promise.all([fetchNbpRate("USD", fetchImpl), fetchNbpRate("EUR", fetchImpl)]);
+  const extra = await Promise.allSettled(OPTIONAL.map((code) => fetchNbpRate(code, fetchImpl)));
   const upsert = db.prepare(
     `INSERT INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES (?, ?, ?, ?)
      ON CONFLICT(code) DO UPDATE SET pln_per_unit = excluded.pln_per_unit, effective_date = excluded.effective_date, fetched_at = excluded.fetched_at`,
   );
-  await db.batch([
-    upsert.bind("USD", usd.plnPerUnit, usd.effectiveDate, now.toISOString()),
-    upsert.bind("EUR", eur.plnPerUnit, eur.effectiveDate, now.toISOString()),
-  ]);
+  const at = now.toISOString();
+  const rows = [upsert.bind("USD", usd.plnPerUnit, usd.effectiveDate, at), upsert.bind("EUR", eur.plnPerUnit, eur.effectiveDate, at)];
+  extra.forEach((r, i) => {
+    if (r.status === "fulfilled") rows.push(upsert.bind(OPTIONAL[i], r.value.plnPerUnit, r.value.effectiveDate, at));
+    else console.error("NBP rate not refreshed", OPTIONAL[i], r.reason);
+  });
+  await db.batch(rows);
+}
+
+/** PLN per unit of `code` from a rate fetched in the last RATE_MAX_AGE_HOURS; 1 for PLN; null when missing or stale. */
+export async function plnPer(db: D1Database, code: string, now: Date = new Date()): Promise<number | null> {
+  if (code === "PLN") return 1;
+  const r = await db.prepare("SELECT pln_per_unit, fetched_at FROM fx_rates WHERE code = ?").bind(code).first<{ pln_per_unit: number; fetched_at: string }>();
+  return r && now.getTime() - Date.parse(r.fetched_at) <= RATE_MAX_AGE_HOURS * 3_600_000 ? r.pln_per_unit : null;
 }
 
 export interface Rates {

@@ -1,3 +1,4 @@
+import { createSupplierPayment } from "./back-office";
 import { getAgentByName } from "agents";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, decodeTransfer, type RpcClient } from "./arc";
 import { PRINTED_STATUSES, getOrderById, setOrderStatus, type OrderRow } from "./db";
@@ -233,6 +234,10 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
         destination: treasury?.payoutAddress ?? "", chain: treasury?.payoutChain ?? "ARC", dueAt: new Date(),
         sourceRef: `printer_cost:quote:${quote.id}`, status: why || late ? "escalated" : "open", ...(why ? { note: why } : {}),
       });
+      // The owner pays the printer by hand (card, BLIK or transfer): the back office tracks it. One per order.
+      await createSupplierPayment(env.DB, job
+        ? { orderId: order.id, vendorId: job.vendor_id, currency: job.cost_currency, amountCents: job.cost_cents }
+        : { orderId: order.id, vendorId: null, currency: "PLN", amountCents: quote.cost_pln_grosze });
     }
     const move = costOb ? `Printer cost obligation #${costOb.id}: ${formatUnits(costOb.amount_units)} ${r.token} to the payout account.` : "";
     if (late && costOb && !why) {

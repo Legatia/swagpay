@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
 import type { TreasuryAgent } from "../src/agent/treasury-agent";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, type RawLog, type RpcClient } from "../src/arc";
+import { supplierPaymentForOrder } from "../src/back-office";
 import { getOrderById, setOrderStatus } from "../src/db";
 import { listEscalations } from "../src/escalations";
 import { addClaim, createPaymentRequest, listUnnotified } from "../src/payments";
@@ -548,6 +549,21 @@ describe("partner printers paid in two milestones", () => {
   const treasuryInbox = async () => runInDurableObject(await getAgentByName(env.TreasuryAgent, "treasury"), async (agent: TreasuryAgent) =>
     agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text));
 
+  it("records the printer payment the owner makes by hand, once, at the printer's own currency and price", async () => {
+    const { order, req } = await pendingDeposit(5757);
+    const v = (await env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, source_ref, created_at, updated_at) VALUES ('Druk', 'Warsaw', 'PL', '[]', 'screened', 'w:sp', 'x', 'x') RETURNING id").first<{ id: number }>())!.id;
+    await proposeVendorJob(env.DB, { orderId: order.id, vendorId: v, deliverBy: "2099-10-08T15:00:00.000Z", currency: "EUR", cents: 48_000 });
+    await setLastBlock(8100);
+    const log = usdcLog(8105, req.amount_units, 5757);
+    await runWatcher(env, { rpc: fakeRpc(8140, [log]).rpc, telegram: silent });
+    expect(await supplierPaymentForOrder(env.DB, order.id)).toMatchObject({ vendor_id: v, currency: "EUR", amount_cents: 48_000, status: "due" });
+    // Without a printer job: the quote's PLN cost.
+    const b = await pendingDeposit(5858);
+    await setLastBlock(8200);
+    await runWatcher(env, { rpc: fakeRpc(8240, [usdcLog(8205, b.req.amount_units, 5858)]).rpc, telegram: silent });
+    expect(await supplierPaymentForOrder(env.DB, b.order.id)).toMatchObject({ vendor_id: null, currency: "PLN", amount_cents: 100_000 });
+  });
+
   it("pays a partner printer directly: half now, the rest (waiting) after /printed, adding up to the printer's cost without the FX buffer", async () => {
     const { order, req } = await pendingDeposit(3131);
     // A rate that makes the printer cost odd: 1000 PLN at 7 PLN per USDC is 142.857143 USDC.
@@ -575,6 +591,8 @@ describe("partner printers paid in two milestones", () => {
       source_ref: `printer_cost:quote:${req.quote_id}:m2`,
     });
     expect(m1.amount_units + m2.amount_units).toBe(total);
+    // The treasury pays this printer: there is no hand payment.
+    expect(await supplierPaymentForOrder(env.DB, order.id)).toBeNull();
     // Nothing goes to the owner's payout account.
     expect(obs.some((o) => o.destination === PAYOUT || o.source_ref === `printer_cost:quote:${req.quote_id}`)).toBe(false);
     // The margin counts the whole printer cost once.

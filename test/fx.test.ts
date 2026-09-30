@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { NBP_BASE, fetchNbpRate, ratesFor, refreshRates } from "../src/fx";
+import { NBP_BASE, fetchNbpRate, plnPer, ratesFor, refreshRates } from "../src/fx";
 
 function nbp(rates: Record<string, number>, seen: string[] = []): typeof fetch {
   return (async (input: RequestInfo | URL) => {
@@ -47,5 +47,19 @@ describe("NBP rates", () => {
     expect(await ratesFor(env.DB, "USD", new Date(then.getTime() + 6 * 3_600_000))).not.toBeNull();
     expect(await ratesFor(env.DB, "USD", new Date(then.getTime() + 6 * 3_600_000 + 1))).toBeNull();
     expect(await ratesFor(env.DB, "EUR", new Date(then.getTime() + 7 * 3_600_000))).toBeNull();
+  });
+  it("refreshes GBP and INR when NBP has them, and USD/EUR even when those fail", async () => {
+    const now = new Date("2099-10-02T10:00:00Z");
+    await refreshRates(env.DB, nbp({ USD: 4, EUR: 4.3, GBP: 5, INR: 0.045 }), now);
+    expect(await plnPer(env.DB, "GBP", now)).toBe(5);
+    expect(await plnPer(env.DB, "INR", now)).toBe(0.045);
+    expect(await plnPer(env.DB, "PLN", now)).toBe(1);
+    const later = new Date("2099-10-02T11:00:00Z");
+    await refreshRates(env.DB, nbp({ USD: 4.1, EUR: 4.4 }), later);
+    expect(await plnPer(env.DB, "USD", later)).toBe(4.1);
+    // GBP kept its older (still fresh) row.
+    expect(await plnPer(env.DB, "GBP", later)).toBe(5);
+    expect(await plnPer(env.DB, "GBP", new Date("2099-10-03T10:00:00Z"))).toBeNull();
+    expect(await plnPer(env.DB, "XYZ", later)).toBeNull();
   });
 });

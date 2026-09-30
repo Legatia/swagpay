@@ -197,7 +197,7 @@ export async function setObligationNote(db: D1Database, id: number, note: string
   await db.prepare("UPDATE obligations SET note = ? WHERE id = ?").bind(note.slice(0, 500), id).run();
 }
 
-const isUniqueError = (err: unknown) => err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
+export const isUniqueError = (err: unknown) => err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
 
 /** Queues one payout for an obligation that is open, approved or failed; null when it wasn't (or one is already live). */
 export async function queuePayout(db: D1Database, ob: ObligationRow, now: Date = new Date()): Promise<PayoutRow | null> {

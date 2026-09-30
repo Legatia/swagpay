@@ -1,9 +1,8 @@
 import { setTelegramMessageId, type EscalationRow } from "./escalations";
 
-export interface InlineButton {
-  text: string;
-  data: string;
-}
+export const ADMIN_URL = "https://app.swagpay.me/admin";
+
+export type InlineButton = { text: string; data: string } | { text: string; url: string };
 
 export interface TelegramClient {
   send(chatId: string, text: string, buttons?: InlineButton[][]): Promise<number | null>;
@@ -29,7 +28,7 @@ export function createTelegram(token: string | undefined, fetchImpl: typeof fetc
       const result = (await call("sendMessage", {
         chat_id: chatId,
         text: text.slice(0, 4000),
-        ...(buttons?.length ? { reply_markup: { inline_keyboard: buttons.map((r) => r.map((b) => ({ text: b.text, callback_data: b.data }))) } } : {}),
+        ...(buttons?.length ? { reply_markup: { inline_keyboard: buttons.map((r) => r.map((b) => ("url" in b ? { text: b.text, url: b.url } : { text: b.text, callback_data: b.data }))) } } : {}),
       })) as { message_id?: number } | null;
       return result?.message_id ?? null;
     },
@@ -44,9 +43,13 @@ export function escalationText(e: EscalationRow): string {
 }
 
 export function escalationButtons(e: EscalationRow): InlineButton[][] {
-  if (e.kind === "system" || e.kind === "payment") return [[{ text: "Acknowledge", data: `esc:${e.id}:approve` }]];
-  if (e.kind === "cost") return [[{ text: "Reject", data: `esc:${e.id}:reject` }]];
-  return [[{ text: "Approve", data: `esc:${e.id}:approve` }, { text: "Reject", data: `esc:${e.id}:reject` }]];
+  const rows: InlineButton[][] =
+    e.kind === "system" || e.kind === "payment"
+      ? [[{ text: "Acknowledge", data: `esc:${e.id}:approve` }]]
+      : e.kind === "cost"
+        ? [[{ text: "Reject", data: `esc:${e.id}:reject` }]]
+        : [[{ text: "Approve", data: `esc:${e.id}:approve` }, { text: "Reject", data: `esc:${e.id}:reject` }]];
+  return e.order_id === null ? rows : [...rows, [{ text: "Open order", url: `${ADMIN_URL}/orders/${e.order_id}` }]];
 }
 
 let warnedNoOwner = false;

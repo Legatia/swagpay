@@ -7,6 +7,7 @@ declare namespace Cloudflare {
     TELEGRAM_OWNER_CHAT_ID?: string;
     TELEGRAM_WEBHOOK_SECRET?: string;
     TREASURY_RUNNER_TOKEN?: string;
+    PAYOUT_ADDRESS?: string;
   }
 }
 

@@ -20,6 +20,8 @@ export interface VendorRow {
   status: VendorStatus;
   payout_address: string | null;
   payout_chain: string | null;
+  pay_currency: string | null;
+  how_to_pay: string | null;
   source_ref: string;
   created_at: string;
   updated_at: string;

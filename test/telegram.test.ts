@@ -51,13 +51,17 @@ describe("escalation messages", () => {
   it("formats the text and offers Approve/Reject, or Acknowledge for system notices", () => {
     expect(escalationText(row({}))).toBe("#7 · Order 3 · approval\nApprove: banner");
     expect(escalationText(row({ order_id: null, kind: "system", summary: "Unmatched transfer" }))).toBe("#7 · No order · system\nUnmatched transfer");
-    expect(escalationButtons(row({}))).toEqual([[{ text: "Approve", data: "esc:7:approve" }, { text: "Reject", data: "esc:7:reject" }]]);
-    expect(escalationButtons(row({ kind: "system" }))).toEqual([[{ text: "Acknowledge", data: "esc:7:approve" }]]);
+    const open = [{ text: "Open order", url: "https://app.swagpay.me/admin/orders/3" }];
+    expect(escalationButtons(row({}))).toEqual([[{ text: "Approve", data: "esc:7:approve" }, { text: "Reject", data: "esc:7:reject" }], open]);
+    expect(escalationButtons(row({ kind: "system" }))).toEqual([[{ text: "Acknowledge", data: "esc:7:approve" }], open]);
+    // No order, no link.
+    expect(escalationButtons(row({ kind: "system", order_id: null }))).toEqual([[{ text: "Acknowledge", data: "esc:7:approve" }]]);
   });
 
   it("offers only Reject on a cost request and sends no keyboard for none", async () => {
-    expect(escalationButtons(row({ kind: "cost" }))).toEqual([[{ text: "Reject", data: "esc:7:reject" }]]);
-    expect(escalationButtons(row({ kind: "payment" }))).toEqual([[{ text: "Acknowledge", data: "esc:7:approve" }]]);
+    const open = [{ text: "Open order", url: "https://app.swagpay.me/admin/orders/3" }];
+    expect(escalationButtons(row({ kind: "cost" }))).toEqual([[{ text: "Reject", data: "esc:7:reject" }], open]);
+    expect(escalationButtons(row({ kind: "payment" }))).toEqual([[{ text: "Acknowledge", data: "esc:7:approve" }], open]);
     const { calls, fetchImpl } = recorder();
     await createTelegram("T", fetchImpl).send("42", "plain", []);
     expect(calls[0].body).toEqual({ chat_id: "42", text: "plain" });
