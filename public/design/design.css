@@ -38,7 +38,12 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 
 .editor { display: grid; gap: 12px; }
 /* The stage stays white in dark mode: garments, print areas and exports are drawn for white. */
-.stage-wrap { background: #ffffff; border: 1px solid var(--line, #d9dcea); border-radius: 12px; padding: 8px; }
+.stage-wrap { position: relative; background: #ffffff; border: 1px solid var(--line, #d9dcea); border-radius: 12px; padding: 8px; }
+/* Empty stage: the mascot invites the first logo. Clicks pass through to the stage. */
+.stage-empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; pointer-events: none; color: #4a4f72; font-weight: 700; text-align: center; }
+.stage-empty[hidden] { display: none; }
+.stage-empty img { width: min(120px, 30vw); height: auto; }
+.stage-empty p { margin: 0; padding: 6px 12px; background: rgba(255, 255, 255, 0.9); border-radius: 999px; }
 #stage { display: block; width: 100%; height: min(58vh, 560px); touch-action: none; user-select: none; -webkit-user-select: none; }
 #stage .garment { stroke: #171a38; stroke-width: 2; }
 #stage .print-area { fill: none; stroke: #2466c4; stroke-width: 1.5; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
@@ -48,7 +53,6 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 #stage .layer { cursor: move; }
 #stage .selection rect { fill: none; stroke: #d7266f; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 #stage .selection circle { fill: #ffffff; stroke: #d7266f; stroke-width: 2; vector-effect: non-scaling-stroke; cursor: pointer; }
-#stage .empty-hint { fill: #4a4f72; font-family: "Figtree", sans-serif; }
 
 .toolbar { position: sticky; bottom: 72px; display: flex; gap: 8px; flex-wrap: wrap; padding: 8px; background: var(--page, #f5f6f9); z-index: 2; }
 .tool { display: inline-flex; align-items: center; padding: 10px 14px; border-radius: 8px; font-weight: 700; cursor: pointer; }
@@ -63,7 +67,16 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 .quality li[data-status="block"] { color: var(--error, #b91e5a); font-weight: 700; }
 .notice { position: fixed; left: 16px; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom)); max-width: 640px; margin: 0 auto; z-index: 4; pointer-events: none; padding: 10px 14px; border-radius: 8px; background: var(--text, #171a38); color: var(--page, #f5f6f9); }
 .notice:empty { padding: 0; background: transparent; }
-.downloads { display: flex; flex-wrap: wrap; gap: 8px; }
+.row { display: grid; gap: 14px; }
+@media (min-width: 560px) { .row { grid-template-columns: 1fr 1fr; } }
+.send-status { display: flex; align-items: center; gap: 12px; }
+.send-status img { flex: none; }
+.send-status p, .send-error { margin: 0; }
+.send-error { color: var(--error, #b91e5a); font-weight: 700; }
+.send-error:empty { display: none; }
+.send-error, .order-link { scroll-margin-bottom: 96px; }
+.order-link { font-weight: 700; min-height: 44px; display: inline-flex; align-items: center; }
+.send-status[hidden], .order-link[hidden] { display: none; }
 .sizes { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
 
 .bottom { position: fixed; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 10px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); background: var(--surface, #ffffff); border-top: 1px solid var(--line, #d9dcea); z-index: 3; }
@@ -75,3 +88,5 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
   .toolbar { bottom: 76px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.link-button { background: none; color: var(--text, #171a38); text-decoration: underline; padding: 10px 0; min-height: 44px; justify-self: start; }
+.link-button[hidden] { display: none; }

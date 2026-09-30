@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { svgAspect } from "../../public/design/js/upload.js";
+import { sniffImageType, svgAspect } from "../../public/design/js/upload.js";
 
 describe("svgAspect", () => {
   it("reads the viewBox when there is no width or height", () => {
@@ -20,5 +20,21 @@ describe("svgAspect", () => {
     expect(svgAspect("<svg></svg>")).toBeNull();
     expect(svgAspect('<svg viewBox="0 0 0 0"></svg>')).toBeNull();
     expect(svgAspect("not an svg")).toBeNull();
+  });
+});
+
+describe("sniffImageType", () => {
+  it("recognises PNG, JPEG and WebP by their first bytes", () => {
+    expect(sniffImageType(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]))).toBe("image/png");
+    expect(sniffImageType(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]))).toBe("image/jpeg");
+    const webp = [...new TextEncoder().encode("RIFF"), 1, 2, 3, 4, ...new TextEncoder().encode("WEBP")];
+    expect(sniffImageType(new Uint8Array(webp))).toBe("image/webp");
+  });
+  it("returns null for anything else", () => {
+    expect(sniffImageType(new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0, 0, 0, 0, 0, 0]))).toBeNull(); // GIF
+    const wave = [...new TextEncoder().encode("RIFF"), 1, 2, 3, 4, ...new TextEncoder().encode("WAVE")];
+    expect(sniffImageType(new Uint8Array(wave))).toBeNull();
+    expect(sniffImageType(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBeNull(); // too short
+    expect(sniffImageType(new Uint8Array())).toBeNull();
   });
 });

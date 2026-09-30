@@ -6,6 +6,11 @@
   <title>Design your swag · Swagpay</title>
   <meta name="description" content="Design t-shirts, stickers, banners, roll-ups and flags for your event and send them to the Swagpay agent.">
   <link rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="manifest" href="/design/manifest.webmanifest">
+  <meta name="theme-color" content="#171a38">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Swagpay">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@800&family=Figtree:wght@400;700;800&family=IBM+Plex+Mono:wght@400;700&display=swap">
@@ -14,7 +19,7 @@
 <body>
   <main id="design-app" data-step="product">
     <header class="top">
-      <a href="/" class="home"><img src="/logo.svg" alt="Swagpay" width="150" height="40"></a>
+      <a href="/" class="home"><picture><source media="(prefers-color-scheme: dark)" srcset="/logo-on-dark.svg"><img src="/logo.svg" alt="Swagpay" width="150" height="40"></picture></a>
       <ol class="steps" aria-label="Steps">
         <li data-for="product">Product</li><li data-for="design">Design</li><li data-for="details">Details</li><li data-for="review">Review</li>
       </ol>
@@ -24,6 +29,7 @@
       <h1 id="h-product">What are we making?</h1>
       <div id="products" class="products"></div>
       <p class="muted">Something else, like hoodies? <a href="/new">Describe it to the agent.</a></p>
+      <p id="install-hint" class="muted" hidden>On iPhone, tap Share, then Add to Home Screen to keep Swagpay as an app.</p>
     </section>
 
     <section id="step-design" class="step" aria-labelledby="h-design" hidden>
@@ -31,6 +37,10 @@
       <div class="editor">
         <div class="stage-wrap">
           <svg id="stage" tabindex="0" role="application" aria-label="Design area. Select a layer, then use arrow keys to move, plus and minus to resize, square brackets to rotate, Delete to remove."></svg>
+          <div id="stage-empty" class="stage-empty" hidden>
+            <img src="/mascot.svg" alt="" width="120" height="124">
+            <p>Add your logo to start</p>
+          </div>
         </div>
         <aside class="side">
           <div id="product-controls" class="controls"></div>
@@ -53,12 +63,33 @@
     </section>
 
     <section id="step-review" class="step" aria-labelledby="h-review" hidden>
-      <h1 id="h-review">Review</h1>
+      <h1 id="h-review">Review and send</h1>
       <div class="sheet">
         <p id="summary"></p>
-        <p class="muted">Sending to the agent comes in the next update. For now you can download the files.</p>
-        <div id="downloads" class="downloads"></div>
+        <p id="resume-note" class="muted" hidden>Your order was already created. Send again to finish attaching your design.</p>
+        <button type="button" id="new-order" class="link-button" hidden>Start a new order instead</button>
       </div>
+      <form id="contact-form" class="sheet">
+        <label>Event name <input name="eventName" required minlength="2" maxlength="120"></label>
+        <div class="row">
+          <label>Event date <input name="eventDate" type="date" required></label>
+          <label>Deliver by (Warsaw time) <input name="deliverBy" type="datetime-local" required></label>
+        </div>
+        <label>Delivery place <input name="deliveryPlace" required minlength="3" maxlength="200"></label>
+        <div class="row">
+          <label>Your name <input name="contactName" required maxlength="80" autocomplete="name"></label>
+          <label>Email <input name="contactEmail" type="email" required maxlength="200" autocomplete="email"></label>
+        </div>
+        <div id="turnstile"></div>
+        <p id="offline" class="muted" hidden>You're offline. Your design is saved on this device; send it when you're back online.</p>
+        <button type="submit" id="send">Send to the agent</button>
+        <div id="send-status" class="send-status" hidden>
+          <img src="/mascot.svg" alt="" width="64" height="66">
+          <p id="send-step" aria-live="polite"></p>
+        </div>
+        <p id="send-error" class="send-error" role="alert"></p>
+        <a id="order-link" class="order-link" hidden>Open your order page</a>
+      </form>
     </section>
 
     <p id="notice" class="notice" role="status"></p>

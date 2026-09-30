@@ -77,11 +77,6 @@ export function renderStage(svg, ctx) {
   areaGroup.append(layerGroup);
   const selected = ctx.layers.find((l) => l.id === ctx.selectedId);
   if (selected) areaGroup.append(selectionNode(selected, Math.max(vw, vh) * 0.018));
-  if (!ctx.layers.length) {
-    const hint = el("text", { x: w / 2, y: h / 2, "text-anchor": "middle", "font-size": Math.min(w, h) * 0.07, class: "empty-hint" });
-    hint.textContent = "Add your logo to start";
-    areaGroup.append(hint);
-  }
   svg.append(areaGroup);
 }
 

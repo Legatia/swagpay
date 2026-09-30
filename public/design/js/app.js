@@ -7,8 +7,9 @@ import { mockupFor } from "./mockups.js";
 import { renderPanel } from "./panel.js";
 import { formatEstimate } from "./pricing.js";
 import { OWNER_NOTE, PRODUCTS, defaultOptions, viewAreas } from "./products.js";
+import { registerServiceWorker, showInstallHint } from "./pwa.js";
 import { layerQuality, qualityMessage } from "./quality.js";
-import { renderReview } from "./review.js";
+import { initReview, renderReview } from "./review.js";
 import { buildSpec } from "./spec.js";
 import { measureText, renderStage } from "./stage.js";
 import { createStore, loadDraft } from "./store.js";
@@ -51,6 +52,8 @@ const initial = {
   quantity: 1,
   currency: "USD",
   cutPathD: null,
+  contact: { eventName: "", eventDate: "", deliverBy: "", deliveryPlace: "Kolektyw3, Koszykowa 54, Warsaw", contactName: "", contactEmail: "" },
+  send: null,
 };
 
 // A draft saved while storage was full keeps its layers but not its images (the store saves
@@ -77,7 +80,7 @@ function dropUnsavedImages(draft) {
 const { storage, writable: storageWritable } = probeStorage();
 const loaded = dropUnsavedImages(loadDraft(storage));
 const draft = loaded.draft;
-export const store = createStore({ initial: draft ? { ...initial, ...draft } : initial, storage, keep: ["step", "sizes", "quantity", "currency"] });
+export const store = createStore({ initial: draft ? { ...initial, ...draft } : initial, storage, keep: ["step", "sizes", "quantity", "currency", "contact", "send"] });
 
 export function area() {
   const s = store.get();
@@ -231,6 +234,7 @@ function render() {
   $("undo").disabled = !store.canUndo();
   $("redo").disabled = !store.canRedo();
   if (s.step === "design" && s.product) {
+    $("stage-empty").hidden = (s.layers[s.side] || []).length > 0;
     renderStage(svg, ctx());
     renderQuality();
     requestAnimationFrame(syncTextWidths);
@@ -265,6 +269,7 @@ function addText() {
 
 function init() {
   attachGestures({ svg, store, getContext: ctx, announce, notice });
+  initReview({ store });
   renderProducts();
   $("products").addEventListener("click", (e) => {
     const b = e.target.closest("[data-product]");
@@ -283,7 +288,7 @@ function init() {
   });
   renderers.push((s) => {
     if (s.step === "details") renderDetails($("details"), s, { store });
-    if (s.step === "review") renderReview({ ...s, estimate: currentEstimate(s) });
+    if (s.step === "review") renderReview(s);
     $("estimate-bar").textContent = s.product && s.step !== "product" ? formatEstimate(currentEstimate(s)) : "";
   });
   beforeNext.details = () => {
@@ -317,6 +322,14 @@ function init() {
   if (loaded.dropped) notice("Your logo wasn't saved on this device, so it was removed. Add it again.");
   store.subscribe(render);
   render();
+  showInstallHint($("install-hint"));
+  registerServiceWorker();
 }
 
 init();
+// A page restored from the back-forward cache keeps stale state (sending stuck, a store that no
+// longer saves), so start over from the saved draft. Only when the draft is fully on disk: if it
+// isn't, keep the restored page, which still holds the design.
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted && storageWritable && store.saveProblem() === null) location.reload();
+});

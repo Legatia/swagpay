@@ -17,9 +17,10 @@ export function createStore({ initial, storage = null, key = DRAFT_KEY, limit = 
   const future = [];
   const subscribers = new Set();
   let problem = null;
+  let finished = false;
 
   function save() {
-    if (!storage) return;
+    if (!storage || finished) return;
     try {
       storage.setItem(key, JSON.stringify(state));
       problem = null;
@@ -85,6 +86,15 @@ export function createStore({ initial, storage = null, key = DRAFT_KEY, limit = 
     },
     saveProblem: () => problem,
     clearDraft() {
+      try {
+        storage?.removeItem(key);
+      } catch {
+        /* storage blocked: nothing to clear */
+      }
+    },
+    // After a successful send: forget the draft and never write it back.
+    finish() {
+      finished = true;
       try {
         storage?.removeItem(key);
       } catch {
