@@ -88,3 +88,5 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
   .toolbar { bottom: 76px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.link-button { background: none; color: var(--text, #171a38); text-decoration: underline; padding: 10px 0; min-height: 44px; justify-self: start; }
+.link-button[hidden] { display: none; }

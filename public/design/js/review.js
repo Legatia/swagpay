@@ -23,6 +23,7 @@ export function renderReview(s) {
   const { spec, error } = buildSpec({ ...s, estimate: currentEstimate(s) });
   $("summary").textContent = error ?? summarize(spec);
   $("resume-note").hidden = !s.send?.token || sending;
+  $("new-order").hidden = !s.send?.token || sending;
   const offline = navigator.onLine === false;
   $("offline").hidden = !offline;
   const send = $("send");
@@ -105,6 +106,14 @@ export function initReview({ store }) {
   const refresh = () => {
     if (store.get().step === "review") renderReview(store.get());
   };
+  // The one way out of a pending order. The host has to choose it, so a second order is never an accident.
+  $("new-order").addEventListener("click", () => {
+    if (sending) return;
+    store.set({ send: null }, { record: false });
+    $("send-error").textContent = "";
+    $("order-link").hidden = true;
+    renderReview(store.get());
+  });
   window.addEventListener("online", refresh);
   window.addEventListener("offline", refresh);
 }
