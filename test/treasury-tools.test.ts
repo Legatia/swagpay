@@ -12,12 +12,13 @@ function ob(o: Partial<ObligationRow> = {}): ObligationRow {
     status: "open", approved_by: null, source_ref: "x", note: null, vendor_id: null, created_at: "2099-01-01T00:00:00.000Z", settled_at: null, ...o };
 }
 
-function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null; last24h: number; queued: number; margin: { status: string; token: "USDC"; receivedUnits: number; printerCostUnits: number } | null; vendors: VendorRow[] }> = {}) {
+function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null; last24h: number; queued: number; margin: { status: string; token: "USDC"; receivedUnits: number; printerCostUnits: number } | null; vendors: VendorRow[]; latestPayout: number | null }> = {}) {
   const state = { queued: [] as number[], held: [] as [number, number][], reserves: [] as [number, number][], escalations: [] as string[], escalationKeys: [] as string[], escalationPayloads: [] as unknown[], escalated: [] as number[], decisions: [] as Array<Record<string, unknown>> };
   const ctx: TreasuryContext = {
     policy,
     async getObligation(id) { return obligations.find((x) => x.id === id) ?? null; },
     async getVendor(id) { return (o.vendors ?? []).find((v) => v.id === id) ?? null; },
+    async latestPayoutId() { return o.latestPayout ?? null; },
     async walletUnits() { return o.balance === undefined ? 10_000_000_000 : o.balance; },
     async payoutsLast24h() { return o.last24h ?? 0; },
     async queuedUnits() { return o.queued ?? 0; },
@@ -176,12 +177,19 @@ describe("treasury tools", () => {
         expect(state.escalationKeys).toEqual(["printer:1"]);
         expect(state.escalationPayloads).toEqual([{ obligationId: 1 }]);
         expect(state.escalations).toEqual([
-          `Treasury: printer_cost obligation #1 (order 7) can't be paid: printer #3 ${why}. Approve once the printer is registered again (the treasury re-checks); reject if you pay it by hand or it isn't owed (that settles it).`,
+          `Treasury: printer_cost obligation #1 (order 7) for 128.750000 USDC can't be paid: printer #3 ${why}. Approve once the printer is registered again (the treasury re-checks); reject if you pay it by hand or it isn't owed (that settles it).`,
         ]);
         // #3 only: the printer's name never reaches the treasury's texts.
         expect(state.escalations[0]).not.toContain("Drukarnia");
         expect(state.decisions[0]).toMatchObject({ verdict: "escalate", outcome: "escalated", detail: "#9" });
       }
+    });
+
+    it("carries the obligation's latest payout, so the owner can still decide it after a payout", async () => {
+      const { h, state } = fake([milestone({ status: "approved", approved_by: "owner" })], { vendors: [vendor({ status: "paused", payout_address: null, payout_chain: null })], latestPayout: 42 });
+      await h.pay_obligation({ obligationId: 1, reason: "owner approved the retry" });
+      expect(state.escalationPayloads).toEqual([{ obligationId: 1, payoutId: 42 }]);
+      expect(state.escalated).toEqual([1]);
     });
 
     it("blocks a waiting milestone, a non-USDC one and one the wallet can't cover", async () => {

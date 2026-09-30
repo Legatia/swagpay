@@ -108,7 +108,8 @@ async function announceMilestones(
   const payload = { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, obligationId: m1.id };
   let e: EscalationRow;
   if (late) {
-    const plan = m2 ? `in two milestones (#${m1.id} now, #${m2.id} after /printed)` : `(#${m1.id} now)`;
+    // Amounts: approving waives the limits for milestone 1 (it is then owner-approved).
+    const plan = m2 ? `in two milestones (#${m1.id}: ${units(m1)} now, #${m2.id}: ${units(m2)} after /printed)` : `(#${m1.id}: ${units(m1)} now)`;
     e = await createEscalation(env.DB, {
       orderId: order.id, kind: "approval", payload,
       summary: `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) ${got}. Approve if printing is still possible: the treasury pays ${printer} ${plan}. Reject to handle the printer yourself: ${m2 ? "neither milestone is then paid by the treasury" : "the treasury then pays nothing"}.`,

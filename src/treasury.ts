@@ -121,6 +121,23 @@ export async function waitingVendorObligations(db: D1Database, orderId: number):
     .all<ObligationRow>()).results;
 }
 
+/** An order's obligations to a printer that nothing was ever paid on: waiting for /printed, or open and never queued. */
+export async function unpaidVendorObligations(db: D1Database, orderId: number): Promise<ObligationRow[]> {
+  return (await db
+    .prepare(
+      `SELECT * FROM obligations WHERE order_id = ? AND vendor_id IS NOT NULL
+         AND (status = 'waiting' OR (status = 'open' AND NOT EXISTS (SELECT 1 FROM payouts WHERE obligation_id = obligations.id)))
+       ORDER BY id`,
+    )
+    .bind(orderId)
+    .all<ObligationRow>()).results;
+}
+
+/** The id of an obligation's latest payout, or null when it never had one. */
+export async function latestPayoutId(db: D1Database, obligationId: number): Promise<number | null> {
+  return (await db.prepare("SELECT MAX(id) AS id FROM payouts WHERE obligation_id = ?").bind(obligationId).first<{ id: number | null }>())?.id ?? null;
+}
+
 export async function listObligations(db: D1Database, statuses: ObligationStatus[], limit = 50): Promise<ObligationRow[]> {
   return (await db
     .prepare(`SELECT * FROM obligations WHERE status IN (${statuses.map(() => "?").join(", ")}) ORDER BY id LIMIT ?`)

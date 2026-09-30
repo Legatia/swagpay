@@ -4,7 +4,7 @@ import { createEscalation } from "../escalations";
 import { formatUnits, isAddress } from "../money";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import {
-  getObligation, insertObligation, insertTreasuryDecision, listObligations, loadTreasuryPolicy, orderMargin, payoutsLast24h, queuePayout,
+  getObligation, insertObligation, insertTreasuryDecision, latestPayoutId, listObligations, loadTreasuryPolicy, orderMargin, payoutsLast24h, queuePayout,
   queuedUnits, setObligationNote, setObligationStatus, staleQueuedPayouts, unsweptClosedOrders, type TreasuryPolicy,
 } from "../treasury";
 import { SqlR2ConversationStore, repairDanglingToolUse, trimToRecentTurns } from "./conversation";
@@ -149,6 +149,7 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
         policy: p,
         getObligation: (id) => getObligation(this.env.DB, id),
         getVendor: (id) => getVendor(this.env.DB, id),
+        latestPayoutId: (obligationId) => latestPayoutId(this.env.DB, obligationId),
         walletUnits: () => this.walletUnits(),
         payoutsLast24h: () => payoutsLast24h(this.env.DB),
         queuedUnits: () => queuedUnits(this.env.DB),

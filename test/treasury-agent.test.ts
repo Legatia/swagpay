@@ -267,4 +267,57 @@ describe("TreasuryAgent", () => {
     expect((await getObligation(env.DB, m1.id))?.status).toBe("settled");
     expect(await inboxOf()).not.toContain("Drukarnia");
   });
+
+  it("a printer escalation after a withheld payout can still be decided: approve re-checks, reject settles", async () => {
+    const { order } = await newOrderRow();
+    const at = "2099-01-01T10:00:00.000Z";
+    const address = "0x" + "ef".repeat(20);
+    const v = (await env.DB.prepare(
+      "INSERT INTO vendors (name, city, country, methods, status, payout_address, payout_chain, source_ref, created_at, updated_at) VALUES ('Drukarnia Withheld', 'Warsaw', 'PL', '[]', 'partner', ?, 'BASE', ?, ?, ?)",
+    ).bind(address, `ta:${crypto.randomUUID()}`, at, at).run()).meta.last_row_id as number;
+    const m1 = await createObligation(env.DB, {
+      orderId: order.id, kind: "printer_cost", token: "USDC", amountUnits: 128_750_000, destination: address, chain: "BASE", dueAt: new Date(),
+      sourceRef: `m1:${crypto.randomUUID()}`, vendorId: v,
+    });
+    const payout = (await queuePayout(env.DB, m1))!;
+    await setVendorStatus(env.DB, v, "paused");
+    // The runner's fetch withholds it; the owner approves a retry.
+    await SELF.fetch("https://swagpay.test/api/treasury/payouts", { headers: { authorization: "Bearer runner-secret" } });
+    expect((await getObligation(env.DB, m1.id))?.status).toBe("failed");
+    const withheld = (await listEscalations(env.DB)).find((x) => JSON.parse(x.payload_json).payoutId === payout.id && x.summary.includes("withheld"))!;
+    await SELF.fetch(fromOwner(`/approve ${withheld.id}`));
+    expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "approved", approved_by: "owner" });
+
+    const stub = await getAgentByName(env.TreasuryAgent, "treasury");
+    const pay = async () => runInDurableObject(stub, async (agent: TreasuryAgent) => {
+      agent.telegramOverride = quiet;
+      agent.rpcOverride = rich;
+      agent.modelOverride = scriptedModel([msg([toolUse("pay_obligation", { obligationId: m1.id, reason: "owner approved the retry" })], "tool_use"), msg([], "end_turn")]);
+      await agent.notify(`Obligation #${m1.id} was approved.`);
+      await agent.processTurn();
+    });
+    const asked = async () => (await listEscalations(env.DB))
+      .filter((x) => x.summary.startsWith(`Treasury: printer_cost obligation #${m1.id} `))
+      .sort((a, b) => a.id - b.id);
+
+    // Still paused: the printer escalation carries the latest payout, so a decision can move it.
+    await pay();
+    expect((await getObligation(env.DB, m1.id))?.status).toBe("escalated");
+    const first = await asked();
+    expect(first).toHaveLength(1);
+    expect(JSON.parse(first[0].payload_json)).toEqual({ obligationId: m1.id, payoutId: payout.id });
+    expect(first[0].summary).toContain(`for 128.750000 USDC can't be paid: printer #${v} is not a partner.`);
+    await SELF.fetch(fromOwner(`/approve ${first[0].id}`));
+    expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "approved", approved_by: "owner" });
+
+    await pay();
+    expect((await getObligation(env.DB, m1.id))?.status).toBe("escalated");
+    const second = await asked();
+    expect(second).toHaveLength(2);
+    await SELF.fetch(fromOwner(`/reject ${second[1].id}`));
+    expect((await getObligation(env.DB, m1.id))?.status).toBe("settled");
+    // Only the withheld payout ever existed; nothing went out.
+    const payouts = (await env.DB.prepare("SELECT status FROM payouts WHERE obligation_id = ?").bind(m1.id).all<{ status: string }>()).results;
+    expect(payouts).toEqual([{ status: "failed" }]);
+  });
 });

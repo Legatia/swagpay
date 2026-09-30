@@ -609,7 +609,7 @@ describe("partner printers paid in two milestones", () => {
     const approvals = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.kind === "approval");
     expect(approvals).toHaveLength(1);
     expect(approvals[0].summary).toContain(`Order ${order.id}: deposit paid LATE (due ${warsawTime(due)} Warsaw time)`);
-    expect(approvals[0].summary).toContain(`Approve if printing is still possible: the treasury pays printer #${v} in two milestones (#${m1.id} now, #${m2.id} after /printed). Reject to handle the printer yourself: neither milestone is then paid by the treasury.`);
+    expect(approvals[0].summary).toContain(`Approve if printing is still possible: the treasury pays printer #${v} in two milestones (#${m1.id}: 128.750000 USDC now, #${m2.id}: 128.750000 USDC after /printed). Reject to handle the printer yourself: neither milestone is then paid by the treasury.`);
     // The owner's decision forwards this summary to the treasury, whose reasons are public: no printer name.
     expect(approvals[0].summary).not.toContain("Drukarnia");
     expect(JSON.parse(approvals[0].payload_json).obligationId).toBe(m1.id);
@@ -649,6 +649,31 @@ describe("partner printers paid in two milestones", () => {
     expect(sent[0]).toMatch(new RegExp(`^Order ${order.id}: printed; balance request #\\d+ for .* is on the order page\\.$`));
     expect((await getObligation(env.DB, m2.id))?.status).toBe("settled");
     expect((await treasuryInbox()).some((x) => x.includes(`milestone obligation #${m2.id} `))).toBe(false);
+  });
+
+  it("rejecting a late deposit after /printed also settles the released milestone, so nothing is paid", async () => {
+    const due = new Date(Date.now() - 3_600_000);
+    const { order, req } = await pendingDeposit(4646, { dueBy: due });
+    const v = await partner("Drukarnia Printed Early");
+    await propose(order.id, v);
+    await setLastBlock(6200);
+    await runWatcher(env, { rpc: fakeRpc(6240, [usdcLog(6205, req.amount_units, 4646)]).rpc, telegram: silent });
+    const [m1, m2] = await obligationsOf(order.id);
+    const approval = (await listEscalations(env.DB)).find((x) => x.order_id === order.id && x.kind === "approval")!;
+    const owner = (text: string) => new Request("https://swagpay.test/api/telegram", {
+      method: "POST", headers: { "x-telegram-bot-api-secret-token": "test-secret" },
+      body: JSON.stringify({ message: { chat: { id: 42 }, text } }),
+    });
+    // The owner reports printing before deciding the late deposit: milestone 2 opens.
+    await env.DB.prepare("UPDATE quotes SET status = 'accepted' WHERE id = ?").bind(req.quote_id).run();
+    await handleTelegram(owner(`/printed ${order.id}`), env, { telegram: silent });
+    expect((await getObligation(env.DB, m2.id))?.status).toBe("open");
+    await handleTelegram(owner(`/reject ${approval.id}`), env, { telegram: silent });
+    expect((await getObligation(env.DB, m1.id))?.status).toBe("settled");
+    expect(await getObligation(env.DB, m2.id)).toMatchObject({ status: "settled", approved_by: "owner" });
+    const paid = await env.DB.prepare("SELECT COUNT(*) AS n FROM payouts WHERE obligation_id IN (?, ?)").bind(m1.id, m2.id).first<{ n: number }>();
+    expect(paid?.n).toBe(0);
+    expect((await treasuryInbox()).some((x) => x.includes(`milestone #${m2.id} settled too`))).toBe(true);
   });
 
   it("never records a milestone 2 of 0 units", async () => {

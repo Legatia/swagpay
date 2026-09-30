@@ -8,7 +8,7 @@ import { createPaymentRequest } from "./payments";
 import { warsawTime } from "./quote-text";
 import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
-import { decideObligation, setObligationStatus, waitingVendorObligations } from "./treasury";
+import { decideObligation, setObligationStatus, unpaidVendorObligations, waitingVendorObligations } from "./treasury";
 import {
   cityFromPlace, getVendor, listVendors, markJob, proposeVendorJob, setVendorPayout, setVendorStatus, vendorJobFor, vendorScore,
   type VendorJobRow, type VendorRow, type VendorStatus,
@@ -55,15 +55,16 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
       const ob = await decideObligation(env.DB, obligationId, decision, typeof payload.payoutId === "number" ? payload.payoutId : null);
       let also = "";
       // A late deposit's approval carries its deposit request and never a payout. Rejecting it means the owner handles the
-      // printer, so the treasury pays neither milestone. Other rejections (a limit, a failed payout, a printer that moved) settle
-      // only their own obligation.
+      // printer, so the treasury pays neither milestone: one still waiting, or one /printed already opened but never queued.
+      // Other rejections (a limit, a failed payout, a printer that moved) settle only their own obligation.
       if (decision === "rejected" && ob?.status === "settled" && ob.vendor_id !== null && ob.order_id !== null
         && typeof payload.requestId === "number" && payload.payoutId === undefined) {
         const settled: number[] = [];
-        for (const w of await waitingVendorObligations(env.DB, ob.order_id)) {
-          if (await setObligationStatus(env.DB, w.id, ["waiting"], "settled", { approvedBy: "owner" })) settled.push(w.id);
+        for (const w of await unpaidVendorObligations(env.DB, ob.order_id)) {
+          // From its own status only: a milestone queued meanwhile is no longer open, and stays as it is.
+          if (await setObligationStatus(env.DB, w.id, [w.status], "settled", { approvedBy: "owner" })) settled.push(w.id);
         }
-        if (settled.length) also = `; waiting milestone ${settled.map((id) => `#${id}`).join(", ")} settled too`;
+        if (settled.length) also = `; milestone ${settled.map((id) => `#${id}`).join(", ")} settled too`;
       }
       const now = ob === null ? "" : ob.status === "settled" ? ` (now settled by the owner${also})` : ` (now ${ob.status})`;
       const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
