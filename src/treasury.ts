@@ -2,7 +2,7 @@ import { isAddress, type Token } from "./money";
 
 export type ObligationKind = "printer_cost" | "refund" | "reserve";
 /** "settled": the owner handled it outside the agent (a reject, or an approved non-USDC obligation). "cancelled" is unused. */
-export type ObligationStatus = "open" | "approved" | "queued" | "paid" | "failed" | "escalated" | "settled" | "cancelled";
+export type ObligationStatus = "open" | "approved" | "queued" | "paid" | "failed" | "escalated" | "waiting" | "settled" | "cancelled";
 
 export interface ObligationRow {
   id: number;
@@ -17,6 +17,7 @@ export interface ObligationRow {
   approved_by: string | null;
   source_ref: string;
   note: string | null;
+  vendor_id: number | null;
   created_at: string;
   settled_at: string | null;
 }
@@ -84,16 +85,16 @@ export function printerCostUnits(q: { cost_pln_grosze: number; pln_per_unit: num
   return Math.ceil((q.cost_pln_grosze * 10_000 * (1 + fxBuffer)) / q.pln_per_unit - 1e-6);
 }
 
-export type NewObligation = { orderId: number | null; kind: ObligationKind; token: Token; amountUnits: number; destination: string; chain: string; dueAt: Date; sourceRef: string; status?: "open" | "escalated"; note?: string };
+export type NewObligation = { orderId: number | null; kind: ObligationKind; token: Token; amountUnits: number; destination: string; chain: string; dueAt: Date; sourceRef: string; status?: "open" | "escalated" | "waiting"; note?: string; vendorId?: number };
 
 /** One obligation per source ref: `created` is false when the ref already existed (its row is returned unchanged). */
 export async function insertObligation(db: D1Database, o: NewObligation, now: Date = new Date()): Promise<{ obligation: ObligationRow; created: boolean }> {
   const res = await db
     .prepare(
-      `INSERT OR IGNORE INTO obligations (order_id, kind, token, amount_units, destination, chain, due_at, status, source_ref, note, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO obligations (order_id, kind, token, amount_units, destination, chain, due_at, status, source_ref, note, vendor_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(o.orderId, o.kind, o.token, o.amountUnits, o.destination, o.chain, o.dueAt.toISOString(), o.status ?? "open", o.sourceRef, o.note ?? null, now.toISOString())
+    .bind(o.orderId, o.kind, o.token, o.amountUnits, o.destination, o.chain, o.dueAt.toISOString(), o.status ?? "open", o.sourceRef, o.note ?? null, o.vendorId ?? null, now.toISOString())
     .run();
   const row = await db.prepare("SELECT * FROM obligations WHERE source_ref = ?").bind(o.sourceRef).first<ObligationRow>();
   if (!row) throw new Error("obligation insert returned no row");

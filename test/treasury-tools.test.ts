@@ -8,7 +8,7 @@ const policy: TreasuryPolicy = { perTxUnits: 500_000_000, dailyUnits: 1_500_000_
 
 function ob(o: Partial<ObligationRow> = {}): ObligationRow {
   return { id: 1, order_id: 7, kind: "printer_cost", token: "USDC", amount_units: 257_500_000, destination: PAYOUT, chain: "MATIC", due_at: "2099-01-01T00:00:00.000Z",
-    status: "open", approved_by: null, source_ref: "x", note: null, created_at: "2099-01-01T00:00:00.000Z", settled_at: null, ...o };
+    status: "open", approved_by: null, source_ref: "x", note: null, vendor_id: null, created_at: "2099-01-01T00:00:00.000Z", settled_at: null, ...o };
 }
 
 function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null; last24h: number; queued: number; margin: { status: string; token: "USDC"; receivedUnits: number; printerCostUnits: number } | null }> = {}) {
