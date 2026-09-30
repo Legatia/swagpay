@@ -1,6 +1,6 @@
 import { getAgentByName } from "agents";
 import { PRINTED_STATUSES, getOrderById, setOrderStatus, type OrderRow } from "./db";
-import { decideEscalation, getEscalation, listEscalations, listUndelivered, markDelivered, statusWord as word, type EscalationRow } from "./escalations";
+import { decideEscalation, getEscalation, listEscalations, listUndelivered, markDelivered, openEscalationFor, statusWord as word, type EscalationRow } from "./escalations";
 import { TREASURY_NAME } from "./agent/treasury-agent";
 import { fetchNbpRate } from "./fx";
 import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
@@ -8,7 +8,7 @@ import { createPaymentRequest } from "./payments";
 import { warsawTime } from "./quote-text";
 import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
-import { decideObligation, setObligationStatus, unpaidVendorObligations, waitingVendorObligations } from "./treasury";
+import { decideObligation, setObligationStatus, unpaidVendorObligations, vendorObligations, waitingVendorObligations } from "./treasury";
 import {
   cityFromPlace, getVendor, listVendors, markJob, proposeVendorJob, setVendorPayout, setVendorStatus, vendorJobFor, vendorScore,
   type VendorJobRow, type VendorRow, type VendorStatus,
@@ -296,9 +296,16 @@ async function releaseMilestones(env: Env, orderId: number, now: Date): Promise<
   for (const ob of await waitingVendorObligations(env.DB, orderId)) {
     if (!(await setObligationStatus(env.DB, ob.id, ["waiting"], "open"))) continue;
     const due = `${formatUnits(ob.amount_units)} ${ob.token}`;
-    lines.push(`Printer #${ob.vendor_id}'s milestone #${ob.id} (${due}) is now due; the treasury pays it.`);
+    // Printed before the owner decided a late deposit: the treasury holds this milestone until that decision (pay_obligation).
+    const held = (await vendorObligations(env.DB, orderId)).find((o) => o.id !== ob.id && o.status === "escalated");
+    const decideFirst = held ? await openEscalationFor(env.DB, held.id) : null;
+    const then = !held
+      ? "the treasury pays it"
+      : `the printer's second milestone is held until ${decideFirst !== null ? `you decide #${decideFirst}` : `milestone #${held.id} is decided`}`;
+    lines.push(`Printer #${ob.vendor_id}'s milestone #${ob.id} (${due}) is now due; ${then}.`);
     try {
-      await (await getAgentByName(env.TreasuryAgent, TREASURY_NAME)).notify(`Order ${orderId} printed: milestone obligation #${ob.id} (${due} to printer #${ob.vendor_id}) is now due.`);
+      const wait = held ? ` It is held while milestone #${held.id} waits for the owner's decision.` : "";
+      await (await getAgentByName(env.TreasuryAgent, TREASURY_NAME)).notify(`Order ${orderId} printed: milestone obligation #${ob.id} (${due} to printer #${ob.vendor_id}) is now due.${wait}`);
     } catch (err) {
       // The treasury still sees the open milestone in its next snapshot.
       console.error("could not tell the treasury a milestone is due", ob.id, err);

@@ -16,6 +16,7 @@ import type { TelegramClient } from "../src/telegram";
 import { proposeVendorJob, setVendorStatus, vendorJobFor, type VendorStatus } from "../src/vendors";
 import { CHUNK_BLOCKS, HEAD_LAG_BLOCKS, MIN_ESCALATION_UNITS, runWatcher } from "../src/watcher";
 import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
+import { msg, scriptedModel, toolUse } from "./helpers";
 
 const TO = "0x1111111111111111111111111111111111111111";
 const silent: TelegramClient = { async send() { return null; }, async answerCallback() {} };
@@ -678,6 +679,49 @@ describe("partner printers paid in two milestones", () => {
     const paid = await env.DB.prepare("SELECT COUNT(*) AS n FROM payouts WHERE obligation_id IN (?, ?)").bind(m1.id, m2.id).first<{ n: number }>();
     expect(paid?.n).toBe(0);
     expect((await treasuryInbox()).some((x) => x.includes(`milestone #${m2.id} settled too`))).toBe(true);
+  });
+
+  it("holds milestone 2 while a late deposit's milestone 1 waits for the owner; approving pays m1, then m2", async () => {
+    const due = new Date(Date.now() - 3_600_000);
+    const { order, req } = await pendingDeposit(4747, { dueBy: due });
+    const v = await partner("Drukarnia Held");
+    await propose(order.id, v);
+    await setLastBlock(6300);
+    await runWatcher(env, { rpc: fakeRpc(6340, [usdcLog(6305, req.amount_units, 4747)]).rpc, telegram: silent });
+    const [m1, m2] = await obligationsOf(order.id);
+    const approval = (await listEscalations(env.DB)).find((x) => x.order_id === order.id && x.kind === "approval")!;
+    const sent: string[] = [];
+    const owner = (text: string) => handleTelegram(new Request("https://swagpay.test/api/telegram", {
+      method: "POST", headers: { "x-telegram-bot-api-secret-token": "test-secret" },
+      body: JSON.stringify({ message: { chat: { id: 42 }, text } }),
+    }), env, { telegram: { async send(_c, text) { sent.push(text); return 1; }, async answerCallback() {} } });
+    // /printed before the owner decides the late deposit: m2 opens, but is held.
+    await env.DB.prepare("UPDATE quotes SET status = 'accepted' WHERE id = ?").bind(req.quote_id).run();
+    await owner(`/printed ${order.id}`);
+    expect((await getObligation(env.DB, m2.id))?.status).toBe("open");
+    expect(sent[0]).toContain(`Printer #${v}'s milestone #${m2.id} (125.000000 USDC) is now due; the printer's second milestone is held until you decide #${approval.id}.`);
+    expect((await treasuryInbox()).find((x) => x.includes(`milestone obligation #${m2.id} `))).toContain(`It is held while milestone #${m1.id} waits for the owner's decision.`);
+
+    const stub = await getAgentByName(env.TreasuryAgent, "treasury");
+    const turn = async (ids: number[]) => runInDurableObject(stub, async (agent: TreasuryAgent) => {
+      agent.telegramOverride = silent;
+      agent.rpcOverride = { ...fakeRpc(1).rpc, async erc20Balance() { return 10_000_000_000; } };
+      agent.modelOverride = scriptedModel([...ids.map((id) => msg([toolUse("pay_obligation", { obligationId: id, reason: "the milestone is due" })], "tool_use")), msg([], "end_turn")]);
+      await agent.processTurn();
+    });
+    const payoutsOf = async () => (await env.DB.prepare("SELECT obligation_id FROM payouts WHERE obligation_id IN (?, ?) ORDER BY id").bind(m1.id, m2.id).all<{ obligation_id: number }>()).results.map((p) => p.obligation_id);
+    // Blocked, not escalated: the owner already has the question.
+    await turn([m2.id]);
+    expect(await payoutsOf()).toEqual([]);
+    expect((await getObligation(env.DB, m2.id))?.status).toBe("open");
+    const held = await env.DB.prepare("SELECT verdict, detail FROM treasury_decisions WHERE tool = 'pay_obligation' AND input_json LIKE ? ORDER BY id DESC").bind(`%"obligationId":${m2.id},%`).first<{ verdict: string; detail: string }>();
+    expect(held).toEqual({ verdict: "block", detail: `milestone #${m1.id} waits for the owner's decision` });
+    expect((await listEscalations(env.DB)).filter((x) => x.summary.startsWith("Treasury:") && x.summary.includes(`#${m2.id}`))).toEqual([]);
+
+    await owner(`/approve ${approval.id}`);
+    expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "approved", approved_by: "owner" });
+    await turn([m1.id, m2.id]);
+    expect(await payoutsOf()).toEqual([m1.id, m2.id]);
   });
 
   it("never records a milestone 2 of 0 units", async () => {

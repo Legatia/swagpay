@@ -10,6 +10,8 @@ export interface TreasuryContext extends DecisionLogger {
   policy: TreasuryPolicy;
   getObligation(id: number): Promise<ObligationRow | null>;
   getVendor(id: number): Promise<VendorRow | null>;
+  /** An order's obligations to a printer (its milestones). */
+  vendorObligations(orderId: number): Promise<ObligationRow[]>;
   /** The obligation's latest payout id, or null when it never had one. */
   latestPayoutId(obligationId: number): Promise<number | null>;
   walletUnits(): Promise<number | null>;
@@ -70,6 +72,12 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
       // A refund of a bridge mint would go to the zero address and burn the money.
       if (/^0x0{40}$/i.test(ob.destination)) return blocked("the destination is the zero address");
       if (ob.vendor_id !== null) {
+        // A milestone waits while another of its order is with the owner (a late deposit's first milestone): the owner's
+        // decision comes first, and a reject settles this one too. Blocked, not escalated: the owner already has the question.
+        if (ob.order_id !== null) {
+          const held = (await ctx.vendorObligations(ob.order_id)).find((o) => o.id !== ob.id && o.status === "escalated");
+          if (held) return blocked(`milestone #${held.id} waits for the owner's decision`);
+        }
         // A printer is paid only while it is a partner, and only where it is registered now (a pause clears that).
         const vendor = await ctx.getVendor(ob.vendor_id);
         const printer = `printer #${ob.vendor_id}`;

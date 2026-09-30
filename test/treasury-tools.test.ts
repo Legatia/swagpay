@@ -18,6 +18,7 @@ function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null;
     policy,
     async getObligation(id) { return obligations.find((x) => x.id === id) ?? null; },
     async getVendor(id) { return (o.vendors ?? []).find((v) => v.id === id) ?? null; },
+    async vendorObligations(orderId) { return obligations.filter((x) => x.order_id === orderId && x.vendor_id !== null); },
     async latestPayoutId() { return o.latestPayout ?? null; },
     async walletUnits() { return o.balance === undefined ? 10_000_000_000 : o.balance; },
     async payoutsLast24h() { return o.last24h ?? 0; },
@@ -207,6 +208,26 @@ describe("treasury tools", () => {
         expect(state.escalations).toEqual([]);
         expect(state.decisions[0]).toMatchObject({ verdict: "block", outcome: "blocked" });
       }
+    });
+
+    it("holds a milestone, without asking the owner again, while another milestone of its order waits for the owner", async () => {
+      const m1 = milestone({ id: 1, status: "escalated" });
+      const m2 = milestone({ id: 2 });
+      const { h, state } = fake([m1, m2], { vendors: [vendor()] });
+      const r = await h.pay_obligation({ obligationId: 2, reason: "second milestone is due" });
+      expect(r).toEqual({ content: "Not paid: milestone #1 waits for the owner's decision.", isError: true });
+      expect(state.queued).toEqual([]);
+      expect(state.escalations).toEqual([]);
+      expect(state.escalated).toEqual([]);
+      expect(state.decisions[0]).toMatchObject({ verdict: "block", outcome: "blocked", detail: "milestone #1 waits for the owner's decision" });
+      // Once the owner approved milestone 1, both go out.
+      const approved = fake([milestone({ id: 1, status: "approved", approved_by: "owner" }), m2], { vendors: [vendor()] });
+      expect((await approved.h.pay_obligation({ obligationId: 1, reason: "owner approved" })).content).toMatch(/^Queued payout/);
+      expect((await approved.h.pay_obligation({ obligationId: 2, reason: "second milestone is due" })).content).toMatch(/^Queued payout/);
+      expect(approved.state.queued).toEqual([1, 2]);
+      // Another order's escalated milestone, or this order's escalated refund, holds nothing.
+      const other = fake([milestone({ id: 1, status: "escalated", order_id: 8 }), ob({ id: 3, kind: "refund", status: "escalated", destination: "0x9999999999999999999999999999999999999999", chain: "ARC" }), m2], { vendors: [vendor()] });
+      expect((await other.h.pay_obligation({ obligationId: 2, reason: "second milestone is due" })).content).toMatch(/^Queued payout/);
     });
 
     it("keeps the per-payout and 24-hour limits for a milestone", async () => {

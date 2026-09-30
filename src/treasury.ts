@@ -133,6 +133,20 @@ export async function unpaidVendorObligations(db: D1Database, orderId: number): 
     .all<ObligationRow>()).results;
 }
 
+/** An order's obligations to a printer (its milestones), oldest first, each with its latest payout's status and ref (null without one). */
+export async function vendorObligations(
+  db: D1Database, orderId: number,
+): Promise<Array<ObligationRow & { payout_status: PayoutRow["status"] | null; payout_ref: string | null }>> {
+  return (await db
+    .prepare(
+      `SELECT o.*, p.status AS payout_status, p.result_ref AS payout_ref FROM obligations o
+         LEFT JOIN payouts p ON p.id = (SELECT MAX(id) FROM payouts WHERE obligation_id = o.id)
+       WHERE o.order_id = ? AND o.vendor_id IS NOT NULL ORDER BY o.id`,
+    )
+    .bind(orderId)
+    .all<ObligationRow & { payout_status: PayoutRow["status"] | null; payout_ref: string | null }>()).results;
+}
+
 /** The id of an obligation's latest payout, or null when it never had one. */
 export async function latestPayoutId(db: D1Database, obligationId: number): Promise<number | null> {
   return (await db.prepare("SELECT MAX(id) AS id FROM payouts WHERE obligation_id = ?").bind(obligationId).first<{ id: number | null }>())?.id ?? null;
