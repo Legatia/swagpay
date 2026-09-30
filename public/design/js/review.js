@@ -79,6 +79,12 @@ async function send() {
       a.hidden = false;
     }
     renderReview(store.get());
+    // The button was disabled while sending, which dropped keyboard focus to the page. Put it back
+    // so the person can fix the form and press Send again.
+    if (!$("send").disabled) $("send").focus();
+    // The fixed bottom bar covers the lower edge of the form on a phone; scroll-margin on these two
+    // keeps the message clear of it.
+    ($("order-link").hidden ? $("send-error") : $("order-link")).scrollIntoView({ block: "nearest" });
   }
 }
 

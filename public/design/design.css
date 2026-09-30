@@ -74,6 +74,7 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 .send-status p, .send-error { margin: 0; }
 .send-error { color: var(--error, #b91e5a); font-weight: 700; }
 .send-error:empty { display: none; }
+.send-error, .order-link { scroll-margin-bottom: 96px; }
 .order-link { font-weight: 700; min-height: 44px; display: inline-flex; align-items: center; }
 .send-status[hidden], .order-link[hidden] { display: none; }
 .sizes { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
