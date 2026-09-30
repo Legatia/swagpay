@@ -328,7 +328,8 @@ function init() {
 
 init();
 // A page restored from the back-forward cache keeps stale state (sending stuck, a store that no
-// longer saves), so start over from the saved draft.
+// longer saves), so start over from the saved draft. Only when the draft is fully on disk: if it
+// isn't, keep the restored page, which still holds the design.
 window.addEventListener("pageshow", (e) => {
-  if (e.persisted) location.reload();
+  if (e.persisted && storageWritable && store.saveProblem() === null) location.reload();
 });
