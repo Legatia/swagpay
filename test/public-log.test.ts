@@ -45,6 +45,10 @@ describe("public log and metrics", () => {
     expect(redactReason("Order 12 is paid")).toBe("Order 12 is paid");
     for (const keep of ["2026-10-08", "1500.000000", "USDC only", "20 USDCx"]) expect(redactReason(keep)).toBe(keep);
     expect(redactReason("call 600 123 456")).toBe("call [phone]");
+    // Every currency /cost takes, amount first or currency first, as a code or a symbol.
+    expect(redactReason("a 350 GBP job, 20000 inr or 1,200.50 £ and 900₹")).toBe("a [amount] job, [amount] or [amount] and [amount]");
+    expect(redactReason("GBP 350, INR 20,000, £12.50 and ₹ 900")).toBe("[amount], [amount], [amount] and [amount]");
+    for (const keep of ["GBP only", "INR rates", "£ and ₹ signs"]) expect(redactReason(keep)).toBe(keep);
   });
 
   it("counts money in and out and decisions made against escalated", async () => {

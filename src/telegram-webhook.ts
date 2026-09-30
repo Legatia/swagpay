@@ -5,7 +5,7 @@ import { TREASURY_NAME } from "./agent/treasury-agent";
 import { fetchNbpRate } from "./fx";
 import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
 import { createPaymentRequest } from "./payments";
-import { warsawTime } from "./quote-text";
+import { costRequestWithoutPrinters, warsawTime } from "./quote-text";
 import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
 import { decideObligation, setObligationStatus, unpaidVendorObligations, vendorObligations, waitingVendorObligations } from "./treasury";
@@ -82,7 +82,8 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
         const agent = await getAgentByName(env.OrderAgent, order.instance);
         const cost = row.kind === "cost" && row.status === "approved" ? /^(\d+\.\d{2}) PLN(?:; ([\s\S]*))?$/.exec(row.decision_note ?? "") : null;
         if (cost) await agent.setPrinterCost(row.id, Number(cost[1]), cost[2] ?? null);
-        else await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.summary }, decision, row.decision_note);
+        // A cost request's printer suggestions name printers: the agent gets the request without them.
+        else await agent.ownerDecision({ id: row.id, kind: row.kind, summary: row.kind === "cost" ? costRequestWithoutPrinters(row.summary) : row.summary }, decision, row.decision_note);
       }
     }
     await markDelivered(env.DB, row.id);
@@ -233,9 +234,9 @@ export async function giveCost(
   if (!(grosze >= 1)) return "That's less than 0.01 PLN; nothing was recorded.";
   const pln = `${formatCents(grosze)} PLN`;
 
-  // deliver() reads the leading "<pln> PLN"; the rest reaches the order agent as the owner's note. It names the
-  // printer only when the job is being proposed to it.
-  const named = vendor && !keptJob ? `printer #${vendor.id} ${vendor.name}` : null;
+  // deliver() reads the leading "<pln> PLN"; the rest reaches the order agent as the owner's note. It gives the printer's
+  // number (never its name: the agent's reasons are public) only when the job is being proposed to it.
+  const named = vendor && !keptJob ? `printer #${vendor.id}` : null;
   const decisionNote = [pln, conversion?.noted, named, note].filter(Boolean).join("; ");
   const row = await decideEscalation(env.DB, id, "approved", decisionNote, opts.now);
   if (!row) return `#${id} is already ${(await getEscalation(env.DB, id))?.status ?? "decided"}.`;

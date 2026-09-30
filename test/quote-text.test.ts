@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { itemsKey } from "../src/order-spec";
 import { DEFAULT_POLICY } from "../src/policy";
-import { costRequestText, itemLine, priceBand, quoteText, warsawTime } from "../src/quote-text";
+import { costRequestText, costRequestWithoutPrinters, itemLine, priceBand, quoteText, warsawTime } from "../src/quote-text";
 import type { QuoteRow } from "../src/quotes";
 import { completeSpec } from "./fixtures";
 
@@ -34,6 +34,20 @@ describe("quote texts", () => {
     ]);
     const none = costRequestText(7, completeSpec, by, "Kolektyw3", undefined, []).split("\n");
     expect(none.slice(-2)).toEqual(["No screened printer found for this city yet.", "Reply /cost <this #> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]"]);
+  });
+
+  it("drops the printer suggestions (and all after them) from a cost request forwarded to the order agent", () => {
+    const by = new Date("2099-10-08T15:00:00Z");
+    const plain = costRequestText(7, completeSpec, by, "Kolektyw3", "two colours");
+    const head = plain.split("\n").slice(0, -1).join("\n");
+    const cases: Array<string[] | null> = [["v3 Secret Print (screen; covers all; 0 jobs, 0 on time)"], [], null];
+    for (const suggestions of cases) {
+      const text = costRequestText(7, completeSpec, by, "Kolektyw3", "two colours", suggestions);
+      expect(costRequestWithoutPrinters(text)).toBe(head);
+    }
+    // A summary without suggestions (older requests) is left as it is.
+    expect(costRequestWithoutPrinters(plain)).toBe(plain);
+    expect(costRequestWithoutPrinters("Printer cost again")).toBe("Printer cost again");
   });
 
   it("writes the quote the host sees", () => {

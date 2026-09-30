@@ -15,11 +15,11 @@ export function redactReason(text: string): string {
   return text
     .replace(/[^\s@<>"']+@[^\s@<>"']+\.[a-z]{2,}/gi, "[email]")
     // A lookahead, not \b, ends the currency: \b never matches after "zł" (ł is not an ASCII word character).
-    .replace(/\b\d+(?:[.,]\d+)*\s*(?:USDC|EURC|PLN|USD|EUR|zł)(?![\p{L}\p{N}_])/giu, "[amount]")
+    .replace(/\b\d+(?:[.,]\d+)*\s*(?:USDC|EURC|PLN|USD|EUR|GBP|INR|zł|£|₹)(?![\p{L}\p{N}_])/giu, "[amount]")
     // The whole hex run is matched, so only a 40-hex one is an address; a 64-hex tx hash survives.
     .replace(/0x[0-9a-f]+|\+\d[\d\s()-]{7,}\d|\b\d{3}[\s-]\d{3}[\s-]\d{3}\b|\b\d{9,}\b/gi, (m) => (/^0x/i.test(m) ? (m.length === 42 ? "[address]" : m) : "[phone]"))
     // Currency first ("USDC 257.50", "€12"); after the addresses, so "USD 0x…" can't eat an address's leading 0.
-    .replace(/(?:\b(?:USDC|EURC|PLN|USD|EUR)|[$€])\s*\d+(?:[.,]\d+)*/giu, "[amount]");
+    .replace(/(?:\b(?:USDC|EURC|PLN|USD|EUR|GBP|INR)|[$€£₹])\s*\d+(?:[.,]\d+)*/giu, "[amount]");
 }
 
 /** Both agents' decisions, newest first: tool, reason and outcome only; never inputs. */

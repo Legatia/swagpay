@@ -38,6 +38,16 @@ export function costRequestText(orderNumber: number, spec: OrderSpec, deliverBy:
   ].join("\n");
 }
 
+/** Printer lines in a cost request start here: the owner reads them; the order agent never does (its reasons are public). */
+const PRINTER_LINES = /^(?:Suggested printers:|City not recognised|No screened printer)/;
+
+/** A cost request as the order agent may read it: everything from the printer suggestions on is dropped. */
+export function costRequestWithoutPrinters(summary: string): string {
+  const lines = summary.split("\n");
+  const at = lines.findIndex((l) => PRINTER_LINES.test(l));
+  return at === -1 ? summary : lines.slice(0, at).join("\n");
+}
+
 export function quoteText(q: QuoteRow): string {
   return `Quote #${q.id}: ${formatCents(q.price_cents)} ${q.currency} for the whole order, delivery included. Deposit: ${formatCents(q.deposit_cents)} ${q.currency}, paid in ${TOKEN_FOR[q.currency]} on Arc; the rest is due before delivery. Valid until ${warsawTime(new Date(q.valid_until))} (Warsaw time). Accept it on this page to get the payment details.`;
 }

@@ -499,13 +499,15 @@ describe("Telegram webhook", () => {
     expect(t.sent).toEqual([`#${e.id}: 1489.36 PLN (350.00 EUR at 4.2553) recorded for order ${order.id}; printer #${v} Drukarnia Euro.`]);
     expect(await getEscalation(env.DB, e.id)).toMatchObject({
       status: "approved",
-      decision_note: `1489.36 PLN; 350.00 EUR at 4.2553 PLN (NBP 2026-10-01); printer #${v} Drukarnia Euro; rush job`,
+      decision_note: `1489.36 PLN; 350.00 EUR at 4.2553 PLN (NBP 2026-10-01); printer #${v}; rush job`,
     });
     await runInDurableObject(stub, async (agent: OrderAgent) => {
       expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(148936);
       const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
       expect(inbox).toContain(`Printer cost from the owner (escalation #${e.id}): 1489.36 PLN gross`);
-      expect(inbox).toContain(`Owner's note: "350.00 EUR at 4.2553 PLN (NBP 2026-10-01); printer #${v} Drukarnia Euro; rush job".`);
+      expect(inbox).toContain(`Owner's note: "350.00 EUR at 4.2553 PLN (NBP 2026-10-01); printer #${v}; rush job".`);
+      // The printer by number only: the agent's reasons are public.
+      expect(inbox).not.toContain("Drukarnia");
     });
     expect(await vendorJobFor(env.DB, order.id)).toMatchObject({
       vendor_id: v, status: "proposed", cost_currency: "EUR", cost_cents: 35000, deliver_by: order.deliver_by,
@@ -534,7 +536,7 @@ describe("Telegram webhook", () => {
     const t = fakeTelegram();
     await handleTelegram(update(fromOwner(`/cost ${e.id} v${v} 1000`)), env, { telegram: t.telegram, fetch: noFetch });
     expect(t.sent).toEqual([`#${e.id}: 1000.00 PLN recorded for order ${order.id}; printer #${v} Drukarnia Partner.`]);
-    expect((await getEscalation(env.DB, e.id))?.decision_note).toBe(`1000.00 PLN; printer #${v} Drukarnia Partner`);
+    expect((await getEscalation(env.DB, e.id))?.decision_note).toBe(`1000.00 PLN; printer #${v}`);
     await runInDurableObject(stub, async (agent: OrderAgent) => {
       expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(100000);
     });
@@ -647,7 +649,7 @@ describe("Telegram webhook", () => {
     const t = fakeTelegram();
     await handleTelegram(update(fromOwner(`/cost ${e.id} 1200 v${second}`)), env, { telegram: t.telegram, fetch: noFetch });
     expect(t.sent).toEqual([`#${e.id}: 1200.00 PLN recorded for order ${order.id}; printer #${second} Chosen Print.`]);
-    expect(await costLine(stub, e.id)).toContain(`Owner's note: "printer #${second} Chosen Print".`);
+    expect(await costLine(stub, e.id)).toContain(`Owner's note: "printer #${second}".`);
     expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: second, status: "proposed", cost_currency: "PLN", cost_cents: 120_000 });
   });
 
@@ -667,6 +669,27 @@ describe("Telegram webhook", () => {
     expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: v, status: "proposed", cost_currency: "EUR", cost_cents: 35_000 });
     // The agent's note doesn't name the printer when the owner didn't.
     expect(await costLine(stub, again.id)).not.toContain("printer #");
+  });
+
+  it("a rejected cost request reaches the order agent without the suggested printers", async () => {
+    await addVendor({ name: "Suggested Secret Print", status: "partner" });
+    const { stub, e } = await orderWithCostRequest();
+    // The owner sees the suggestions.
+    const lines = e.summary.split("\n");
+    const from = lines.indexOf("Suggested printers:");
+    expect(from).toBeGreaterThan(0);
+    const suggested = lines.slice(from + 1, -1);
+    expect(suggested.length).toBeGreaterThan(0);
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/reject ${e.id} too busy`)), env, t);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const told = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).find((x) => x.startsWith(`Owner decision on escalation #${e.id} `))!;
+      expect(told).toContain(`Printer cost needed for order`);
+      expect(told).toContain("rejected");
+      expect(told).not.toContain("Suggested printers");
+      for (const line of suggested) expect(told).not.toContain(line.split(" (")[0]);
+      expect(told).not.toContain("Reply /cost");
+    });
   });
 
   it("records the printer's job even when the agent can't be told", async () => {
