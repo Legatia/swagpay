@@ -6,6 +6,7 @@ import { TREASURY_PROMPT } from "../src/agent/treasury-prompt";
 import { createEscalation, listEscalations } from "../src/escalations";
 import { handleTelegram } from "../src/telegram-webhook";
 import { createObligation, getObligation, listQueuedPayouts, queuePayout, recordPayoutResult, setObligationStatus } from "../src/treasury";
+import { setVendorStatus } from "../src/vendors";
 import { newOrderRow } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
@@ -211,5 +212,59 @@ describe("TreasuryAgent", () => {
     expect(lines).toContain(`- #${m2.id} printer_cost order ${order.id}: 128.750000 USDC to BASE printer #${v}, waiting (due after printing)`);
     expect(lines.join("\n")).not.toContain("Drukarnia Secret");
     expect(TREASURY_PROMPT).toContain("Printer costs for a partner printer go straight to the printer in two milestones: pay the first when the deposit completes and the second once it is due after printing. Pay only to the printer's registered address; if a printer is paused or its address changed, escalate.");
+  });
+
+  it("a paused printer's milestone goes to the owner once; approving re-checks it, rejecting settles it", async () => {
+    const { order } = await newOrderRow();
+    const at = "2099-01-01T10:00:00.000Z";
+    const address = "0x" + "cd".repeat(20);
+    const v = (await env.DB.prepare(
+      "INSERT INTO vendors (name, city, country, methods, status, payout_address, payout_chain, source_ref, created_at, updated_at) VALUES ('Drukarnia Hidden', 'Warsaw', 'PL', '[]', 'partner', ?, 'BASE', ?, ?, ?)",
+    ).bind(address, `ta:${crypto.randomUUID()}`, at, at).run()).meta.last_row_id as number;
+    const m1 = await createObligation(env.DB, {
+      orderId: order.id, kind: "printer_cost", token: "USDC", amountUnits: 128_750_000, destination: address, chain: "BASE", dueAt: new Date(),
+      sourceRef: `m1:${crypto.randomUUID()}`, vendorId: v,
+    });
+    await setVendorStatus(env.DB, v, "paused");
+    const stub = await getAgentByName(env.TreasuryAgent, "treasury");
+    const payTwice = async () => runInDurableObject(stub, async (agent: TreasuryAgent) => {
+      agent.telegramOverride = quiet;
+      agent.rpcOverride = rich;
+      agent.modelOverride = scriptedModel([
+        msg([toolUse("pay_obligation", { obligationId: m1.id, reason: "first milestone is due" })], "tool_use"),
+        msg([toolUse("pay_obligation", { obligationId: m1.id, reason: "try once more" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      await agent.notify(`Milestone obligation #${m1.id} is due.`);
+      await agent.processTurn();
+    });
+    const asked = async () => (await listEscalations(env.DB))
+      .filter((x) => x.summary.startsWith(`Treasury: printer_cost obligation #${m1.id} `))
+      .sort((a, b) => a.id - b.id);
+    const queuedFor = async () => (await listQueuedPayouts(env.DB, 200)).filter((p) => p.obligation_id === m1.id);
+
+    await payTwice();
+    expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "escalated" });
+    const first = await asked();
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ kind: "approval", order_id: null });
+    expect(JSON.parse(first[0].payload_json)).toEqual({ obligationId: m1.id });
+    expect(first[0].summary).toContain(`can't be paid: printer #${v} is not a partner.`);
+    expect(first[0].summary).not.toContain("Drukarnia");
+    expect(await queuedFor()).toEqual([]);
+
+    // Approve: the treasury re-checks, and a still-paused printer goes back to the owner.
+    await SELF.fetch(fromOwner(`/approve ${first[0].id}`));
+    expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "approved", approved_by: "owner" });
+    await payTwice();
+    expect((await getObligation(env.DB, m1.id))?.status).toBe("escalated");
+    const again = await asked();
+    expect(again).toHaveLength(2);
+    expect(await queuedFor()).toEqual([]);
+
+    // Reject: the owner pays it by hand or it isn't owed.
+    await SELF.fetch(fromOwner(`/reject ${again[1].id}`));
+    expect((await getObligation(env.DB, m1.id))?.status).toBe("settled");
+    expect(await inboxOf()).not.toContain("Drukarnia");
   });
 });

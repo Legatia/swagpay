@@ -1,7 +1,7 @@
 import { getAgentByName } from "agents";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, decodeTransfer, type RpcClient } from "./arc";
 import { getOrderById, setOrderStatus, type OrderRow } from "./db";
-import { createEscalation } from "./escalations";
+import { createEscalation, type EscalationRow } from "./escalations";
 import { formatCents, formatUnits, isAddress, type Token } from "./money";
 import { applyClaims, depositPaid, getPaymentRequest, listUnnotified, markNotified, recordTransfer, type NewTransfer, type PaymentRequestRow, type TransferOutcome, type TransferRow } from "./payments";
 import { DEFAULT_POLICY, loadPolicy } from "./policy";
@@ -47,7 +47,8 @@ export const MAX_CURSOR_AHEAD_BLOCKS = 1000;
 /** A chain code the wallet runner accepts (as `/vendor <#> pay` stores it). */
 const CHAIN_CODE = /^[A-Z][A-Z0-9-]{1,23}$/;
 
-type Milestones = { vendor: VendorRow | null; m1: ObligationRow; m2: ObligationRow };
+/** m2 is null only when m1 already covers the whole printer cost (a retry after the cost changed). */
+type Milestones = { vendor: VendorRow | null; m1: ObligationRow; m2: ObligationRow | null };
 
 /**
  * A partner printer with a registered USDC payout is paid by the treasury directly, in two printer_cost obligations that add up to
@@ -77,38 +78,55 @@ async function createMilestones(
       dueAt: new Date(), sourceRef: `${ref}:m1`, status: o.late ? "escalated" : "open", vendorId: vendor.id,
     });
   }
-  // Milestone 2 goes where milestone 1 goes, and takes the rest of the cost.
+  // Milestone 2 goes where milestone 1 goes, and takes the rest of the cost. Never a milestone of 0 units.
+  const rest = o.total - m1.amount_units;
+  if (rest <= 0) {
+    console.error("no milestone 2: milestone 1 already covers the printer cost", m1.id, m1.amount_units, o.total);
+    return { vendor, m1, m2: await getObligationByRef(env.DB, `${ref}:m2`) };
+  }
   const m2 = await createObligation(env.DB, {
-    orderId: o.orderId, kind: "printer_cost", token: m1.token, amountUnits: Math.max(0, o.total - m1.amount_units), destination: m1.destination, chain: m1.chain,
+    orderId: o.orderId, kind: "printer_cost", token: m1.token, amountUnits: rest, destination: m1.destination, chain: m1.chain,
     dueAt: new Date(), sourceRef: `${ref}:m2`, status: "waiting", ...(m1.vendor_id !== null ? { vendorId: m1.vendor_id } : {}),
   });
   return { vendor, m1, m2 };
 }
 
-/** Tells the owner and the treasury that a partner printer is paid in milestones. A late deposit's approval carries milestone 1. */
+/**
+ * Tells the owner and the treasury that a partner printer is paid in milestones. A late deposit's approval carries milestone 1;
+ * the owner's decision forwards its summary to the treasury, so it names the printer by number only, like the treasury's notice.
+ */
 async function announceMilestones(
   env: Env, telegram: TelegramClient,
   o: { order: OrderRow; request: PaymentRequestRow; transfer: TransferRow; paid: number; late: boolean; milestones: Milestones },
 ): Promise<void> {
   const { order, request: r, transfer: t, paid, late } = o;
   const { vendor, m1, m2 } = o.milestones;
+  const printer = `printer #${m1.vendor_id}`;
   const units = (ob: ObligationRow) => `${formatUnits(ob.amount_units)} ${ob.token}`;
-  const plan = `Printer #${m1.vendor_id}${vendor ? ` ${vendor.name} (${vendor.status})` : ""} is paid by the treasury in two milestones: #${m1.id} (${units(m1)}) ${late ? "once you approve" : "now"}, #${m2.id} (${units(m2)}) after /printed.`;
   const got = `(${formatUnits(paid)} ${r.token}, tx ${t.tx_hash})`;
   // obligationId: on the late approval, the owner's decision moves milestone 1 (deliver()); on the notice it is a reference only.
   const payload = { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, obligationId: m1.id };
-  const e = late
-    ? await createEscalation(env.DB, {
+  let e: EscalationRow;
+  if (late) {
+    const plan = m2 ? `in two milestones (#${m1.id} now, #${m2.id} after /printed)` : `(#${m1.id} now)`;
+    e = await createEscalation(env.DB, {
       orderId: order.id, kind: "approval", payload,
-      summary: `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) ${got}. ${plan} Approve if printing is still possible, then send the job to the printer with the files from the order page. Reject to handle it yourself; #${m2.id} still waits for /printed.`,
-    })
-    : await createEscalation(env.DB, {
-      orderId: order.id, kind: "payment", payload,
-      summary: `Order ${order.id}: deposit paid ${got}. ${plan} Send the job to the printer with the files from the order page.`,
+      summary: `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) ${got}. Approve if printing is still possible: the treasury pays ${printer} ${plan}. Reject to handle the printer yourself: ${m2 ? "neither milestone is then paid by the treasury" : "the treasury then pays nothing"}.`,
     });
+  } else {
+    // Not forwarded to the treasury (a payment notice only settles a manual cost), so it may name the printer.
+    const plan = m2
+      ? `is paid by the treasury in two milestones: #${m1.id} (${units(m1)}) now, #${m2.id} (${units(m2)}) after /printed`
+      : `is paid by the treasury: #${m1.id} (${units(m1)}) now`;
+    e = await createEscalation(env.DB, {
+      orderId: order.id, kind: "payment", payload,
+      summary: `Order ${order.id}: deposit paid ${got}. Printer #${m1.vendor_id}${vendor ? ` ${vendor.name} (${vendor.status})` : ""} ${plan}. Send the job to the printer with the files from the order page.`,
+    });
+  }
   await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   // No printer name: the treasury's reasons are public.
-  await tellTreasury(env, `Order ${order.id}: deposit completed${late ? " LATE (the owner must first confirm printing is still possible)" : ""}. The printer cost goes straight to printer #${m1.vendor_id} in two milestones: obligation #${m1.id} ${units(m1)} now (${m1.status}), and obligation #${m2.id} ${units(m2)} once the owner reports the job printed (${m2.status}).`);
+  const second = m2 ? `, and obligation #${m2.id} ${units(m2)} once the owner reports the job printed (${m2.status})` : "";
+  await tellTreasury(env, `Order ${order.id}: deposit completed${late ? " LATE (the owner must first confirm printing is still possible)" : ""}. The printer cost goes straight to ${printer}${m2 ? " in two milestones" : ""}: obligation #${m1.id} ${units(m1)} now (${m1.status})${second}.`);
 }
 
 /** Tells the order's agent (and the host's thread) about a credited transfer; escalates overpayment. Reports the request as it stood when this transfer was credited. */

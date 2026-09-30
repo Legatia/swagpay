@@ -609,7 +609,9 @@ describe("partner printers paid in two milestones", () => {
     const approvals = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.kind === "approval");
     expect(approvals).toHaveLength(1);
     expect(approvals[0].summary).toContain(`Order ${order.id}: deposit paid LATE (due ${warsawTime(due)} Warsaw time)`);
-    expect(approvals[0].summary).toContain(`Printer #${v} Drukarnia Late (partner) is paid by the treasury in two milestones: #${m1.id} (128.750000 USDC) once you approve, #${m2.id} (128.750000 USDC) after /printed.`);
+    expect(approvals[0].summary).toContain(`Approve if printing is still possible: the treasury pays printer #${v} in two milestones (#${m1.id} now, #${m2.id} after /printed). Reject to handle the printer yourself: neither milestone is then paid by the treasury.`);
+    // The owner's decision forwards this summary to the treasury, whose reasons are public: no printer name.
+    expect(approvals[0].summary).not.toContain("Drukarnia");
     expect(JSON.parse(approvals[0].payload_json).obligationId).toBe(m1.id);
     expect((await listEscalations(env.DB)).some((x) => x.order_id === order.id && x.kind === "payment" && x.summary.includes("deposit paid"))).toBe(false);
     expect((await vendorJobFor(env.DB, order.id))?.status).toBe("booked");
@@ -620,6 +622,50 @@ describe("partner printers paid in two milestones", () => {
     await handleTelegram(ack, env, { telegram: silent });
     expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "approved", approved_by: "owner" });
     expect(await getObligation(env.DB, m2.id)).toMatchObject({ status: "waiting", approved_by: null });
+    expect((await treasuryInbox()).some((x) => x.includes(`Owner decision on escalation #${approvals[0].id} `))).toBe(true);
+    expect((await treasuryInbox()).join("\n")).not.toContain("Drukarnia");
+  });
+
+  it("rejecting a late deposit's approval settles both milestones, so /printed then releases nothing", async () => {
+    const due = new Date(Date.now() - 3_600_000);
+    const { order, req } = await pendingDeposit(4141, { dueBy: due });
+    const v = await partner("Drukarnia Rejected");
+    await propose(order.id, v);
+    await setLastBlock(6000);
+    await runWatcher(env, { rpc: fakeRpc(6040, [usdcLog(6005, req.amount_units, 4141)]).rpc, telegram: silent });
+    const [m1, m2] = await obligationsOf(order.id);
+    const approval = (await listEscalations(env.DB)).find((x) => x.order_id === order.id && x.kind === "approval")!;
+    const owner = (text: string) => new Request("https://swagpay.test/api/telegram", {
+      method: "POST", headers: { "x-telegram-bot-api-secret-token": "test-secret" },
+      body: JSON.stringify({ message: { chat: { id: 42 }, text } }),
+    });
+    await handleTelegram(owner(`/reject ${approval.id}`), env, { telegram: silent });
+    expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "settled" });
+    expect(await getObligation(env.DB, m2.id)).toMatchObject({ status: "settled", approved_by: "owner" });
+    expect((await treasuryInbox()).join("\n")).not.toContain("Drukarnia");
+    await env.DB.prepare("UPDATE quotes SET status = 'accepted' WHERE id = ?").bind(req.quote_id).run();
+    const sent: string[] = [];
+    await handleTelegram(owner(`/printed ${order.id}`), env, { telegram: { async send(_c, text) { sent.push(text); return 1; }, async answerCallback() {} } });
+    expect(sent[0]).toMatch(new RegExp(`^Order ${order.id}: printed; balance request #\\d+ for .* is on the order page\\.$`));
+    expect((await getObligation(env.DB, m2.id))?.status).toBe("settled");
+    expect((await treasuryInbox()).some((x) => x.includes(`milestone obligation #${m2.id} `))).toBe(false);
+  });
+
+  it("never records a milestone 2 of 0 units", async () => {
+    // A first attempt recorded a milestone 1 that already covers the whole printer cost.
+    const { order, req } = await pendingDeposit(4444);
+    const v = await partner();
+    await propose(order.id, v);
+    const m1 = await createObligation(env.DB, {
+      orderId: order.id, kind: "printer_cost", token: "USDC", amountUnits: 257_500_000, destination: VADDR, chain: "BASE",
+      dueAt: new Date(), sourceRef: `printer_cost:quote:${req.quote_id}:m1`, vendorId: v,
+    });
+    await setLastBlock(6100);
+    await runWatcher(env, { rpc: fakeRpc(6140, [usdcLog(6105, req.amount_units, 4444)]).rpc, telegram: silent });
+    expect((await obligationsOf(order.id)).map((o) => o.id)).toEqual([m1.id]);
+    const notice = (await listEscalations(env.DB)).find((x) => x.order_id === order.id && x.summary.includes("deposit paid"))!;
+    expect(notice.summary).toContain(`#${m1.id} (257.500000 USDC) now.`);
+    expect(notice.summary).not.toContain("after /printed");
   });
 
   it("keeps the owner's single printer cost for a screened printer, and still books the job", async () => {

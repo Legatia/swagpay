@@ -212,6 +212,21 @@ export async function recordPayoutResult(
   return obligation ? { payout, obligation } : null;
 }
 
+/** Queued payouts to a printer that is no longer a partner at the payout's address and chain (paused, gone, or registered elsewhere). */
+export async function payoutsToWithhold(db: D1Database): Promise<Array<{ payoutId: number; vendorId: number }>> {
+  return (await db
+    .prepare(
+      `SELECT p.id AS payoutId, o.vendor_id AS vendorId FROM payouts p
+         JOIN obligations o ON o.id = p.obligation_id
+         LEFT JOIN vendors v ON v.id = o.vendor_id
+       WHERE p.status = 'queued' AND o.vendor_id IS NOT NULL
+         AND (v.id IS NULL OR v.status != 'partner' OR v.payout_address IS NULL OR v.payout_chain IS NULL
+           OR lower(v.payout_address) != lower(p.destination) OR v.payout_chain != p.chain)
+       ORDER BY p.id`,
+    )
+    .all<{ payoutId: number; vendorId: number }>()).results;
+}
+
 export async function listQueuedPayouts(db: D1Database, limit = 20): Promise<PayoutRow[]> {
   return (await db.prepare("SELECT * FROM payouts WHERE status = 'queued' ORDER BY id LIMIT ?").bind(limit).all<PayoutRow>()).results;
 }

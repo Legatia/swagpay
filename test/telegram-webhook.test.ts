@@ -10,7 +10,7 @@ import { IntakeSchema } from "../src/intake";
 import { listPaymentRequests } from "../src/payments";
 import { HELP, handleTelegram, parseCostArgs } from "../src/telegram-webhook";
 import type { TelegramClient } from "../src/telegram";
-import { createObligation, getObligation } from "../src/treasury";
+import { createObligation, getObligation, queuePayout, recordPayoutResult } from "../src/treasury";
 import { getVendor, markJob, proposeVendorJob, vendorJobFor, type VendorStatus } from "../src/vendors";
 import { completeSpec, insertQuote, newOrderRow } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
@@ -153,6 +153,7 @@ describe("Telegram webhook", () => {
     const VADDR = "0x" + "ab".repeat(20);
     const treasuryInbox = async () => runInDurableObject(await getAgentByName(env.TreasuryAgent, "treasury"), async (agent: TreasuryAgent) =>
       agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n"));
+    const setObligationStatusDirect = (id: number, status: string) => env.DB.prepare("UPDATE obligations SET status = ? WHERE id = ?").bind(status, id).run();
     /** A deposit-paid order booked with a partner printer: milestone 1 open, milestone 2 waiting. */
     async function bookedWithPartner(o: { priceCents?: number; depositCents?: number } = {}) {
       const paid = await paidDepositOrder(o);
@@ -210,6 +211,49 @@ describe("Telegram webhook", () => {
       // Once released, a repeat is the usual answer.
       await handleTelegram(update(fromOwner(`/printed ${stuck.order.id}`)), env, t);
       expect(t.sent[2]).toBe(`Order ${stuck.order.id} is balance_pending; /printed works once the deposit is paid.`);
+    });
+
+    it("still answers when the release fails, and says to send /printed again", async () => {
+      const { order, m2 } = await bookedWithPartner();
+      // D1 fails only for the waiting-milestone lookup.
+      const db = env.DB;
+      const flaky = new Proxy(db, {
+        get(target, key) {
+          if (key === "prepare") {
+            return (sql: string) => {
+              if (sql.includes("vendor_id IS NOT NULL")) throw new Error("D1 unavailable");
+              return target.prepare(sql);
+            };
+          }
+          const value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const t = fakeTelegram();
+      await handleTelegram(update(fromOwner(`/printed ${order.id}`)), ({ ...env, DB: flaky }) as Env, t);
+      expect(t.sent[0]).toMatch(new RegExp(`^Order ${order.id}: printed; balance request #\\d+ for .* is on the order page\\. The printer's second milestone wasn't released; send /printed ${order.id} again\\.$`));
+      expect((await getObligation(env.DB, m2.id))?.status).toBe("waiting");
+      expect((await getOrderById(env.DB, order.id))?.status).toBe("balance_pending");
+      await handleTelegram(update(fromOwner(`/printed ${order.id}`)), env, t);
+      expect(t.sent[1]).toContain(`Order ${order.id} was already printed. `);
+      expect((await getObligation(env.DB, m2.id))?.status).toBe("open");
+    });
+
+    it("rejecting an over-limit or failed-payout escalation on milestone 1 leaves milestone 2 waiting", async () => {
+      const limit = await bookedWithPartner();
+      await setObligationStatusDirect(limit.m1.id, "escalated");
+      const overLimit = await createEscalation(env.DB, { orderId: null, kind: "approval", summary: "Treasury: over the limit", payload: { obligationId: limit.m1.id } });
+      const failed = await bookedWithPartner();
+      const payout = (await queuePayout(env.DB, failed.m1))!;
+      await recordPayoutResult(env.DB, payout.id, { status: "failed", error: "RPC timeout" });
+      const failedPayout = await createEscalation(env.DB, { orderId: null, kind: "approval", summary: "Payout failed", payload: { obligationId: failed.m1.id, payoutId: payout.id } });
+      const t = fakeTelegram();
+      await handleTelegram(update(fromOwner(`/reject ${overLimit.id}`)), env, t);
+      await handleTelegram(update(fromOwner(`/reject ${failedPayout.id}`)), env, t);
+      expect((await getObligation(env.DB, limit.m1.id))?.status).toBe("settled");
+      expect((await getObligation(env.DB, failed.m1.id))?.status).toBe("settled");
+      expect((await getObligation(env.DB, limit.m2.id))?.status).toBe("waiting");
+      expect((await getObligation(env.DB, failed.m2.id))?.status).toBe("waiting");
     });
 
     it("never opens a milestone before the deposit is paid", async () => {
@@ -605,6 +649,24 @@ describe("Telegram webhook", () => {
     expect(t.sent).toEqual([`#${e.id}: 1200.00 PLN recorded for order ${order.id}; printer #${second} Chosen Print.`]);
     expect(await costLine(stub, e.id)).toContain(`Owner's note: "printer #${second} Chosen Print".`);
     expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: second, status: "proposed", cost_currency: "PLN", cost_cents: 120_000 });
+  });
+
+  it("/cost without a printer keeps the proposed printer and gives its job the new cost", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const v = await addVendor({ name: "Kept Print", status: "partner" });
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1000 v${v}`)), env, { telegram: t.telegram, fetch: noFetch });
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: v, status: "proposed", cost_currency: "PLN", cost_cents: 100_000 });
+    // The agent asks again for the same order (say, the design changed).
+    const again = await createEscalation(env.DB, { orderId: order.id, kind: "cost", summary: "Printer cost again", payload: {} });
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.sql`INSERT INTO escalated (key, escalation_id) VALUES (${`cost:again-${again.id}`}, ${again.id})`;
+    });
+    await handleTelegram(update(fromOwner(`/cost ${again.id} 350 EUR`)), env, { telegram: t.telegram, fetch: nbp(4.2553) });
+    expect(t.sent[1]).toBe(`#${again.id}: 1489.36 PLN (350.00 EUR at 4.2553) recorded for order ${order.id}; printer #${v} kept; add v<#> to change it.`);
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: v, status: "proposed", cost_currency: "EUR", cost_cents: 35_000 });
+    // The agent's note doesn't name the printer when the owner didn't.
+    expect(await costLine(stub, again.id)).not.toContain("printer #");
   });
 
   it("records the printer's job even when the agent can't be told", async () => {

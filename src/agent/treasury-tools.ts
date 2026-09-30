@@ -14,6 +14,7 @@ export interface TreasuryContext extends DecisionLogger {
   payoutsLast24h(): Promise<number>;
   queuedUnits(): Promise<number>;
   queuePayout(ob: ObligationRow): Promise<PayoutRow | null>;
+  /** An open or approved obligation waits for the owner: the owner's decision moves it on. */
   markEscalated(id: number): Promise<void>;
   holdObligation(id: number, hours: number, note: string): Promise<void>;
   orderMargin(orderId: number): Promise<{ status: string; token: Token; receivedUnits: number; printerCostUnits: number } | null>;
@@ -37,17 +38,19 @@ export const TREASURY_TOOLS: BetaTool[] = [
 
 export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolHandler> {
   const blocked = (detail: string): Logged => ({ verdict: "block", outcome: "blocked", detail, result: { content: `Not paid: ${detail}.`, isError: true } });
-  const overLimit = async (ob: ObligationRow, what: string): Promise<Logged> => {
+  const toOwner = async (key: string, ob: ObligationRow, summary: string, what: string): Promise<Logged> => {
     // No order id: deliver() would otherwise tell the order's agent (and so the host's thread) about treasury internals.
-    const e = await ctx.escalateOnce(`limit:${ob.id}`, {
-      orderId: null, kind: "approval",
-      summary: `Treasury: ${ob.kind} obligation #${ob.id}${ob.order_id !== null ? ` (order ${ob.order_id})` : ""} for ${formatUnits(ob.amount_units)} ${ob.token} is ${what}. Approve to let the treasury agent pay it anyway (Circle's own limit still applies); reject to handle it yourself.`,
-      payload: { obligationId: ob.id },
-    });
+    const e = await ctx.escalateOnce(key, { orderId: null, kind: "approval", summary, payload: { obligationId: ob.id } });
     // Later turns must not retry it and raise the escalation count; the owner's decision moves it on.
     await ctx.markEscalated(ob.id);
     return { verdict: "escalate", outcome: "escalated", detail: `#${e.id}`, result: { content: `Not paid: ${what}. ${e.created ? "Sent to the owner" : "Waiting for the owner"} (#${e.id}); their decision arrives as an event.` } };
   };
+  const named = (ob: ObligationRow) => `${ob.kind} obligation #${ob.id}${ob.order_id !== null ? ` (order ${ob.order_id})` : ""}`;
+  const overLimit = (ob: ObligationRow, what: string): Promise<Logged> => toOwner(`limit:${ob.id}`, ob,
+    `Treasury: ${named(ob)} for ${formatUnits(ob.amount_units)} ${ob.token} is ${what}. Approve to let the treasury agent pay it anyway (Circle's own limit still applies); reject to handle it yourself.`, what);
+  // The printer by number only: the owner's decision forwards this text to the treasury, whose reasons are public.
+  const printerMoved = (ob: ObligationRow, what: string, why: string): Promise<Logged> => toOwner(`printer:${ob.id}`, ob,
+    `Treasury: ${named(ob)} can't be paid: printer #${ob.vendor_id} ${why}. Approve once the printer is registered again (the treasury re-checks); reject if you pay it by hand or it isn't owed (that settles it).`, what);
 
   return {
     pay_obligation: logged(ctx, "pay_obligation", PayInput, async ({ obligationId }) => {
@@ -66,9 +69,11 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
         // A printer is paid only while it is a partner, and only where it is registered now (a pause clears that).
         const vendor = await ctx.getVendor(ob.vendor_id);
         const printer = `printer #${ob.vendor_id}`;
-        if (!vendor || vendor.status !== "partner") return blocked(`${printer} is not a partner`);
-        if (!vendor.payout_address || vendor.payout_address.toLowerCase() !== ob.destination.toLowerCase()) return blocked(`the destination is not ${printer}'s registered address`);
-        if (!vendor.payout_chain || vendor.payout_chain !== ob.chain) return blocked(`the chain is not ${printer}'s registered chain`);
+        const address = `the destination is not ${printer}'s registered address`;
+        if (!vendor || vendor.status !== "partner") return printerMoved(ob, `${printer} is not a partner`, "is not a partner");
+        if (!vendor.payout_address) return printerMoved(ob, address, "has no registered address");
+        if (vendor.payout_address.toLowerCase() !== ob.destination.toLowerCase()) return printerMoved(ob, address, "is registered at another address");
+        if (!vendor.payout_chain || vendor.payout_chain !== ob.chain) return printerMoved(ob, `the chain is not ${printer}'s registered chain`, "is registered on another chain");
       } else {
         const expected = ob.kind === "printer_cost" ? ctx.policy.payoutAddress : ob.kind === "reserve" ? ctx.policy.reserveAddress : ob.destination;
         if (!expected || expected.toLowerCase() !== ob.destination.toLowerCase()) return blocked(`the destination ${ob.destination} is not the configured address`);

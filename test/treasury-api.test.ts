@@ -5,6 +5,7 @@ import type { TreasuryAgent } from "../src/agent/treasury-agent";
 import { listEscalations } from "../src/escalations";
 import { handleTreasuryApi } from "../src/treasury-api";
 import { createObligation, getObligation, queuePayout } from "../src/treasury";
+import { setVendorPayout, setVendorStatus } from "../src/vendors";
 
 const auth = { authorization: "Bearer runner-secret" };
 async function queued(amountUnits = 12_345_678) {
@@ -88,5 +89,69 @@ describe("treasury runner API", () => {
   it("rejects malformed results", async () => {
     const { payout } = await queued();
     expect((await postResult(payout.id, { status: "maybe" })).status).toBe(400);
+  });
+
+  describe("a printer's queued payout", () => {
+    const at = "2099-01-01T10:00:00.000Z";
+    const VADDR = "0x" + "ab".repeat(20);
+    async function queuedToPrinter() {
+      const v = (await env.DB.prepare(
+        "INSERT INTO vendors (name, city, country, methods, status, payout_address, payout_chain, source_ref, created_at, updated_at) VALUES ('Drukarnia Queue', 'Warsaw', 'PL', '[]', 'partner', ?, 'BASE', ?, ?, ?)",
+      ).bind(VADDR, `api:${crypto.randomUUID()}`, at, at).run()).meta.last_row_id as number;
+      const ob = await createObligation(env.DB, {
+        orderId: null, kind: "printer_cost", token: "USDC", amountUnits: 128_750_000, destination: VADDR, chain: "BASE", dueAt: new Date(),
+        sourceRef: `api:m1:${crypto.randomUUID()}`, vendorId: v,
+      });
+      return { v, ob, payout: (await queuePayout(env.DB, ob))! };
+    }
+    const list = async () => (await (await SELF.fetch("https://swagpay.test/api/treasury/payouts", { headers: auth })).json<{ payouts: Array<{ id: number }> }>()).payouts.map((p) => p.id);
+    const payoutStatus = async (id: number) => (await env.DB.prepare("SELECT status, error FROM payouts WHERE id = ?").bind(id).first<{ status: string; error: string | null }>())!;
+    const treasuryInbox = async () => runInDurableObject(await getAgentByName(env.TreasuryAgent, "treasury"), async (agent: TreasuryAgent) =>
+      agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n"));
+
+    it("is handed to the runner while its printer is a partner at that address and chain", async () => {
+      const { payout } = await queuedToPrinter();
+      expect(await list()).toContain(payout.id);
+      expect((await payoutStatus(payout.id)).status).toBe("queued");
+    });
+
+    it("is withheld once the printer is paused: the payout and its obligation fail, and the owner decides", async () => {
+      const { v, ob, payout } = await queuedToPrinter();
+      await setVendorStatus(env.DB, v, "paused");
+      expect(await list()).not.toContain(payout.id);
+      expect(await payoutStatus(payout.id)).toEqual({ status: "failed", error: `withheld: printer #${v} is no longer a partner at this address and chain` });
+      expect((await getObligation(env.DB, ob.id))?.status).toBe("failed");
+      const asked = (await listEscalations(env.DB)).filter((x) => JSON.parse(x.payload_json).payoutId === payout.id);
+      expect(asked).toHaveLength(1);
+      expect(asked[0].kind).toBe("approval");
+      expect(JSON.parse(asked[0].payload_json)).toEqual({ obligationId: ob.id, payoutId: payout.id });
+      expect(asked[0].summary).toContain(`Payout #${payout.id}`);
+      expect(asked[0].summary).toContain(`withheld: printer #${v} is no longer a partner at this address and chain`);
+      expect(asked[0].summary).toContain("check the agent wallet's transaction history");
+      expect(asked[0].summary).not.toContain("runner refused");
+      expect(asked[0].summary).not.toContain("Drukarnia");
+      expect(await treasuryInbox()).toContain(`Payout #${payout.id} for obligation #${ob.id} failed: withheld: printer #${v} is no longer a partner at this address and chain.`);
+      // A second listing doesn't withhold it again.
+      expect(await list()).not.toContain(payout.id);
+      expect((await listEscalations(env.DB)).filter((x) => JSON.parse(x.payload_json).payoutId === payout.id)).toHaveLength(1);
+    });
+
+    it("is withheld when the printer registered another address or chain", async () => {
+      const moved = await queuedToPrinter();
+      expect(await setVendorPayout(env.DB, moved.v, "0x" + "cd".repeat(20), "BASE")).toBe("ok");
+      const rechained = await queuedToPrinter();
+      expect(await setVendorPayout(env.DB, rechained.v, VADDR, "ARC")).toBe("ok");
+      const ids = await list();
+      expect(ids).not.toContain(moved.payout.id);
+      expect(ids).not.toContain(rechained.payout.id);
+      expect((await payoutStatus(moved.payout.id)).status).toBe("failed");
+      expect((await payoutStatus(rechained.payout.id)).status).toBe("failed");
+    });
+
+    it("compares the address without regard to case", async () => {
+      const { v, payout } = await queuedToPrinter();
+      await env.DB.prepare("UPDATE vendors SET payout_address = ? WHERE id = ?").bind("0x" + "AB".repeat(20), v).run();
+      expect(await list()).toContain(payout.id);
+    });
   });
 });

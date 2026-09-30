@@ -161,7 +161,8 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
         createReserve: (orderId, units, token) => insertObligation(this.env.DB, {
           orderId, kind: "reserve", token, amountUnits: units, destination: p.reserveAddress ?? "", chain: "ARC", dueAt: new Date(), sourceRef: `reserve:order:${orderId}`,
         }),
-        markEscalated: async (id) => { await setObligationStatus(this.env.DB, id, ["open"], "escalated"); },
+        // "approved": an owner-approved obligation whose printer moved goes back to the owner.
+        markEscalated: async (id) => { await setObligationStatus(this.env.DB, id, ["open", "approved"], "escalated"); },
         escalateOnce: (key, e) => this.escalateOnce(key, e),
         logDecision: async (d) => {
           const input = d.input as { orderId?: unknown; obligationId?: unknown } | null;

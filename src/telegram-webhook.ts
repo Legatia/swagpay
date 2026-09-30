@@ -47,13 +47,25 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
   try {
     // First: a failure here delivers nothing, so /resend repeats it (both steps are idempotent).
     // Only real approvals decide an obligation: a payment notice's Acknowledge button must not approve a payout.
-    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown; payoutId?: unknown; treasury?: unknown; manual?: unknown } | null; } catch { return null; } })();
+    const payload = (() => { try { return JSON.parse(row.payload_json) as { obligationId?: unknown; payoutId?: unknown; requestId?: unknown; treasury?: unknown; manual?: unknown } | null; } catch { return null; } })();
     const decision = row.status as "approved" | "rejected";
     if (row.kind === "approval" && typeof payload?.obligationId === "number") {
       const obligationId = payload.obligationId;
       // A failed payout may have been broadcast; only the escalation of its latest payout (it carries payoutId) may reopen it.
       const ob = await decideObligation(env.DB, obligationId, decision, typeof payload.payoutId === "number" ? payload.payoutId : null);
-      const now = ob === null ? "" : ob.status === "settled" ? " (now settled by the owner)" : ` (now ${ob.status})`;
+      let also = "";
+      // A late deposit's approval carries its deposit request and never a payout. Rejecting it means the owner handles the
+      // printer, so the treasury pays neither milestone. Other rejections (a limit, a failed payout, a printer that moved) settle
+      // only their own obligation.
+      if (decision === "rejected" && ob?.status === "settled" && ob.vendor_id !== null && ob.order_id !== null
+        && typeof payload.requestId === "number" && payload.payoutId === undefined) {
+        const settled: number[] = [];
+        for (const w of await waitingVendorObligations(env.DB, ob.order_id)) {
+          if (await setObligationStatus(env.DB, w.id, ["waiting"], "settled", { approvedBy: "owner" })) settled.push(w.id);
+        }
+        if (settled.length) also = `; waiting milestone ${settled.map((id) => `#${id}`).join(", ")} settled too`;
+      }
+      const now = ob === null ? "" : ob.status === "settled" ? ` (now settled by the owner${also})` : ` (now ${ob.status})`;
       const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
       await treasury.ownerDecision({ id: row.id, summary: `obligation #${obligationId}${now}: ${row.summary}` }, decision, row.decision_note);
     } else if (payload?.treasury === true) {
@@ -230,7 +242,19 @@ export async function giveCost(
   // The job is recorded before the agent is told, so a failed delivery (retried with /resend) doesn't lose it.
   let printer = "";
   if (keptJob) printer = `; printer unchanged (job already ${keptJob.status})`;
-  else if (vendor && order) {
+  else if (!vendor && row.order_id !== null) {
+    // No printer named: a proposed job keeps its printer and takes this cost, so the printer is paid the latest cost given.
+    try {
+      const job = await vendorJobFor(env.DB, row.order_id);
+      if (job?.status === "proposed") {
+        const kept = await proposeVendorJob(env.DB, { orderId: row.order_id, vendorId: job.vendor_id, deliverBy: job.deliver_by, currency, cents }, opts.now);
+        printer = kept ? `; printer #${job.vendor_id} kept; add v<#> to change it` : `; printer #${job.vendor_id}'s job NOT updated (it moved on)`;
+      }
+    } catch (err) {
+      console.error("vendor job cost not updated", id, err);
+      printer = `; the printer's job cost was NOT updated (${err instanceof Error ? err.message : String(err)})`;
+    }
+  } else if (vendor && order) {
     try {
       const job = await proposeVendorJob(env.DB, { orderId: order.id, vendorId: vendor.id, deliverBy: order.deliver_by, currency, cents }, opts.now);
       if (job) printer = `; printer #${vendor.id} ${vendor.name}`;
@@ -246,7 +270,7 @@ export async function giveCost(
   }
   const summary = `${pln}${conversion?.shown ?? ""} recorded for order ${row.order_id}${printer}`;
   if (!(await deliver(env, row))) {
-    return `#${id} approved${conversion || vendor ? ` (${summary})` : ""}, but the agent could not be told. Send /resend ${id} to retry.`;
+    return `#${id} approved${conversion || vendor || printer ? ` (${summary})` : ""}, but the agent could not be told. Send /resend ${id} to retry.`;
   }
   return `#${id}: ${summary}.`;
 }
@@ -286,6 +310,16 @@ async function releaseMilestones(env: Env, orderId: number, now: Date): Promise<
   return lines.join(" ");
 }
 
+/** releaseMilestones for /printed's reply: a failure is logged and the owner is asked to send /printed again, which retries it. */
+async function releaseOrSay(env: Env, orderId: number, now: Date): Promise<string> {
+  try {
+    return await releaseMilestones(env, orderId, now);
+  } catch (err) {
+    console.error("could not release the printer's second milestone", orderId, err);
+    return `The printer's second milestone wasn't released; send /printed ${orderId} again.`;
+  }
+}
+
 /** The owner reports the printer finished: request the balance (or mark the order paid when nothing is left), and open the printer's second milestone. */
 export async function markPrinted(env: Env, n: number, now: Date = new Date()): Promise<string> {
   const order = await getOrderById(env.DB, n);
@@ -302,7 +336,7 @@ export async function markPrinted(env: Env, n: number, now: Date = new Date()): 
   const balanceCents = quote.price_cents - quote.deposit_cents;
   if (balanceCents <= 0) {
     if (!(await setOrderStatus(env.DB, n, ["deposit_paid"], "balance_paid"))) return `Order ${n} changed; try again.`;
-    const released = await releaseMilestones(env, n, now);
+    const released = await releaseOrSay(env, n, now);
     await agent.pushEvent('The owner reports the job is printed. Nothing more is due. When the swag arrives, ask the host to press "We received it" on the order page.', "Printing done. Nothing more is due.");
     return `Order ${n}: printed; nothing more is due.${released ? ` ${released}` : ""}`;
   }
@@ -310,7 +344,7 @@ export async function markPrinted(env: Env, n: number, now: Date = new Date()): 
   const dueBy = new Date(Math.max(Date.parse(order.deliver_by), now.getTime() + 24 * 3_600_000));
   const request = await createPaymentRequest(env.DB, { orderId: n, quoteId: quote.id, stage: "balance", token: TOKEN_FOR[quote.currency], cents: balanceCents, dueBy }, now);
   if (!(await setOrderStatus(env.DB, n, ["deposit_paid"], "balance_pending"))) return `Order ${n} changed; try again.`;
-  const released = await releaseMilestones(env, n, now);
+  const released = await releaseOrSay(env, n, now);
   const amount = `${formatUnits(request.amount_units)} ${request.token}`;
   await agent.pushEvent(
     `The owner reports the job is printed. Balance request #${request.id}: ${amount} on Arc, due by ${warsawTime(new Date(request.due_by))} (Warsaw time). Tell the host the balance is on the order page.`,

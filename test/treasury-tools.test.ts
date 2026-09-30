@@ -13,7 +13,7 @@ function ob(o: Partial<ObligationRow> = {}): ObligationRow {
 }
 
 function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null; last24h: number; queued: number; margin: { status: string; token: "USDC"; receivedUnits: number; printerCostUnits: number } | null; vendors: VendorRow[] }> = {}) {
-  const state = { queued: [] as number[], held: [] as [number, number][], reserves: [] as [number, number][], escalations: [] as string[], escalated: [] as number[], decisions: [] as Array<Record<string, unknown>> };
+  const state = { queued: [] as number[], held: [] as [number, number][], reserves: [] as [number, number][], escalations: [] as string[], escalationKeys: [] as string[], escalationPayloads: [] as unknown[], escalated: [] as number[], decisions: [] as Array<Record<string, unknown>> };
   const ctx: TreasuryContext = {
     policy,
     async getObligation(id) { return obligations.find((x) => x.id === id) ?? null; },
@@ -30,7 +30,7 @@ function fake(obligations: ObligationRow[], o: Partial<{ balance: number | null;
       state.reserves.push([orderId, units]);
       return { obligation: ob({ id: 50, kind: "reserve", amount_units: state.reserves[0][1], destination: RESERVE, chain: "ARC" }), created: state.reserves.length === 1 };
     },
-    async escalateOnce(key, e) { state.escalations.push(e.summary); return { id: 9, created: state.escalations.length === 1 }; },
+    async escalateOnce(key, e) { state.escalations.push(e.summary); state.escalationKeys.push(key); state.escalationPayloads.push(e.payload); return { id: 9, created: state.escalations.length === 1 }; },
     async logDecision(d) { state.decisions.push(d as unknown as Record<string, unknown>); },
   };
   return { state, h: makeTreasuryHandlers(ctx) };
@@ -154,28 +154,49 @@ describe("treasury tools", () => {
       expect((await mixed.h.pay_obligation({ obligationId: 1, reason: "first milestone" })).content).toMatch(/^Queued payout/);
     });
 
-    it("blocks a milestone for a printer that isn't a partner, whose address or chain changed, or that is still waiting", async () => {
-      const cases: Array<[ObligationRow, VendorRow[], string]> = [
+    it("sends a milestone whose printer isn't a partner, or whose address or chain changed, to the owner", async () => {
+      const cases: Array<[ObligationRow, VendorRow[], string, string]> = [
         // Pausing clears the payout, as the registry does.
-        [milestone(), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner"],
-        [milestone(), [vendor({ status: "screened", payout_address: null, payout_chain: null })], "printer #3 is not a partner"],
-        [milestone(), [], "printer #3 is not a partner"],
+        [milestone(), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner", "is not a partner"],
+        [milestone(), [vendor({ status: "screened", payout_address: null, payout_chain: null })], "printer #3 is not a partner", "is not a partner"],
+        [milestone(), [], "printer #3 is not a partner", "is not a partner"],
         // The owner's approval of a late deposit doesn't pass a paused printer.
-        [milestone({ status: "approved", approved_by: "owner" }), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner"],
-        [milestone(), [vendor({ payout_address: "0x" + "cd".repeat(20) })], "the destination is not printer #3's registered address"],
-        [milestone(), [vendor({ payout_address: null, payout_chain: null })], "the destination is not printer #3's registered address"],
-        [milestone(), [vendor({ payout_chain: "ARC" })], "the chain is not printer #3's registered chain"],
-        [milestone({ chain: "MATIC" }), [vendor()], "the chain is not printer #3's registered chain"],
-        [milestone({ status: "waiting" }), [vendor()], "obligation #1 is waiting"],
-        [milestone({ token: "EURC" }), [vendor()], "only USDC payouts are configured"],
-        [milestone(), [vendor()], "not enough USDC"],
+        [milestone({ status: "approved", approved_by: "owner" }), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner", "is not a partner"],
+        [milestone(), [vendor({ payout_address: "0x" + "cd".repeat(20) })], "the destination is not printer #3's registered address", "is registered at another address"],
+        [milestone(), [vendor({ payout_address: null, payout_chain: null })], "the destination is not printer #3's registered address", "has no registered address"],
+        [milestone(), [vendor({ payout_chain: "ARC" })], "the chain is not printer #3's registered chain", "is registered on another chain"],
+        [milestone({ chain: "MATIC" }), [vendor()], "the chain is not printer #3's registered chain", "is registered on another chain"],
       ];
-      for (const [o, vendors, text] of cases) {
-        const { h, state } = fake([o], { vendors, ...(text === "not enough USDC" ? { balance: 100_000_000 } : {}) });
+      for (const [o, vendors, what, why] of cases) {
+        const { h, state } = fake([o], { vendors });
+        const r = await h.pay_obligation({ obligationId: 1, reason: "try" });
+        expect(r.content, what).toBe(`Not paid: ${what}. Sent to the owner (#9); their decision arrives as an event.`);
+        expect(state.queued).toEqual([]);
+        expect(state.escalated).toEqual([1]);
+        expect(state.escalationKeys).toEqual(["printer:1"]);
+        expect(state.escalationPayloads).toEqual([{ obligationId: 1 }]);
+        expect(state.escalations).toEqual([
+          `Treasury: printer_cost obligation #1 (order 7) can't be paid: printer #3 ${why}. Approve once the printer is registered again (the treasury re-checks); reject if you pay it by hand or it isn't owed (that settles it).`,
+        ]);
+        // #3 only: the printer's name never reaches the treasury's texts.
+        expect(state.escalations[0]).not.toContain("Drukarnia");
+        expect(state.decisions[0]).toMatchObject({ verdict: "escalate", outcome: "escalated", detail: "#9" });
+      }
+    });
+
+    it("blocks a waiting milestone, a non-USDC one and one the wallet can't cover", async () => {
+      const cases: Array<[ObligationRow, Partial<{ balance: number }>, string]> = [
+        [milestone({ status: "waiting" }), {}, "obligation #1 is waiting"],
+        [milestone({ token: "EURC" }), {}, "only USDC payouts are configured"],
+        [milestone(), { balance: 100_000_000 }, "not enough USDC"],
+      ];
+      for (const [o, opts, text] of cases) {
+        const { h, state } = fake([o], { vendors: [vendor()], ...opts });
         const r = await h.pay_obligation({ obligationId: 1, reason: "try" });
         expect(r.isError, text).toBe(true);
         expect(String(r.content)).toContain(text);
         expect(state.queued).toEqual([]);
+        expect(state.escalations).toEqual([]);
         expect(state.decisions[0]).toMatchObject({ verdict: "block", outcome: "blocked" });
       }
     });
