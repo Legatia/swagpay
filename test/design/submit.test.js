@@ -245,6 +245,17 @@ describe("sendOrder", () => {
     });
   });
 
+  it("starts over when the order is gone", async () => {
+    const fake = backend({ upload: [json(404, { error: "order not found" })] });
+    const d = deps(fake);
+    const pending = { token: TOKEN, url: `/o/${TOKEN}`, uploaded: {} };
+    await expect(sendOrder({ spec, files, intake, pending, deps: d.deps })).rejects.toMatchObject({
+      message: "That order no longer exists. Send again to start a new one.",
+      reset: true,
+      url: null,
+    });
+  });
+
   it("explains a design that can't change any more", async () => {
     const fake = backend({ design: [json(409, { error: "A quote was already accepted; the design can't change now." })] });
     const d = deps(fake);

@@ -7,6 +7,7 @@ export class SendError extends Error {
   constructor(message, url = null) {
     super(message);
     this.url = url;
+    this.reset = false;
   }
 }
 
@@ -82,6 +83,7 @@ const HUMAN = "The human check didn't pass. Tick the box above if it shows one, 
 const FILES_FULL = "This order already has as many files as it can take. Continue on your order page and tell the agent what changed.";
 const ACCEPTED = "A quote was already accepted, so the design can't change now. Continue on your order page.";
 const TOO_LARGE = "This design is too large to send. Remove a text layer or two, then send again.";
+const GONE = "That order no longer exists. Send again to start a new one.";
 const NOT_ATTACHED = "Your design couldn't be attached. Send again, or continue on your order page and tell the agent.";
 
 // Status 0 means the request never got an answer (offline, DNS, CORS, aborted).
@@ -128,6 +130,13 @@ async function createOrder(intake, deps) {
   throw new SendError(r.status === 403 ? HUMAN : OFFLINE);
 }
 
+// The order was deleted or the saved token is stale: the caller forgets it and starts over.
+function gone() {
+  const err = new SendError(GONE);
+  err.reset = true;
+  return err;
+}
+
 function failure(r, url) {
   if (retryable(r.status)) return new SendError(OFFLINE, url);
   return new SendError(plainError(r.data?.error), url);
@@ -158,6 +167,7 @@ export async function sendOrder({ spec, files, intake, pending, deps }) {
       deps.savePending(p);
       continue;
     }
+    if (r.status === 404) throw gone();
     if (r.status === 400 && /up to 10 files/.test(r.data?.error ?? "")) throw new SendError(FILES_FULL, p.url);
     throw failure(r, p.url);
   }
@@ -167,6 +177,7 @@ export async function sendOrder({ spec, files, intake, pending, deps }) {
   if (specSize(design) > SPEC_MAX_BYTES) throw new SendError(TOO_LARGE, p.url);
   const r = await withRetry(deps, () => call(deps.fetch, `${base}/design`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(design) }));
   if (r.status === 201) return { url: p.url };
+  if (r.status === 404) throw gone();
   if (r.status === 400) throw new SendError(NOT_ATTACHED, p.url); // the backend's schema message isn't host-readable
   if (r.status === 409) throw new SendError(ACCEPTED, p.url);
   if (r.status === 413) throw new SendError(TOO_LARGE, p.url);

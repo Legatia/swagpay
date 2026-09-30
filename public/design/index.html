@@ -57,12 +57,32 @@
     </section>
 
     <section id="step-review" class="step" aria-labelledby="h-review" hidden>
-      <h1 id="h-review">Review</h1>
+      <h1 id="h-review">Review and send</h1>
       <div class="sheet">
         <p id="summary"></p>
-        <p class="muted">Sending to the agent comes in the next update. For now you can download the files.</p>
-        <div id="downloads" class="downloads"></div>
+        <p id="resume-note" class="muted" hidden>Your order was already created. Send again to finish attaching your design.</p>
       </div>
+      <form id="contact-form" class="sheet">
+        <label>Event name <input name="eventName" required minlength="2" maxlength="120"></label>
+        <div class="row">
+          <label>Event date <input name="eventDate" type="date" required></label>
+          <label>Deliver by (Warsaw time) <input name="deliverBy" type="datetime-local" required></label>
+        </div>
+        <label>Delivery place <input name="deliveryPlace" required minlength="3" maxlength="200"></label>
+        <div class="row">
+          <label>Your name <input name="contactName" required maxlength="80" autocomplete="name"></label>
+          <label>Email <input name="contactEmail" type="email" required maxlength="200" autocomplete="email"></label>
+        </div>
+        <div id="turnstile"></div>
+        <p id="offline" class="muted" hidden>You're offline. Your design is saved on this device; send it when you're back online.</p>
+        <button type="submit" id="send">Send to the agent</button>
+        <div id="send-status" class="send-status" hidden>
+          <img src="/mascot.svg" alt="" width="64" height="66">
+          <p id="send-step" aria-live="polite"></p>
+        </div>
+        <p id="send-error" class="send-error" role="alert"></p>
+        <a id="order-link" class="order-link" hidden>Open your order page</a>
+      </form>
     </section>
 
     <p id="notice" class="notice" role="status"></p>
