@@ -67,10 +67,10 @@ export async function markDelivered(db: D1Database, id: number, now: Date = new 
   await db.prepare("UPDATE escalations SET delivered_at = ? WHERE id = ?").bind(now.toISOString(), id).run();
 }
 
-/** The newest open escalation whose decision moves an obligation (its payload carries the obligationId), or null. */
+/** The newest open approval whose decision moves an obligation (its payload carries the obligationId), or null. Notices only refer to one. */
 export async function openEscalationFor(db: D1Database, obligationId: number): Promise<number | null> {
   return (await db
-    .prepare("SELECT id FROM escalations WHERE status = 'open' AND json_extract(payload_json, '$.obligationId') = ? ORDER BY id DESC LIMIT 1")
+    .prepare("SELECT id FROM escalations WHERE status = 'open' AND kind = 'approval' AND json_extract(payload_json, '$.obligationId') = ? ORDER BY id DESC LIMIT 1")
     .bind(obligationId)
     .first<{ id: number }>())?.id ?? null;
 }

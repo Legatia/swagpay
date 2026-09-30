@@ -5,6 +5,7 @@ import type { TreasuryAgent } from "../src/agent/treasury-agent";
 import { listEscalations } from "../src/escalations";
 import { handleTreasuryApi } from "../src/treasury-api";
 import { createObligation, getObligation, queuePayout } from "../src/treasury";
+import { newOrderRow } from "./fixtures";
 import { setVendorPayout, setVendorStatus } from "../src/vendors";
 
 const auth = { authorization: "Bearer runner-secret" };
@@ -46,6 +47,8 @@ describe("treasury runner API", () => {
     await runInDurableObject(stub, async (agent: TreasuryAgent) => {
       expect(agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n")).toContain(`Payout #${payout.id} for obligation #${ob.id} sent (ref circle-tx-9).`);
     });
+    // Not a printer's: the owner's own payout account needs no notice.
+    expect((await listEscalations(env.DB)).filter((x) => JSON.parse(x.payload_json)?.payoutId === payout.id)).toEqual([]);
   });
 
   it("escalates a payout Circle's limit denied", async () => {
@@ -98,11 +101,12 @@ describe("treasury runner API", () => {
       const v = (await env.DB.prepare(
         "INSERT INTO vendors (name, city, country, methods, status, payout_address, payout_chain, source_ref, created_at, updated_at) VALUES ('Drukarnia Queue', 'Warsaw', 'PL', '[]', 'partner', ?, 'BASE', ?, ?, ?)",
       ).bind(VADDR, `api:${crypto.randomUUID()}`, at, at).run()).meta.last_row_id as number;
+      const { order } = await newOrderRow();
       const ob = await createObligation(env.DB, {
-        orderId: null, kind: "printer_cost", token: "USDC", amountUnits: 128_750_000, destination: VADDR, chain: "BASE", dueAt: new Date(),
+        orderId: order.id, kind: "printer_cost", token: "USDC", amountUnits: 128_750_000, destination: VADDR, chain: "BASE", dueAt: new Date(),
         sourceRef: `api:m1:${crypto.randomUUID()}`, vendorId: v,
       });
-      return { v, ob, payout: (await queuePayout(env.DB, ob))! };
+      return { v, ob, order, payout: (await queuePayout(env.DB, ob))! };
     }
     const list = async () => (await (await SELF.fetch("https://swagpay.test/api/treasury/payouts", { headers: auth })).json<{ payouts: Array<{ id: number }> }>()).payouts.map((p) => p.id);
     const payoutStatus = async (id: number) => (await env.DB.prepare("SELECT status, error FROM payouts WHERE id = ?").bind(id).first<{ status: string; error: string | null }>())!;
@@ -125,11 +129,9 @@ describe("treasury runner API", () => {
       expect(asked).toHaveLength(1);
       expect(asked[0].kind).toBe("approval");
       expect(JSON.parse(asked[0].payload_json)).toEqual({ obligationId: ob.id, payoutId: payout.id });
-      expect(asked[0].summary).toContain(`Payout #${payout.id}`);
-      expect(asked[0].summary).toContain(`withheld: printer #${v} is no longer a partner at this address and chain`);
-      expect(asked[0].summary).toContain("check the agent wallet's transaction history");
-      expect(asked[0].summary).not.toContain("runner refused");
-      expect(asked[0].summary).not.toContain("Drukarnia");
+      expect(asked[0].summary).toBe(
+        `The wallet runner was not given payout #${payout.id} (128.750000 USDC, printer_cost obligation #${ob.id}): printer #${v} is no longer a partner at this address and chain. If the runner fetched it just before, it may still have gone out: check the wallet history. Approve to retry once the printer is registered again, or reject to settle it by hand.`,
+      );
       expect(await treasuryInbox()).toContain(`Payout #${payout.id} for obligation #${ob.id} failed: withheld: printer #${v} is no longer a partner at this address and chain.`);
       // A second listing doesn't withhold it again.
       expect(await list()).not.toContain(payout.id);
@@ -146,6 +148,25 @@ describe("treasury runner API", () => {
       expect(ids).not.toContain(rechained.payout.id);
       expect((await payoutStatus(moved.payout.id)).status).toBe("failed");
       expect((await payoutStatus(rechained.payout.id)).status).toBe("failed");
+    });
+
+    it("tells the owner once when a printer's payout is sent, naming the printer", async () => {
+      const { v, ob, order, payout } = await queuedToPrinter();
+      expect((await postResult(payout.id, { status: "sent", ref: "circle-tx-5" })).status).toBe(200);
+      expect((await postResult(payout.id, { status: "sent", ref: "circle-tx-5" })).status).toBe(409);
+      const told = (await listEscalations(env.DB)).filter((x) => JSON.parse(x.payload_json)?.payoutId === payout.id);
+      expect(told).toHaveLength(1);
+      expect(told[0]).toMatchObject({ kind: "payment", order_id: order.id, status: "open" });
+      expect(told[0].summary).toBe(`Order ${order.id}: printer #${v} Drukarnia Queue milestone #${ob.id} paid, 128.750000 USDC (ref circle-tx-5).`);
+      // Acknowledging it moves no money.
+      await SELF.fetch(new Request("https://swagpay.test/api/telegram", {
+        method: "POST", headers: { "x-telegram-bot-api-secret-token": "test-secret" },
+        body: JSON.stringify({ message: { chat: { id: 42 }, text: `/approve ${told[0].id}` } }),
+      }));
+      expect((await listEscalations(env.DB)).find((x) => x.id === told[0].id)?.status).toBe("approved");
+      expect((await getObligation(env.DB, ob.id))?.status).toBe("paid");
+      // The treasury hears the result without the printer's name.
+      expect(await treasuryInbox()).not.toContain("Drukarnia");
     });
 
     it("compares the address without regard to case", async () => {

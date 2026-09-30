@@ -434,12 +434,24 @@ async function orderStatus(env: Env, n: number): Promise<string> {
   if (!order) return `Order ${n} doesn't exist.`;
   const agent = await getAgentByName(env.OrderAgent, order.instance);
   const view = await agent.getView();
-  return [
+  const lines = [
     `Order ${order.id} · ${order.event_name} · ${order.status}`,
     `Deliver by ${order.deliver_by} to ${order.delivery_place}`,
     `Still missing: ${view.missing.join("; ") || "nothing"}`,
     `Messages: ${view.thread.length}`,
-  ].join("\n");
+  ];
+  // The partner money the owner otherwise sees only as notices: the printer's job and each milestone.
+  const job = await vendorJobFor(env.DB, order.id);
+  if (job) {
+    const vendor = await getVendor(env.DB, job.vendor_id);
+    lines.push(`Job: printer #${job.vendor_id}${vendor ? ` ${vendor.name}` : ""} · ${job.status}`);
+  }
+  const milestones = await vendorObligations(env.DB, order.id);
+  if (milestones.length) {
+    lines.push(`Printer milestones: ${milestones.map((o) =>
+      `#${o.id} ${formatUnits(o.amount_units)} ${o.token} ${o.status}${o.payout_status === "sent" && o.payout_ref ? ` (ref ${o.payout_ref})` : ""}`).join("; ")}`);
+  }
+  return lines.join("\n");
 }
 
 export async function handleTelegram(request: Request, env: Env, deps: { telegram?: TelegramClient; fetch?: typeof fetch } = {}): Promise<Response> {

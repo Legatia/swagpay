@@ -284,7 +284,7 @@ describe("TreasuryAgent", () => {
     // The runner's fetch withholds it; the owner approves a retry.
     await SELF.fetch("https://swagpay.test/api/treasury/payouts", { headers: { authorization: "Bearer runner-secret" } });
     expect((await getObligation(env.DB, m1.id))?.status).toBe("failed");
-    const withheld = (await listEscalations(env.DB)).find((x) => JSON.parse(x.payload_json).payoutId === payout.id && x.summary.includes("withheld"))!;
+    const withheld = (await listEscalations(env.DB)).find((x) => JSON.parse(x.payload_json).payoutId === payout.id && x.summary.includes("The wallet runner was not given payout"))!;
     await SELF.fetch(fromOwner(`/approve ${withheld.id}`));
     expect(await getObligation(env.DB, m1.id)).toMatchObject({ status: "approved", approved_by: "owner" });
 

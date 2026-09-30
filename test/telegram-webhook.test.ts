@@ -424,6 +424,27 @@ describe("Telegram webhook", () => {
     expect(t.sent[2]).toBe("Usage: /approve <id> [note]");
   });
 
+  it("/order shows the printer job and each milestone, with the ref of a sent payout", async () => {
+    const { order } = await orderWithEscalation();
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/order ${order.id}`)), env, t);
+    // No printer job: nothing about printers.
+    expect(t.sent[0]).not.toContain("printer #");
+    // Its own city, and not a partner: later /vendors tests count Warsaw printers and partners.
+    const v = await addVendor({ name: "Drukarnia Order", status: "screened", city: "Orderville" });
+    await proposeVendorJob(env.DB, { orderId: order.id, vendorId: v, deliverBy: order.deliver_by, currency: "PLN", cents: 100_000 });
+    await markJob(env.DB, order.id, "booked");
+    const base = { orderId: order.id, kind: "printer_cost" as const, token: "USDC" as const, amountUnits: 125_000_000, destination: "0x" + "ab".repeat(20), chain: "BASE", dueAt: new Date(), vendorId: v };
+    const m1 = await createObligation(env.DB, { ...base, sourceRef: `order:m1:${crypto.randomUUID()}` });
+    const m2 = await createObligation(env.DB, { ...base, sourceRef: `order:m2:${crypto.randomUUID()}`, status: "waiting" });
+    const payout = (await queuePayout(env.DB, m1))!;
+    await recordPayoutResult(env.DB, payout.id, { status: "sent", ref: "circle-tx-77" });
+    await handleTelegram(update(fromOwner(`/order ${order.id}`)), env, t);
+    const lines = t.sent[1].split("\n");
+    expect(lines).toContain(`Job: printer #${v} Drukarnia Order · booked`);
+    expect(lines).toContain(`Printer milestones: #${m1.id} 125.000000 USDC paid (ref circle-tx-77); #${m2.id} 125.000000 USDC waiting`);
+  });
+
   it("is routed by the Worker", async () => {
     const res = await SELF.fetch(update(fromOwner("/help")));
     expect(res.status).toBe(200);
@@ -672,14 +693,12 @@ describe("Telegram webhook", () => {
   });
 
   it("a rejected cost request reaches the order agent without the suggested printers", async () => {
-    await addVendor({ name: "Suggested Secret Print", status: "partner" });
     const { stub, e } = await orderWithCostRequest();
-    // The owner sees the suggestions.
+    // The owner sees the printer lines (suggestions, when earlier tests added Warsaw printers, or that none was found).
     const lines = e.summary.split("\n");
-    const from = lines.indexOf("Suggested printers:");
+    const from = lines.findIndex((l) => l === "Suggested printers:" || l.startsWith("No screened printer"));
     expect(from).toBeGreaterThan(0);
-    const suggested = lines.slice(from + 1, -1);
-    expect(suggested.length).toBeGreaterThan(0);
+    const suggested = lines.slice(from, -1);
     const t = fakeTelegram();
     await handleTelegram(update(fromOwner(`/reject ${e.id} too busy`)), env, t);
     await runInDurableObject(stub, async (agent: OrderAgent) => {

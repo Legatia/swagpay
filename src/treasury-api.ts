@@ -5,10 +5,17 @@ import { formatUnits } from "./money";
 import { createTelegram, notifyOwner } from "./telegram";
 import { sameSecret } from "./telegram-webhook";
 import { listQueuedPayouts, payoutsToWithhold, recordPayoutResult, type ObligationRow, type PayoutRow } from "./treasury";
+import { getVendor } from "./vendors";
+
+/** The error a withheld payout is recorded with; reportResult gives it its own summary. */
+const WITHHELD = "withheld: ";
 
 const json = (status: number, body: unknown) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 
-/** After a recorded result: a denied or failed payout goes to the owner, who decides any retry; the treasury hears every result. Never throws. */
+/**
+ * After a recorded result: a denied or failed payout goes to the owner, who decides any retry; a printer's sent payout is a notice
+ * to the owner; the treasury hears every result. Never throws.
+ */
 async function reportResult(
   env: Env, done: { payout: PayoutRow; obligation: ObligationRow }, status: "sent" | "denied" | "failed", ref: string | null, error: string | null,
 ): Promise<void> {
@@ -19,7 +26,11 @@ async function reportResult(
       const what = `Payout #${payout.id} (${formatUnits(payout.amount_units)} ${payout.token}, ${obligation.kind} obligation #${obligation.id})`;
       const detail = error ? `: ${error.slice(0, 200)}` : "";
       const refused = status === "failed" && error?.startsWith("runner rejected the payout");
-      const summary = refused
+      // Withheld before the runner's fetch; best-effort only for a batch the runner fetched just before.
+      const withheld = status === "failed" && error?.startsWith(WITHHELD);
+      const summary = withheld
+        ? `The wallet runner was not given payout #${payout.id} (${formatUnits(payout.amount_units)} ${payout.token}, ${obligation.kind} obligation #${obligation.id}): ${error!.slice(WITHHELD.length)}. If the runner fetched it just before, it may still have gone out: check the wallet history. Approve to retry once the printer is registered again, or reject to settle it by hand.`
+        : refused
         ? `The wallet runner refused payout #${payout.id} (${formatUnits(payout.amount_units)} ${payout.token}, ${obligation.kind} obligation #${obligation.id}): ${error}. Nothing was sent. Check the obligation, then approve to let the treasury agent try again or reject to settle it by hand.`
         : status === "denied"
         ? `Circle's spending limit refused payout #${payout.id} (${formatUnits(payout.amount_units)} ${payout.token}, ${obligation.kind} obligation #${obligation.id})${detail}. Check the agent wallet's transaction history before you approve a retry. Raise the limit with \`circle wallet limit\` (OTP) and approve to retry, or reject and pay by hand.`
@@ -31,6 +42,20 @@ async function reportResult(
       await notifyOwner(env.DB, createTelegram(env.TELEGRAM_BOT_TOKEN), env.TELEGRAM_OWNER_CHAT_ID, e);
     } catch (err) {
       console.error("could not escalate a payout result", err);
+    }
+  }
+  if (status === "sent" && obligation.vendor_id !== null) {
+    // The owner sees the printer's money leave. A payment notice is acknowledge-only and never reaches the treasury, so it may name the printer.
+    try {
+      const vendor = await getVendor(env.DB, obligation.vendor_id);
+      const e = await createEscalation(env.DB, {
+        orderId: obligation.order_id, kind: "payment",
+        summary: `Order ${obligation.order_id}: printer #${obligation.vendor_id}${vendor ? ` ${vendor.name}` : ""} milestone #${obligation.id} paid, ${formatUnits(payout.amount_units)} ${payout.token}${ref ? ` (ref ${ref})` : ""}.`,
+        payload: { obligationId: obligation.id, payoutId: payout.id },
+      });
+      await notifyOwner(env.DB, createTelegram(env.TELEGRAM_BOT_TOKEN), env.TELEGRAM_OWNER_CHAT_ID, e);
+    } catch (err) {
+      console.error("could not tell the owner a printer was paid", err);
     }
   }
   try {
@@ -52,7 +77,7 @@ export async function handleTreasuryApi(request: Request, env: Env): Promise<Res
   if (path === "/api/treasury/payouts" && request.method === "GET") {
     // A printer paused or registered elsewhere after its payout was queued: the runner never gets it, and the owner decides.
     for (const w of await payoutsToWithhold(env.DB)) {
-      const error = `withheld: printer #${w.vendorId} is no longer a partner at this address and chain`;
+      const error = `${WITHHELD}printer #${w.vendorId} is no longer a partner at this address and chain`;
       const done = await recordPayoutResult(env.DB, w.payoutId, { status: "failed", error });
       if (done) await reportResult(env, done, "failed", null, error);
     }
