@@ -77,21 +77,26 @@ export async function computeMetrics(db: D1Database): Promise<Metrics> {
 }
 
 export function renderLog(decisions: PublicDecision[], m: Metrics): string {
-  const tile = (label: string, value: string) => `<div class="sheet"><span class="label">${esc(label)}</span><p><strong>${esc(value)}</strong></p></div>`;
-  const rows = decisions
-    .map((d) => `<tr><td>${esc(d.at.slice(0, 16).replace("T", " "))}</td><td>${d.order ?? "—"}</td><td>${esc(d.agent)}</td><td>${esc(d.tool)}</td><td>${esc(d.reason)}</td><td>${esc(d.outcome)}</td></tr>`)
-    .join("");
+  const tile = (label: string, value: string) => `<div class="stat"><span class="label">${esc(label)}</span><strong>${esc(value)}</strong></div>`;
+  const usdc = (units: string) => `${Number(units).toFixed(2)}`;
+  const rows = decisions.length
+    ? decisions
+      .map((d) => `<tr><td class="when">${esc(d.at.slice(0, 16).replace("T", " "))}</td><td>${d.order ?? "—"}</td><td>${esc(d.agent)}</td><td>${esc(d.tool.replace(/_/g, " "))}</td><td>${esc(d.reason)}</td><td>${esc(d.outcome)}</td></tr>`)
+      .join("")
+    : `<tr><td colspan="6" class="muted">No decisions yet. They appear here as the agents work.</td></tr>`;
   const ordersTotal = Object.values(m.orders).reduce((a, b) => a + b, 0);
   return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Decision log · Swagpay</title>
+<link rel="icon" type="image/svg+xml" href="/mark.svg">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700&family=IBM+Plex+Mono:wght@400&display=swap">
 <link rel="stylesheet" href="/app.css"></head>
 <body><main>
-<span class="label">Swagpay</span>
+<a class="site-logo" href="/"><picture><source media="(prefers-color-scheme: dark)" srcset="/logo-on-dark.svg"><img src="/logo.svg" alt="Swagpay" width="298" height="80"></picture></a>
+<span class="label">Public decision log</span>
 <h1>What the agents decided</h1>
-<p class="muted">Every action of the order agent and the treasury agent, with the reason it gave. Limits are enforced in code; anything above them goes to the owner.</p>
-<div class="row">${tile("Orders", String(ordersTotal))}${tile("USDC received", m.received.USDC)}${tile("USDC paid out", m.paidOut.USDC)}</div>
-<div class="row">${tile("Settled by the agent", String(m.obligations.settledByAgent))}${tile("Decisions / escalated", `${m.decisions.total} / ${m.decisions.escalated}`)}</div>
-<section class="sheet"><h2>Decisions</h2><div style="overflow-x:auto"><table><thead><tr><th>When (UTC)</th><th>Order</th><th>Agent</th><th>Action</th><th>Reason</th><th>Outcome</th></tr></thead><tbody>${rows}</tbody></table></div></section>
+<p class="muted">Every action of the order agent and the treasury agent, with the reason it gave. Spending limits are enforced in code; anything above them goes to the owner. Amounts and addresses in reasons are masked.</p>
+<div class="stats">${tile("Orders", String(ordersTotal))}${tile("USDC received", usdc(m.received.USDC))}${tile("USDC paid out", usdc(m.paidOut.USDC))}${tile("Settled by the agent", String(m.obligations.settledByAgent))}${tile("Decisions", String(m.decisions.total))}${tile("Escalated to the owner", String(m.decisions.escalated))}</div>
+<section class="sheet"><h2>Decisions</h2><div class="table-wrap"><table class="log-table"><thead><tr><th>When (UTC)</th><th>Order</th><th>Agent</th><th>Action</th><th>Reason</th><th>Outcome</th></tr></thead><tbody>${rows}</tbody></table></div></section>
 </main></body></html>`;
 }

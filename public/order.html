@@ -14,62 +14,101 @@
 <body>
 <main>
   <picture class="site-logo"><source media="(prefers-color-scheme: dark)" srcset="/logo-on-dark.svg"><img src="/logo.svg" alt="Swagpay" width="298" height="80"></picture>
-  <span class="label" id="job">Order</span>
-  <h1 id="event">Loading…</h1>
-  <p class="muted" id="delivery"></p>
-  <p class="muted">Keep this link private: anyone with it can see and change the order.</p>
+  <header class="order-head">
+    <span class="label" id="job">Order</span>
+    <h1 id="event">Loading…</h1>
+    <p class="muted" id="delivery"></p>
+  </header>
 
-  <section class="sheet">
-    <h2>Order so far</h2>
-    <div id="spec" class="muted">Nothing yet.</div>
-    <div id="missing"></div>
+  <section class="sheet status-box" id="status-box" hidden aria-live="polite">
+    <div class="steps" id="steps" aria-hidden="true"></div>
+    <span class="label" id="step-label"></span>
+    <h2 id="status-title"></h2>
+    <p class="muted" id="status-text"></p>
   </section>
 
   <section class="sheet" id="quote-box" hidden>
-    <h2>Quote</h2>
-    <p id="quote-text"></p>
-    <p class="muted" id="quote-valid"></p>
-    <button type="button" id="accept" hidden>Accept quote</button>
+    <span class="label" id="quote-label">Quote</span>
+    <p class="price"><span id="quote-price"></span> <span class="unit" id="quote-currency"></span></p>
+    <dl class="facts">
+      <dt>Deposit to start printing</dt><dd id="quote-deposit"></dd>
+      <dt>Balance after printing</dt><dd id="quote-balance"></dd>
+      <dt id="quote-valid-label">Valid until</dt><dd id="quote-valid"></dd>
+    </dl>
+    <button type="button" id="accept" class="wide" hidden>Accept quote</button>
+    <p class="muted small" id="accept-note" hidden>Accepting creates the deposit request. You pay in stablecoins on Arc.</p>
   </section>
 
   <section class="sheet" id="pay-box" hidden>
     <h2>Payment</h2>
-    <div id="payments"></div>
-    <p class="muted">Send exactly the amount shown, on Arc, to the address below. If an exchange takes a withdrawal fee from the amount, the difference shows as still due.</p>
-    <p class="mono" id="pay-address"></p>
-    <p class="mono" id="pay-token" hidden></p>
-    <form id="claim-form">
-      <label>Paid? Paste the transaction hash so we can match it faster
-        <input id="tx" maxlength="66" placeholder="0x…" autocomplete="off">
-      </label>
-      <button type="submit" id="claim">Send hash</button>
-    </form>
+    <div id="pay-due" class="pay-due" hidden>
+      <span class="label" id="pay-stage">Deposit due</span>
+      <div class="copy-row">
+        <p class="amount"><span class="mono" id="pay-amount"></span> <span class="unit" id="pay-unit"></span></p>
+        <button type="button" class="copy" data-copy-from="pay-amount">Copy amount</button>
+      </div>
+      <div class="progress" aria-hidden="true"><span id="pay-progress"></span></div>
+      <p class="muted small" id="pay-progress-text"></p>
+      <span class="label">To this address, on Arc</span>
+      <div class="copy-row">
+        <p class="mono address" id="pay-address"></p>
+        <button type="button" class="copy" data-copy-from="pay-address">Copy address</button>
+      </div>
+      <p class="muted small">Send exactly this amount, on Arc, to this address. The last digits identify your order, so don't round it. If an exchange takes a withdrawal fee from the amount, the difference shows as still due. We see the payment within a minute or two, and this page updates by itself.</p>
+      <details>
+        <summary>Token and network details</summary>
+        <p class="mono small" id="pay-token" hidden></p>
+        <p class="mono small" id="pay-network"></p>
+      </details>
+      <details id="claim-details">
+        <summary>Paid, but it isn't showing after a few minutes?</summary>
+        <form id="claim-form">
+          <label>Paste the transaction hash
+            <input id="tx" maxlength="66" placeholder="0x…" autocomplete="off">
+          </label>
+          <button type="submit" id="claim">Send hash</button>
+        </form>
+      </details>
+    </div>
+    <p class="muted" id="pay-waiting" hidden>Payment details will appear here soon.</p>
+    <ul class="paid-list" id="payments"></ul>
   </section>
 
   <section class="sheet" id="received-box" hidden>
     <h2>Delivery</h2>
     <p class="muted">Paid in full. When the swag arrives, confirm it here.</p>
-    <button type="button" id="received">We received it</button>
+    <button type="button" id="received" class="wide">We received it</button>
   </section>
 
-  <section class="sheet">
-    <h2>Artwork</h2>
-    <div id="artwork" class="chips"></div>
-    <label>Upload a file (PNG, JPEG, WebP, GIF, SVG or PDF, up to 10 MB)
-      <input id="file" type="file" accept=".png,.jpg,.jpeg,.webp,.gif,.svg,.pdf">
-    </label>
-  </section>
+  <p class="error" id="error" role="alert"></p>
 
   <section class="sheet">
     <h2>Conversation</h2>
     <div id="thread" class="thread"></div>
     <p class="muted" id="busy" hidden>The agent is working…</p>
     <form id="message-form">
-      <label>Message <textarea id="text" rows="3" maxlength="4000" required></textarea></label>
-      <p class="error" id="error" role="alert"></p>
+      <label>Message the agent <textarea id="text" rows="3" maxlength="4000" required placeholder="Questions, changes, sizes…"></textarea></label>
       <button type="submit" id="send">Send</button>
     </form>
   </section>
+
+  <section class="sheet">
+    <h2>Order so far</h2>
+    <div id="spec" class="spec muted">Nothing yet.</div>
+    <div id="missing"></div>
+  </section>
+
+  <section class="sheet">
+    <h2>Artwork</h2>
+    <div id="artwork" class="chips"></div>
+    <div>
+      <label class="button-secondary" for="file">Upload a file</label>
+      <input id="file" class="visually-hidden" type="file" accept=".png,.jpg,.jpeg,.webp,.gif,.svg,.pdf">
+      <p class="muted small">PNG, JPEG, WebP, GIF, SVG or PDF, up to 10 MB. Vector files (SVG, PDF) print sharpest.</p>
+    </div>
+  </section>
+
+  <p class="muted small footnote">This page is your order: bookmark it to come back. Keep the link private, because anyone with it can see and change the order.</p>
 </main>
 <script src="/order.js"></script>
 </body>

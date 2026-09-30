@@ -25,10 +25,10 @@ it("serves the landing page, the form and the order page", async () => {
 
 it("tells the payer exactly what to send, and the agent to repeat amounts exactly", async () => {
   const page = await (await SELF.fetch(`${base}/o/${"c".repeat(43)}`)).text();
-  expect(page).toContain("Send exactly the amount shown, on Arc, to the address below. If an exchange takes a withdrawal fee from the amount, the difference shows as still due.");
+  expect(page).toContain("Send exactly this amount, on Arc, to this address. The last digits identify your order, so don't round it. If an exchange takes a withdrawal fee from the amount, the difference shows as still due.");
   expect(page).toContain('id="pay-token"');
   const script = await (await SELF.fetch(`${base}/order.js`)).text();
-  expect(script).toContain("send exactly ${p.due} ${p.token} (the rest of this payment)");
+  expect(script).toContain("$(\"pay-amount\").textContent = open.due;");
   expect(script).toContain("Token: ${payTo.tokens[open.token]}");
   // "We received it" closes the order: the host confirms first.
   expect(script).toContain('if (!confirm("Confirm the swag arrived? This closes the order.")) return;');
