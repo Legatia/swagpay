@@ -7,6 +7,7 @@ import { mockupFor } from "./mockups.js";
 import { renderPanel } from "./panel.js";
 import { formatEstimate } from "./pricing.js";
 import { OWNER_NOTE, PRODUCTS, defaultOptions, viewAreas } from "./products.js";
+import { registerServiceWorker, showInstallHint } from "./pwa.js";
 import { layerQuality, qualityMessage } from "./quality.js";
 import { initReview, renderReview } from "./review.js";
 import { buildSpec } from "./spec.js";
@@ -321,6 +322,8 @@ function init() {
   if (loaded.dropped) notice("Your logo wasn't saved on this device, so it was removed. Add it again.");
   store.subscribe(render);
   render();
+  showInstallHint($("install-hint"));
+  registerServiceWorker();
 }
 
 init();
