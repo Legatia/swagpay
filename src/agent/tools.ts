@@ -243,7 +243,14 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         return { verdict: "none", outcome: "done", result: { content: `The owner already gave the printer cost for this order: ${known.toFixed(2)} PLN gross, delivery included. Use send_quote.` } };
       }
       const order = await ctx.orderSummary();
-      const e = await ctx.escalateOnce(`cost:${key}`, "cost", costRequestText(order.number, spec, order.deliverBy, order.deliveryPlace, note, await ctx.suggestPrinters()), { specKey: key });
+      // Suggestions only help the owner: when they can't be read, the request goes out as for an unknown city.
+      let suggestions: string[] | null = null;
+      try {
+        suggestions = await ctx.suggestPrinters();
+      } catch (err) {
+        console.error("printer suggestions unavailable", err);
+      }
+      const e = await ctx.escalateOnce(`cost:${key}`, "cost", costRequestText(order.number, spec, order.deliverBy, order.deliveryPlace, note, suggestions), { specKey: key });
       const content = e.status === "rejected"
         ? `The owner declined to price this order (#${e.id}). Tell the host a person will contact them.`
         : e.created

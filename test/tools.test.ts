@@ -423,6 +423,15 @@ describe("request_printer_cost", () => {
     expect(b.state.escalations[0].summary).toContain("City not recognised from the delivery place; pick a printer yourself.");
   });
 
+  it("still asks for the cost when the printer suggestions fail", async () => {
+    const { h, state, ctx } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    ctx.suggestPrinters = async () => { throw new Error("D1 unavailable"); };
+    const r = await h.request_printer_cost({ reason: "order complete" });
+    expect(r.content).toBe("Asked the owner for the printer cost (#1). It arrives as an event; tell the host you are getting the price.");
+    expect(state.escalations[0].summary).toContain("City not recognised from the delivery place; pick a printer yourself.");
+  });
+
   it("points to send_quote once the cost is known", async () => {
     const { h, state } = fakeCtx();
     state.spec = structuredClone(completeSpec);
