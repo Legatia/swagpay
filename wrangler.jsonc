@@ -13,6 +13,7 @@
   "r2_buckets": [{ "binding": "ARTWORK", "bucket_name": "swagpay-artwork", "jurisdiction": "eu" }],
   "routes": [{ "pattern": "app.swagpay.me", "custom_domain": true }],
   "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
     "MODEL_PROVIDER": "gemini",
     "GEMINI_MODEL": "gemini-3.8-flash",
