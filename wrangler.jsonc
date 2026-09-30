@@ -12,7 +12,8 @@
   ],
   "r2_buckets": [{ "binding": "ARTWORK", "bucket_name": "swagpay-artwork", "jurisdiction": "eu" }],
   "routes": [{ "pattern": "app.swagpay.me", "custom_domain": true }],
-  "triggers": { "crons": ["* * * * *", "17 * * * *", "0 7 * * *"] },
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
     "MODEL_PROVIDER": "gemini",
     "GEMINI_MODEL": "gemini-3.8-flash",
@@ -20,7 +21,7 @@
     "AGENT_AUTORUN": "1",
     "MAX_NEW_ORDERS_PER_DAY": "20",
     "REQUIRE_TURNSTILE": "1",
-    "TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
+    "TURNSTILE_SITE_KEY": "0x4AAAAAAFJklR1Bu4zO6hP5",
     "ACCESS_TEAM_DOMAIN": "https://falling-shape-11d9.cloudflareaccess.com",
     "ACCESS_AUD": "83b69731a99ebd14d410fcf7f5a6670913a5be1a2f00f93516bab5ccc574f8eb",
     "RECEIVING_ADDRESS": "",

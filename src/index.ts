@@ -53,6 +53,6 @@ export default {
     return env.ASSETS.fetch(request);
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(handleScheduled(controller.cron, env).catch((err) => console.error("scheduled job failed", controller.cron, err)));
+    ctx.waitUntil(handleScheduled(controller.cron, env, new Date(controller.scheduledTime)).catch((err) => console.error("scheduled run failed", controller.cron, err)));
   },
 } satisfies ExportedHandler<Env>;

@@ -3,7 +3,7 @@
 // markup, so the editor updates as one unit. When adding a file to public/design/js, add it here too.
 export const CACHE = "swagpay-design-v2";
 
-const SHARED = new Set(["/brand-tokens.css", "/logo.svg", "/logo-on-dark.svg", "/mascot.svg", "/mark.svg", "/apple-touch-icon.png"]);
+const SHARED = new Set(["/brand-tokens.css", "/logo.svg", "/logo-on-dark.svg", "/mascot.svg", "/mark.svg", "/favicon.ico", "/favicon-16.png", "/favicon-32.png", "/apple-touch-icon.png"]);
 const FONT_HOSTS = new Set(["fonts.googleapis.com", "fonts.gstatic.com"]);
 
 export function route(url, origin) {

@@ -4,7 +4,7 @@
 
 ## Idea
 
-**One ribbon, every order.** A flat ribbon turns through an S, linking sponsor payment, local printing, and delivery. Its pale rectangular upper fold gives the agent a friendly face. The full-color icon, one-color marks, mascot, and sticker are built from the same vector geometry.
+The **logo pairs an outlined Swagpay wordmark with a print-registration symbol**: four crop corners around a blue plate. The symbol also works alone as the browser and app icon. The folded ribbon is the agent mascot; use it in conversations, stickers, and campaigns, not in the logo.
 
 Core line: **Swag, paid in stablecoins.**
 
@@ -13,17 +13,20 @@ Core line: **Swag, paid in stablecoins.**
 | File | Use |
 | --- | --- |
 | [`mascot.svg`](../public/mascot.svg) | Editable master vector artwork; scale freely for banners and print |
-| [`logo.svg`](../public/logo.svg), [`logo-on-dark.svg`](../public/logo-on-dark.svg) | Primary horizontal logo on light or dark surfaces |
+| [`logo.svg`](../public/logo.svg), [`logo-on-dark.svg`](../public/logo-on-dark.svg) | Primary symbol and wordmark on light or dark surfaces |
 | [`logo-mono.svg`](../public/logo-mono.svg), [`logo-mono-light.svg`](../public/logo-mono-light.svg), [`logo-mono-magenta.svg`](../public/logo-mono-magenta.svg) | One-ink logo for stamps, shirts, and simple print jobs |
-| [`mark.svg`](../public/mark.svg), [`mark-mono.svg`](../public/mark-mono.svg) | App icon, favicon, compact navigation, or one-ink icon |
+| [`mark.svg`](../public/mark.svg), [`mark-mono.svg`](../public/mark-mono.svg) | Registration symbol for browser and app icons, compact navigation, or one-ink print |
+| [`favicon.ico`](../public/favicon.ico), [`favicon-16.png`](../public/favicon-16.png), [`favicon-32.png`](../public/favicon-32.png) | Browser icon fallbacks at small sizes |
+| [`icon-192.png`](../public/design/icons/icon-192.png), [`icon-512.png`](../public/design/icons/icon-512.png) | Installed app icons |
 | [`mascot-sticker.svg`](../public/mascot-sticker.svg) | 60 mm vector sticker with white border and a separate `CutContour` layer |
 | [`mascot-sticker.pdf`](../public/mascot-sticker.pdf) | Vector proof of the sticker artwork and visible contour |
 | [`mascot-cutline.svg`](../public/mascot-cutline.svg) | Isolated 60 mm cut contour for a printer's template |
 | [`mascot.webp`](../public/mascot.webp), [`agent-avatar.webp`](../public/agent-avatar.webp) | Lightweight transparent character and square agent avatar for web use |
 | [`mascot.png`](../public/mascot.png), [`agent-avatar.png`](../public/agent-avatar.png) | PNG fallbacks and editing references |
+| [`thumbnail.png`](../public/thumbnail.png), [`thumbnail.webp`](../public/thumbnail.webp) | 1200 × 630 social preview; the logo and mascot keep separate roles |
 | [`brand-tokens.css`](../public/brand-tokens.css) | Product color and type tokens, including dark mode |
 
-The wordmark is outlined artwork. Use the supplied file rather than retyping `swagpay`.
+The wordmark is outlined artwork. Use the supplied file rather than retyping `swagpay`. The mascot is never a substitute for the logo or browser icon.
 
 ### Sticker production
 
@@ -66,8 +69,8 @@ Say what happened and what comes next. Be warm and specific about people, paymen
 
 - Allow clear space around a logo equal to at least one quarter of the square mark's height.
 - Use the horizontal logo at 180 px or wider on screens. Below that, use the mark.
-- Keep the square mark at least 24 px wide. Use the supplied SVG favicon, with the 32 px PNG fallback.
-- Keep the mascot at least 64 px tall when its expression matters; use the square mark below that.
+- Keep the full symbol at least 24 px wide outside browser UI. Use the supplied 16/32 px PNG or multi-size ICO fallbacks when an SVG favicon is unsupported.
+- Keep the mascot at least 64 px tall when its expression matters; use the registration symbol below that.
 - Preserve the supplied fold, proportions, expression, and negative space. Do not stretch or rotate the artwork.
 - Use the WebP files on web pages, with PNG fallbacks where needed. Use SVG for new print sizes rather than enlarging a raster export.
 
