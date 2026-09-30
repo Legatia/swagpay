@@ -8,6 +8,16 @@ export function validateUpload({ type, size }) {
   return null;
 }
 
+// The raster type a file really is, from its first bytes. The order API checks content, not the
+// file name, so a JPEG named logo.png must be sent as a JPEG.
+export function sniffImageType(bytes) {
+  const at = (i, ...b) => b.every((v, k) => bytes[i + k] === v);
+  if (at(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
+  if (at(0, 0xff, 0xd8, 0xff)) return "image/jpeg";
+  if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return "image/webp";
+  return null;
+}
+
 function readDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -57,9 +67,16 @@ function dataUrlText(dataUrl) {
 export async function readAsset(file) {
   const problem = validateUpload(file);
   if (problem) throw new Error(problem);
-  const dataUrl = await readDataUrl(file);
-  const result = await naturalSize(dataUrl);
   const vector = file.type === "image/svg+xml";
+  let type = file.type;
+  let source = file;
+  if (!vector) {
+    type = sniffImageType(new Uint8Array(await file.slice(0, 12).arrayBuffer()));
+    if (!type) throw new Error("That image isn't really a PNG, JPEG or WebP. Export it again as PNG or JPEG.");
+    source = new Blob([file], { type });
+  }
+  const dataUrl = await readDataUrl(source);
+  const result = await naturalSize(dataUrl);
   if (!result.ok) throw new Error("That file could not be opened. Try a PNG, JPEG or SVG.");
   let { w, h } = result;
   if (vector) {
@@ -73,11 +90,11 @@ export async function readAsset(file) {
   if (!vector && (!w || !h)) throw new Error("That image could not be opened. Try a PNG or JPEG.");
   return {
     name: file.name.slice(0, 80),
-    type: file.type,
+    type,
     dataUrl,
     pixelWidth: w || 1000,
     pixelHeight: h || 1000,
     vector,
-    hasAlpha: file.type !== "image/jpeg",
+    hasAlpha: type !== "image/jpeg",
   };
 }

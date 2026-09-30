@@ -2,6 +2,7 @@ import { printSvg, stickerSvg } from "./export.js";
 import { TEE, mockupFor } from "./mockups.js";
 import { PRODUCTS } from "./products.js";
 import { canvasBlob, drawLayers } from "./raster.js";
+import { sniffImageType } from "./upload.js";
 
 async function mockupPng(s, view) {
   const a = s.areas.find((x) => x.side === view.side);
@@ -37,10 +38,13 @@ async function mockupPng(s, view) {
   return canvasBlob(canvas, "image/png");
 }
 
-function dataUrlBlob(dataUrl) {
+// Rasters are labelled by their bytes, not the stored type, so drafts saved with an extension-based
+// label still upload as what they are.
+export function dataUrlBlob(dataUrl) {
   const [head, body] = dataUrl.split(",");
-  const type = head.slice(5).split(";")[0];
+  const declared = head.slice(5).split(";")[0];
   const bytes = head.includes(";base64") ? Uint8Array.from(atob(body), (c) => c.charCodeAt(0)) : new TextEncoder().encode(decodeURIComponent(body));
+  const type = declared === "image/svg+xml" ? declared : (sniffImageType(bytes) ?? declared);
   return new Blob([bytes], { type });
 }
 
@@ -54,7 +58,8 @@ export async function buildFiles(s, spec) {
   for (const [key, meta] of Object.entries(spec.files)) {
     if (meta.role !== "artwork") continue;
     const a = s.assets[key];
-    files.push({ key, role: "artwork", name: `${key}.${EXT[a.type]}`, blob: dataUrlBlob(a.dataUrl) });
+    const blob = dataUrlBlob(a.dataUrl);
+    files.push({ key, role: "artwork", name: `${key}.${EXT[blob.type] ?? EXT[a.type]}`, blob });
   }
   for (const view of spec.views) {
     const a = s.areas.find((x) => x.side === view.side);
