@@ -162,7 +162,10 @@ export async function recordWithdrawError(db: D1Database, id: number, error: str
 export async function retryWithdrawal(db: D1Database, id: number, now: Date = new Date()): Promise<boolean> {
   try {
     const res = await db
-      .prepare("UPDATE cashouts SET status = 'sold', withdraw_attempts = 0, error = NULL, updated_at = ? WHERE id = ? AND status = 'failed' AND sold_units IS NOT NULL")
+      .prepare(
+        `UPDATE cashouts SET status = 'sold', withdraw_attempts = 0, error = NULL, updated_at = ? WHERE id = ? AND status = 'failed' AND sold_units IS NOT NULL
+           AND supplier_payment_id IN (SELECT id FROM supplier_payments WHERE status = 'cashing_out')`,
+      )
       .bind(now.toISOString(), id)
       .run();
     return res.meta.changes === 1;

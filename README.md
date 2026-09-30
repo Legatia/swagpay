@@ -157,7 +157,7 @@ Setup:
   - When Circle's limit refuses a payout, you get an approval request in Telegram.
   - When the `circle` login session expires (about four weeks), every payout comes back failed: log in again.
 - **Refunds.** Refunds always wait for your approval.
-- **EUR (EURC) orders.** The treasury only pays USDC. Printer costs always go to your Kraken account in USDC; you cash out to fiat from the dashboard (see "Back office").
+- **EUR (EURC) orders.** The treasury only pays USDC. Until plan 6, only USDC payouts are configured, so a printer cost for a EUR order is escalated to you as manual: the dashboard shows "pay from your own funds" with the printer's payment details, and you press Paid. USDC orders' printer costs go to your Kraken account in USDC, and you cash out to fiat from the dashboard (see "Back office").
 - **Approve or reject.** On a payout question in Telegram, approve lets the treasury agent pay it (USDC only); reject means you handle it yourself, and the obligation is marked settled.
 
 ### Back office
@@ -177,6 +177,10 @@ Setup:
   - Each cash-out sells just enough USDC, (amount + withdrawal fee) / bid x 1.01, with a client order id, so a retry never sells twice; then it withdraws.
   - If the USDC has not reached Kraken within two hours, the cash-out fails and you are told.
 - **Check first.** `kraken withdrawal methods --asset EUR` and `kraken withdrawal info EUR "<saved account>" 10` confirm that fiat withdrawal works by API. If it doesn't, the runner stops after selling and you withdraw in the Kraken app, then press Paid.
+- **Withdrawal fee.** The runner sells enough for the amount plus the fee, assuming Kraken charges the fee on top. Run `kraken withdrawal info EUR "<saved account>" 10`: if it shows the net amount as 9.00 (the fee is taken out of the amount), the runner needs to withdraw amount + fee instead.
+- **Go-live checks.**
+  - Run one tiny real cash-out, then force a retry and confirm the runner does not sell again (it looks the sale up with `closed-orders --cl-ord-id`).
+  - Press Cash out once from a browser, not only from tests, and confirm it is accepted.
 - **Rates.** PLN printers are cashed out in EUR at NBP plus `CASHOUT_FX_BUFFER` (default 2%).
 
 ### Before real money

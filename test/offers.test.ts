@@ -41,4 +41,18 @@ describe("printer offers", () => {
     expect((await listOffers(env.DB, order.id))[0].chosen_at).not.toBeNull();
     expect(await useOffer(env, offer.id)).toBe("This offer was already used.");
   });
+
+  it("a refused 'Use this offer' (paused printer) leaves the job's cost and the offer untouched", async () => {
+    const { order } = await newOrderRow();
+    const agent = await getAgentByName(env.OrderAgent, order.instance);
+    await agent.init(order.id, intakeFor());
+    await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('EUR', 4.3, '2099-09-30', ?)").bind(new Date().toISOString()).run();
+    const v = await vendor("Lisbon", "paused");
+    await createEscalation(env.DB, { orderId: order.id, kind: "cost", summary: "Printer cost needed", payload: {} });
+    await env.DB.prepare("INSERT INTO vendor_jobs (order_id, vendor_id, status, cost_currency, cost_cents, deliver_by, created_at) VALUES (?, ?, 'proposed', 'PLN', 111, '2099-10-08', 'x')").bind(order.id, v).run();
+    const offer = await addOffer(env.DB, { orderId: order.id, vendorId: v, currency: "EUR", priceCents: 20_000, deliveryCents: 3_000, otherCents: 0, arrivesAt: "2099-10-06" });
+    expect(await useOffer(env, offer.id)).toBe(`Printer #${v} is paused; nothing was recorded.`);
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ cost_currency: "PLN", cost_cents: 111 });
+    expect((await listOffers(env.DB, order.id))[0].chosen_at).toBeNull();
+  });
 });

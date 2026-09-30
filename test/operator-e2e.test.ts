@@ -283,6 +283,9 @@ it("cashes out a printer payment: payout reaches Kraken, runner sells and withdr
   expect(paid.status).toBe(303);
   expect((await getSupplierPayment(env.DB, sp.id))?.status).toBe("paid");
   expect(await (await admin("/admin")).text()).not.toContain("ready to pay");
+  const ledger = await (await admin(`/admin/orders/${order.id}`)).text();
+  expect(ledger).toContain("Printer payment: 1000.00 PLN, paid");
+  expect(ledger).toContain("card, reference");
 
   // Public numbers do not move for the cash-out; the owner got exactly one "withdrawn" notice; no agent heard the printer's payment details.
   expect(await (await SELF.fetch(metricsUrl)).json()).toEqual(before);

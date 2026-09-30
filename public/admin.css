@@ -3,6 +3,7 @@
   html.light {
     --page: #f5f6f9; --surface: #ffffff; --text: #171a38; --text-muted: #4a4f72; --line: #d9dcea;
     --action: #d7266f; --action-text: #ffffff; --focus: #d7266f; --error: #b91e5a; --link: #2466c4; --success: #1f7a4d;
+    --payment-bubble: #e2ecfa; --agent-bubble: #fbe3ee;
     color-scheme: light;
   }
 }

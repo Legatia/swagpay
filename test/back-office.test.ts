@@ -66,6 +66,16 @@ describe("cash-outs", () => {
     expect(await latestCashout(env.DB, a.id)).toMatchObject({ id: c2.id, status: "sold", withdraw_attempts: 0, error: null });
   });
 
+  it("a withdrawal is not retried once its payment is no longer cashing out", async () => {
+    const a = await sp();
+    const c = (await queueCashout(env.DB, a.id, { fiat: "EUR", fiatCents: 10_000 }))!;
+    await recordCashoutSold(env.DB, c.id, { orderRef: "O", soldUnits: 1 });
+    await recordCashoutFailed(env.DB, c.id, "kraken down");
+    expect(await setSupplierPaymentStatus(env.DB, a.id, ["cashing_out"], "paid", { method: "transfer" })).toBe(true);
+    expect(await retryWithdrawal(env.DB, c.id)).toBe(false);
+    expect((await latestCashout(env.DB, a.id))?.status).toBe("failed");
+  });
+
   it("gives up on the third withdrawal error", async () => {
     const a = await sp();
     const c = (await queueCashout(env.DB, a.id, { fiat: "EUR", fiatCents: 10_000 }))!;

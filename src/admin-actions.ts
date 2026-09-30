@@ -19,7 +19,7 @@ const BACK = /^\/admin(?:\/[A-Za-z0-9/_-]*)?$/;
 
 function redirect(back: string | null, msg: string): Response {
   const to = back && BACK.test(back) ? back : "/admin";
-  return new Response(null, { status: 303, headers: { location: `${to}?msg=${encodeURIComponent(msg.slice(0, 200))}`, "cache-control": "no-store" } });
+  return new Response(null, { status: 303, headers: { location: `${to}?msg=${encodeURIComponent(msg.slice(0, 200))}`, "cache-control": "no-store", "referrer-policy": "same-origin" } });
 }
 
 /** POST /admin/…: the caller already verified the Access JWT; this checks the Origin and runs one action. */
@@ -104,7 +104,10 @@ export async function handleAdminPost(request: Request, env: Env, who: { email: 
   if ((m = /^\/admin\/cashouts\/(\d{1,9})\/retry$/.exec(path))) {
     const c = await getCashout(env.DB, Number(m[1]));
     if (!c) return new Response("Not found", { status: 404 });
-    if (!(await retryWithdrawal(env.DB, c.id))) return redirect(back, `Cash-out #${c.id} can't be retried (it is ${c.status}).`);
+    if (!(await retryWithdrawal(env.DB, c.id))) {
+      const sp = await getSupplierPayment(env.DB, c.supplier_payment_id);
+      return redirect(back, `Cash-out #${c.id} can't be retried (it is ${c.status}${sp && sp.status !== "cashing_out" ? `; its printer payment is ${sp.status}` : ""}).`);
+    }
     await log("retry_withdrawal", `cashout:${c.id}`);
     return redirect(back, `Cash-out #${c.id} will retry the withdrawal on the runner's next poll.`);
   }

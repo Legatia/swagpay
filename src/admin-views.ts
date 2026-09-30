@@ -38,7 +38,7 @@ const orderLink = (id: number) => `<a href="/admin/orders/${id}">#${id}</a>`;
 const field = (name: string, label: string, attrs = "") => `<input name="${name}" placeholder="${label}" aria-label="${label}"${attrs}>`;
 
 function paidForm(r: ToPayRow, back: string): string {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Warsaw" });
   const confirm = r.payment.status === "cashing_out" ? `<label><input type="checkbox" name="confirm" value="1"> money has arrived</label>` : "";
   return `<form method="post" action="/admin/payments/${r.payment.id}/paid" class="inline"><input type="hidden" name="back" value="${esc(back)}">
 <select name="method" aria-label="Method"><option>card</option><option>blik</option><option>transfer</option></select>
@@ -60,6 +60,13 @@ function toPayActions(r: ToPayRow, actions: string[], back: string): string {
   return out.join("<br>");
 }
 
+/** The state label (with the printer's payment details when the owner pays by hand) and the action forms of a printer payment. */
+function payCells(r: ToPayRow, back: string): { state: string; actions: string } {
+  const s = toPayState(r);
+  const how = s.showHow && r.vendor?.how_to_pay ? `<div class="how">${esc(r.vendor.how_to_pay)}</div>` : "";
+  return { state: `${esc(s.label)}${how}`, actions: toPayActions(r, s.actions, back) };
+}
+
 function escalationRow(e: EscalationRow, back: string): string {
   const approve = e.kind === "cost"
     ? (e.order_id !== null ? `<a href="/admin/orders/${e.order_id}">Set the price on the order page</a>` : "")
@@ -71,9 +78,8 @@ function escalationRow(e: EscalationRow, back: string): string {
 export function renderToday(p: { rows: ToPayRow[]; summary: MoneySummary; warnings: string[]; open: EscalationRow[]; who: string | null; msg: string | null }): string {
   const back = "/admin";
   const payRows = p.rows.map((r) => {
-    const state = toPayState(r);
-    const how = r.payment.status === "ready" && r.vendor?.how_to_pay ? `<div class="how">${esc(r.vendor.how_to_pay)}</div>` : "";
-    return `<tr><td>${orderLink(r.order.id)}</td><td>${esc(r.order.event_name)}</td><td>${r.vendor ? esc(r.vendor.name) : "—"}</td><td>${esc(cents(r.payment.amount_cents, r.payment.currency))}</td><td>${when(r.order.deliver_by)}</td><td class="status">${esc(state.label)}${how}</td><td>${toPayActions(r, state.actions, back)}</td></tr>`;
+    const { state, actions } = payCells(r, back);
+    return `<tr><td>${orderLink(r.order.id)}</td><td>${esc(r.order.event_name)}</td><td>${r.vendor ? esc(r.vendor.name) : "—"}</td><td>${esc(cents(r.payment.amount_cents, r.payment.currency))}</td><td>${when(r.order.deliver_by)}</td><td class="status">${state}</td><td>${actions}</td></tr>`;
   });
   const s = p.summary;
   const bal = (v: number | null, token: string) => (v === null ? "unknown" : money(v, token));
@@ -148,7 +154,7 @@ export function renderLedger(l: Ledger, explorer: string, who: string | null = n
   const cashouts = table(["Cash-out", "Status", "Fiat", "USDC sold", "Kraken refs", "Fee", "Error"],
     l.cashouts.map((c) => `<tr><td>#${c.id}</td><td>${esc(c.status)}</td><td>${esc(cents(c.fiat_cents, c.fiat))}</td><td>${c.sold_units !== null ? esc(money(c.sold_units, "USDC")) : "—"}</td><td class="mono">${esc([c.order_ref, c.withdrawal_ref].filter(Boolean).join(" / ") || "—")}</td><td>${c.fee_cents !== null ? esc(cents(c.fee_cents, c.fiat)) : "—"}</td><td>${esc(c.error ?? "")}</td></tr>`), "No cash-outs.");
   const sp = l.payment
-    ? `<ul><li>Printer payment: ${esc(cents(l.payment.amount_cents, l.payment.currency))}, ${esc(l.payment.status)}</li>${l.payment.status === "paid" ? `<li>${esc(l.payment.method ?? "—")}, reference ${esc(l.payment.reference ?? "—")}, ${when(l.payment.paid_at)}</li>` : ""}</ul>`
+    ? `<ul><li>Printer payment: ${esc(cents(l.payment.amount_cents, l.payment.currency))}, ${esc(l.payment.status)}</li>${l.payment.status === "paid" ? `<li>${esc(l.payment.method ?? "—")}, reference ${esc(l.payment.reference ?? "—")}, ${when(l.payment.paid_at)}</li>` : ""}</ul>${l.toPay ? (({ state, actions }) => `<p class="status">${state}</p>${actions}`)(payCells(l.toPay, `/admin/orders/${o.id}`)) : ""}`
     : "<p>No printer payment yet.</p>";
   let margin = "<p>Not available.</p>";
   if (l.margin) {

@@ -23,47 +23,57 @@ export interface ToPayRow {
 
 export type ToPayAction = "cashout" | "retry" | "paid" | "cancel";
 
+type ToPaySelect = SupplierPaymentRow & { event_name: string; deliver_by: string; vendor_name: string | null; how_to_pay: string | null };
+const TO_PAY_SELECT = `SELECT sp.*, o.event_name, o.deliver_by, v.name AS vendor_name, v.how_to_pay
+       FROM supplier_payments sp JOIN orders o ON o.id = sp.order_id LEFT JOIN vendors v ON v.id = sp.vendor_id`;
+
+async function hydrateToPay(db: D1Database, r: ToPaySelect): Promise<ToPayRow> {
+  const ob = await db
+    .prepare("SELECT id, status FROM obligations WHERE order_id = ? AND kind = 'printer_cost' AND vendor_id IS NULL ORDER BY id DESC LIMIT 1")
+    .bind(r.order_id).first<{ id: number; status: string }>();
+  const payout = ob ? await db.prepare("SELECT status FROM payouts WHERE obligation_id = ? ORDER BY id DESC LIMIT 1").bind(ob.id).first<{ status: string }>() : null;
+  const { event_name, deliver_by, vendor_name, how_to_pay, ...payment } = r;
+  return {
+    payment: payment as SupplierPaymentRow,
+    order: { id: r.order_id, event_name, deliver_by },
+    vendor: r.vendor_id === null ? null : { id: r.vendor_id, name: vendor_name ?? `#${r.vendor_id}`, how_to_pay },
+    obligation: ob ?? null,
+    payoutStatus: payout?.status ?? null,
+    cashout: await latestCashout(db, r.id),
+  };
+}
+
 export async function toPayRows(db: D1Database, now: Date = new Date()): Promise<ToPayRow[]> {
   const since = new Date(now.getTime() - 24 * 3_600_000).toISOString();
+  // A paid payment stays 24 hours after it was marked paid (updated_at), whatever date the owner entered.
   const rows = (await db
-    .prepare(
-      `SELECT sp.*, o.event_name, o.deliver_by, v.name AS vendor_name, v.how_to_pay
-       FROM supplier_payments sp JOIN orders o ON o.id = sp.order_id LEFT JOIN vendors v ON v.id = sp.vendor_id
-       WHERE sp.status IN ('due', 'cashing_out', 'ready') OR (sp.status = 'paid' AND sp.paid_at > ?)
-       ORDER BY o.deliver_by, sp.id`,
-    )
+    .prepare(`${TO_PAY_SELECT}
+       WHERE sp.status IN ('due', 'cashing_out', 'ready') OR (sp.status = 'paid' AND sp.updated_at > ?)
+       ORDER BY o.deliver_by, sp.id`)
     .bind(since)
-    .all<SupplierPaymentRow & { event_name: string; deliver_by: string; vendor_name: string | null; how_to_pay: string | null }>()).results;
-  return Promise.all(rows.map(async (r) => {
-    const ob = await db
-      .prepare("SELECT id, status FROM obligations WHERE order_id = ? AND kind = 'printer_cost' AND vendor_id IS NULL ORDER BY id DESC LIMIT 1")
-      .bind(r.order_id).first<{ id: number; status: string }>();
-    const payout = ob ? await db.prepare("SELECT status FROM payouts WHERE obligation_id = ? ORDER BY id DESC LIMIT 1").bind(ob.id).first<{ status: string }>() : null;
-    const { event_name, deliver_by, vendor_name, how_to_pay, ...payment } = r;
-    return {
-      payment: payment as SupplierPaymentRow,
-      order: { id: r.order_id, event_name, deliver_by },
-      vendor: r.vendor_id === null ? null : { id: r.vendor_id, name: vendor_name ?? `#${r.vendor_id}`, how_to_pay },
-      obligation: ob ?? null,
-      payoutStatus: payout?.status ?? null,
-      cashout: await latestCashout(db, r.id),
-    };
-  }));
+    .all<ToPaySelect>()).results;
+  return Promise.all(rows.map((r) => hydrateToPay(db, r)));
+}
+
+/** The same row as Today shows, for one order's printer payment (null when it has none). */
+export async function toPayRowForOrder(db: D1Database, orderId: number): Promise<ToPayRow | null> {
+  const r = await db.prepare(`${TO_PAY_SELECT} WHERE sp.order_id = ?`).bind(orderId).first<ToPaySelect>();
+  return r ? hydrateToPay(db, r) : null;
 }
 
 /** What the row says and which buttons it offers. Cash out only once the treasury's payout reached Kraken, and never after a sale. */
-export function toPayState(r: ToPayRow): { label: string; actions: ToPayAction[] } {
+export function toPayState(r: ToPayRow): { label: string; actions: ToPayAction[]; showHow: boolean } {
   const p = r.payment;
-  if (p.status === "paid") return { label: `paid${p.method ? ` (${p.method})` : ""}`, actions: [] };
-  if (p.status === "cancelled") return { label: "cancelled", actions: [] };
-  if (p.status === "ready") return { label: "ready to pay", actions: ["paid", "cancel"] };
+  if (p.status === "paid") return { label: `paid${p.method ? ` (${p.method})` : ""}`, actions: [], showHow: false };
+  if (p.status === "cancelled") return { label: "cancelled", actions: [], showHow: false };
+  if (p.status === "ready") return { label: "ready to pay", actions: ["paid", "cancel"], showHow: true };
   if (p.status === "cashing_out") {
-    if (r.cashout?.status === "failed") return { label: "withdrawal failed", actions: ["retry", "paid"] };
-    return { label: `cashing out (${r.cashout?.status ?? "queued"})`, actions: ["paid"] };
+    if (r.cashout?.status === "failed") return { label: "withdrawal failed", actions: ["retry", "paid"], showHow: false };
+    return { label: `cashing out (${r.cashout?.status ?? "queued"})`, actions: ["paid"], showHow: false };
   }
-  if (r.payoutStatus === "sent") return { label: "ready to cash out", actions: ["cashout", "paid", "cancel"] };
-  if (r.obligation?.status === "settled") return { label: "the treasury won't move it: pay from your own funds", actions: ["paid", "cancel"] };
-  return { label: `waiting for the treasury (${r.obligation?.status ?? "no obligation"})`, actions: ["paid", "cancel"] };
+  if (r.payoutStatus === "sent") return { label: "ready to cash out", actions: ["cashout", "paid", "cancel"], showHow: false };
+  if (r.obligation?.status === "settled") return { label: "the treasury won't move it: pay from your own funds", actions: ["paid", "cancel"], showHow: true };
+  return { label: `waiting for the treasury (${r.obligation?.status ?? "no obligation"})`, actions: ["paid", "cancel"], showHow: false };
 }
 
 export interface MoneySummary {
@@ -85,7 +95,9 @@ export async function moneySummary(env: Env, rpc?: Pick<RpcClient, "erc20Balance
   const atKraken = await env.DB
     .prepare(
       `SELECT COALESCE(SUM(o.amount_units), 0) AS n FROM obligations o JOIN supplier_payments sp ON sp.order_id = o.order_id
-       WHERE o.kind = 'printer_cost' AND o.vendor_id IS NULL AND o.status = 'paid' AND sp.status IN ('due', 'cashing_out')`,
+       WHERE o.kind = 'printer_cost' AND o.vendor_id IS NULL AND o.status = 'paid'
+         AND (sp.status = 'due' OR (sp.status = 'cashing_out'
+           AND COALESCE((SELECT status FROM cashouts WHERE supplier_payment_id = sp.id ORDER BY id DESC LIMIT 1), 'queued') = 'queued'))`,
     ).first<{ n: number }>();
   const customersOwe = (await env.DB
     .prepare("SELECT token, SUM(amount_units - paid_units) AS units FROM payment_requests WHERE status = 'open' GROUP BY token ORDER BY token")
@@ -167,6 +179,8 @@ export interface Ledger {
   obligations: ObligationRow[];
   payouts: PayoutRow[];
   payment: SupplierPaymentRow | null;
+  /** The payment as Today shows it: state label and action forms. */
+  toPay: ToPayRow | null;
   cashouts: CashoutRow[];
   margin: Awaited<ReturnType<typeof orderMargin>>;
   decisions: DecisionRow[];
@@ -199,6 +213,7 @@ export async function orderLedger(db: D1Database, id: number): Promise<Ledger | 
     obligations: await list<ObligationRow>("SELECT * FROM obligations WHERE order_id = ? ORDER BY id"),
     payouts: await list<PayoutRow>("SELECT * FROM payouts WHERE obligation_id IN (SELECT id FROM obligations WHERE order_id = ?) ORDER BY id"),
     payment,
+    toPay: payment ? await toPayRowForOrder(db, id) : null,
     cashouts: payment ? (await db.prepare("SELECT * FROM cashouts WHERE supplier_payment_id = ? ORDER BY id").bind(payment.id).all<CashoutRow>()).results : [],
     margin: await orderMargin(db, id),
     decisions: await listDecisions(db, id),

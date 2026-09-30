@@ -52,12 +52,13 @@ export async function useOffer(env: Env, offerId: number, now: Date = new Date()
   const landed = Math.round((offer.price_cents + offer.delivery_cents + offer.other_cents) * r) / 100;
   // Only the offer number reaches the order agent; never the printer's name.
   const reply = await giveCost(env, cost.id, landed, `offer #${offer.id}`, { currency: "PLN", vendorId: offer.vendor_id, now });
-  const job = await vendorJobFor(env.DB, offer.order_id);
-  if (job && job.vendor_id === offer.vendor_id && job.status === "proposed") {
-    await env.DB.prepare("UPDATE vendor_jobs SET cost_currency = ?, cost_cents = ? WHERE order_id = ? AND status = 'proposed'")
-      .bind(offer.currency, offer.price_cents + offer.delivery_cents, offer.order_id).run();
-  }
+  // Only when giveCost recorded the cost: a refusal (a paused printer, say) leaves the job and the offer untouched.
   if (reply.startsWith(`#${cost.id}:`) || reply.includes("could not be told")) {
+    const job = await vendorJobFor(env.DB, offer.order_id);
+    if (job && job.vendor_id === offer.vendor_id && job.status === "proposed") {
+      await env.DB.prepare("UPDATE vendor_jobs SET cost_currency = ?, cost_cents = ? WHERE order_id = ? AND status = 'proposed'")
+        .bind(offer.currency, offer.price_cents + offer.delivery_cents, offer.order_id).run();
+    }
     await env.DB.prepare("UPDATE printer_offers SET chosen_at = ? WHERE id = ?").bind(now.toISOString(), offer.id).run();
   }
   return reply;

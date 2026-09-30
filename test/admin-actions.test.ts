@@ -45,6 +45,7 @@ describe("admin actions", () => {
     const res = await post(`/admin/payments/${sp.id}/cashout`, { back: `/admin/orders/${sp.order_id}` });
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toMatch(new RegExp(`^/admin/orders/${sp.order_id}\\?msg=`));
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
     expect(msgOf(res)).toBe("Cash-out queued: 237.21 EUR to your EUR account. The wallet runner sells and withdraws it.");
     expect(await latestCashout(env.DB, sp.id)).toMatchObject({ fiat: "EUR", fiat_cents: 23_721, status: "queued" });
     expect(await audit()).toEqual({ action: "cashout", target: `supplier_payment:${sp.id}`, email: "owner@example.com" });
@@ -82,6 +83,16 @@ describe("admin actions", () => {
     const other = await readyToCashOut();
     expect(msgOf(await post(`/admin/payments/${other.sp.id}/cancel`, { back: "/admin", note: "printer did it for free" }))).toBe(`Printer payment for order ${other.sp.order_id} cancelled.`);
     expect(await getSupplierPayment(env.DB, other.sp.id)).toMatchObject({ status: "cancelled", note: "printer did it for free" });
+  });
+
+  it("Retry withdrawal after the payment was marked paid is refused and the cash-out stays failed", async () => {
+    const { sp } = await readyToCashOut();
+    const c = (await queueCashout(env.DB, sp.id, { fiat: "EUR", fiatCents: 1 }))!;
+    await recordCashoutSold(env.DB, c.id, { orderRef: "O", soldUnits: 1 });
+    await recordCashoutFailed(env.DB, c.id, "kraken down");
+    await post(`/admin/payments/${sp.id}/paid`, { back: "/admin", method: "transfer", date: "2099-10-02", confirm: "1" });
+    expect(msgOf(await post(`/admin/cashouts/${c.id}/retry`, { back: "/admin" }))).toBe(`Cash-out #${c.id} can't be retried (it is failed; its printer payment is paid).`);
+    expect((await latestCashout(env.DB, sp.id))?.status).toBe("failed");
   });
 
   it("Approve and Reject go through decide(), like Telegram", async () => {

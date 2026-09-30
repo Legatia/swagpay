@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { handleAdmin } from "../src/admin";
-import { createSupplierPayment } from "../src/back-office";
+import { createSupplierPayment, queueCashout, recordCashoutFailed, recordCashoutSold } from "../src/back-office";
 import { setOrderStatus } from "../src/db";
 import { createEscalation } from "../src/escalations";
 import { createPaymentRequest } from "../src/payments";
@@ -46,7 +46,7 @@ describe("admin pages", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
-    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
     const html = await res.text();
     expect(html).toContain('<html lang="en" class="light">');
     expect(html).toContain('<meta name="color-scheme" content="light">');
@@ -127,5 +127,69 @@ describe("admin pages", () => {
   it("warns when the wallet runner hasn't polled for an hour", async () => {
     await env.DB.prepare("INSERT OR REPLACE INTO runner_state (key, value) VALUES ('last_seen', ?)").bind(new Date(Date.now() - 2 * 3_600_000).toISOString()).run();
     expect(await (await get("/admin")).text()).toContain("The wallet runner last polled");
+  });
+
+  it("the ledger of an order with a payment ready to cash out offers Cash out; a failed withdrawal offers Retry", async () => {
+    const { order, sp } = await paidOrder();
+    const html = await (await get(`/admin/orders/${order.id}`)).text();
+    expect(html).toContain("ready to cash out");
+    expect(html).toContain(`action="/admin/payments/${sp.id}/cashout"`);
+    expect(html).toContain(`<input type="hidden" name="back" value="/admin/orders/${order.id}">`);
+    const c = (await queueCashout(env.DB, sp.id, { fiat: "EUR", fiatCents: 23_000 }))!;
+    await recordCashoutSold(env.DB, c.id, { orderRef: "O", soldUnits: 1 });
+    await recordCashoutFailed(env.DB, c.id, "kraken down");
+    const failed = await (await get(`/admin/orders/${order.id}`)).text();
+    expect(failed).toContain("withdrawal failed");
+    expect(failed).toContain(`action="/admin/cashouts/${c.id}/retry"`);
+    expect(failed).toContain(`action="/admin/payments/${sp.id}/paid"`);
+    expect(failed).not.toContain(`action="/admin/payments/${sp.id}/cashout"`);
+  });
+
+  it("how to pay shows on Today and the ledger for a ready payment and for one the treasury won't move", async () => {
+    const { order, sp } = await paidOrder();
+    const v = (await env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, how_to_pay, source_ref, created_at, updated_at) VALUES ('Druk H', 'Warsaw', 'PL', '[]', 'partner', 'BLIK 600 999 888', 'w:how', 'x', 'x') RETURNING id").first<{ id: number }>())!.id;
+    await env.DB.prepare("UPDATE supplier_payments SET vendor_id = ? WHERE id = ?").bind(v, sp.id).run();
+    expect(await (await get("/admin")).text()).not.toContain("BLIK 600 999 888");
+    // The treasury's payout was not sent: the obligation is settled by hand.
+    await env.DB.prepare("UPDATE payouts SET status = 'failed' WHERE obligation_id IN (SELECT id FROM obligations WHERE order_id = ?)").bind(order.id).run();
+    await env.DB.prepare("UPDATE obligations SET status = 'settled' WHERE order_id = ?").bind(order.id).run();
+    for (const path of ["/admin", `/admin/orders/${order.id}`]) {
+      const html = await (await get(path)).text();
+      expect(html).toContain("pay from your own funds");
+      expect(html).toContain("BLIK 600 999 888");
+    }
+    await env.DB.prepare("UPDATE supplier_payments SET status = 'ready' WHERE id = ?").bind(sp.id).run();
+    for (const path of ["/admin", `/admin/orders/${order.id}`]) expect(await (await get(path)).text()).toContain("BLIK 600 999 888");
+  });
+
+  it("a paid payment stays on Today for 24 hours after it was marked paid, whatever date was entered", async () => {
+    const { sp } = await paidOrder();
+    const recent = new Date().toISOString();
+    await env.DB.prepare("UPDATE supplier_payments SET status = 'paid', method = 'card', paid_at = '2020-01-01T12:00:00.000Z', updated_at = ? WHERE id = ?").bind(recent, sp.id).run();
+    expect(await (await get("/admin")).text()).toContain("paid (card)");
+    await env.DB.prepare("UPDATE supplier_payments SET updated_at = ? WHERE id = ?").bind(new Date(Date.now() - 25 * 3_600_000).toISOString(), sp.id).run();
+    expect(await (await get("/admin")).text()).not.toContain("paid (card)");
+  });
+
+  it("the Paid form defaults to today's date in Warsaw", async () => {
+    await paidOrder();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2099-06-30T22:30:00.000Z"));
+      expect(await (await get("/admin")).text()).toContain('type="date" name="date" value="2099-07-01"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("'At Kraken, not cashed out' leaves out USDC that is already sold", async () => {
+    const atKraken = async () => Number((/At Kraken, not cashed out: ([\d.]+) USDC/.exec(await (await get("/admin")).text()))![1]);
+    const base = await atKraken();
+    const { sp } = await paidOrder();
+    expect(await atKraken()).toBeCloseTo(base + 257.5, 2);
+    const c = (await queueCashout(env.DB, sp.id, { fiat: "EUR", fiatCents: 23_000 }))!;
+    expect(await atKraken()).toBeCloseTo(base + 257.5, 2);
+    await recordCashoutSold(env.DB, c.id, { orderRef: "O", soldUnits: 1 });
+    expect(await atKraken()).toBeCloseTo(base, 2);
   });
 });

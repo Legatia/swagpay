@@ -11,7 +11,8 @@ const HEADERS = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-store",
   "x-robots-tag": "noindex",
-  "referrer-policy": "no-referrer",
+  // same-origin, not no-referrer: with no-referrer a browser sends "Origin: null" on form POSTs, which the Origin check refuses.
+  "referrer-policy": "same-origin",
 };
 const html = (body: string, status = 200) => new Response(body, { status, headers: HEADERS });
 
