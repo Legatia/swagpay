@@ -53,7 +53,7 @@ test("classifies CLI results", () => {
 
 /** A fake Swagpay: lists `queued` payouts and `cashouts`, records posted results (a recorded payout is no longer queued); `failPosts` makes result POSTs throw. */
 function fakeSwagpay(queued, swaps = [], cashouts = []) {
-  const s = { queued, swaps, cashouts, posts: [], cashoutPosts: [], failPosts: 0 };
+  const s = { queued, swaps, cashouts, posts: [], cashoutPosts: [], failPosts: 0, cashoutStatus: {}, failCashoutPosts: {} };
   s.api = async (path, init = {}) => {
     if (path === "/api/treasury/payouts" && init.method === undefined) return Response.json({ payouts: s.queued });
     if (path === "/api/treasury/cashouts" && init.method === undefined) return Response.json({ cashouts: s.cashouts });
@@ -68,7 +68,10 @@ function fakeSwagpay(queued, swaps = [], cashouts = []) {
     if (c && init.method === "POST") {
       const id = Number(c[1]);
       const body = JSON.parse(init.body);
+      const key = body.stage ?? body.status;
+      if (s.failCashoutPosts[key]) throw new TypeError("fetch failed");
       s.cashoutPosts.push({ id, body });
+      if (s.cashoutStatus[key]) return Response.json({ error: "x" }, { status: s.cashoutStatus[key] });
       if (body.stage === "sold") s.cashouts = s.cashouts.map((x) => (x.id === id ? { ...x, status: "sold" } : x));
       else if (body.stage === "withdrawn" || body.status === "failed") s.cashouts = s.cashouts.filter((x) => x.id !== id);
       return Response.json({ ok: true });
@@ -211,4 +214,40 @@ test("parses kraken-cli JSON defensively", () => {
   assert.equal(balanceOf({ USDC: "12.5" }, "USDC"), 12.5);
   assert.equal(balanceOf({}, "USDC"), 0);
   assert.equal(closedByClOrdId({ closed: { A: { cl_ord_id: "x", vol_exec: "0" } } }, "x"), null);
+});
+
+test("a sold result the Worker did not record (500 or 409) stops the pass before any withdrawal", async () => {
+  for (const status of [500, 409]) {
+    const swagpay = fakeSwagpay([], [], [cashout]);
+    swagpay.cashoutStatus.sold = status;
+    const k = fakeKraken(market);
+    await assert.rejects(runCashout(cashout, { kraken: k.run, api: swagpay.api, cfg: kcfg, log: quiet }), new RegExp(`sold result not recorded \\(HTTP ${status}\\)`));
+    assert.equal(k.calls.some((c) => c.startsWith("withdraw ")), false);
+    assert.equal(swagpay.cashoutPosts.length, 1);
+  }
+});
+
+test("a withdrawn result that is lost is logged, never reported as a withdrawal error", async () => {
+  for (const mode of ["failCashoutPosts", "cashoutStatus"]) {
+    const sold = { ...cashout, status: "sold" };
+    const swagpay = fakeSwagpay([], [], [sold]);
+    swagpay[mode].withdrawn = mode === "failCashoutPosts" ? true : 500;
+    const lines = [];
+    const k = fakeKraken(market);
+    await runCashout(sold, { kraken: k.run, api: swagpay.api, cfg: kcfg, log: { info() {}, error: (m) => lines.push(m) } });
+    assert.ok(k.calls.includes("withdraw EUR My EUR account 237.21"));
+    assert.equal(swagpay.cashoutPosts.some((p) => p.body.stage === "withdraw_error"), false);
+    assert.match(lines.join("\n"), /cash-out #5: withdrawn but not recorded/);
+  }
+});
+
+test("a failed or withdraw_error result that is not recorded throws", async () => {
+  const old = { ...cashout, createdAt: new Date(Date.now() - 3 * 3_600_000).toISOString() };
+  const a = fakeSwagpay([], [], [old]);
+  a.cashoutStatus.failed = 500;
+  await assert.rejects(runCashout(old, { kraken: fakeKraken({ ...market, balance: [0, { USDC: "1" }] }).run, api: a.api, cfg: kcfg, log: quiet }), /failed result not recorded \(HTTP 500\)/);
+  const sold = { ...cashout, status: "sold" };
+  const b = fakeSwagpay([], [], [sold]);
+  b.cashoutStatus.withdraw_error = 401;
+  await assert.rejects(runCashout(sold, { kraken: fakeKraken({ ...market, "withdraw EUR": [1, {}] }).run, api: b.api, cfg: kcfg, log: quiet }), /withdraw_error result not recorded \(HTTP 401\)/);
 });

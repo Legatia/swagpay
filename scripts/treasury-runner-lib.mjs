@@ -100,12 +100,17 @@ async function kj(kraken, args) {
  * cash-out's client order id and is looked up first, so a retry after a lost result never sells twice.
  */
 export async function runCashout(c, { kraken, api, cfg, log, now = Date.now() }) {
-  const post = (body) => api(`/api/treasury/cashouts/${c.id}/result`, { method: "POST", body: JSON.stringify(body) });
+  const send = (body) => api(`/api/treasury/cashouts/${c.id}/result`, { method: "POST", body: JSON.stringify(body) });
+  // A result the Worker did not record stops this pass: the next poll decides from the Worker's state.
+  const post = async (body, what) => {
+    const r = await send(body);
+    if (!r.ok) throw new Error(`cash-out #${c.id}: ${what} result not recorded (HTTP ${r.status})`);
+  };
   const fiat = FIAT[c.fiat];
   const key = fiat ? cfg[fiat.key] : null;
   if (!fiat || !FIAT_AMOUNT.test(c.amount) || !UUID.test(c.clientOrderId)) {
     log.error(`cash-out #${c.id}: rejected (bad fiat, amount or client order id)`);
-    if (!cfg.dryRun && c.status === "queued") await post({ status: "failed", error: "runner rejected the cash-out: bad fiat, amount or client order id" });
+    if (!cfg.dryRun && c.status === "queued") await post({ status: "failed", error: "runner rejected the cash-out: bad fiat, amount or client order id" }, "failed");
     return;
   }
   if (!key) {
@@ -116,7 +121,7 @@ export async function runCashout(c, { kraken, api, cfg, log, now = Date.now() })
   if (status === "queued") {
     const done = closedByClOrdId(await kj(kraken, ["closed-orders", "--cl-ord-id", c.clientOrderId]), c.clientOrderId);
     if (done) {
-      if (!cfg.dryRun) await post({ stage: "sold", orderRef: done.txid, soldUnits: done.volExec.toFixed(6) });
+      if (!cfg.dryRun) await post({ stage: "sold", orderRef: done.txid, soldUnits: done.volExec.toFixed(6) }, "sold");
       status = "sold";
     } else {
       const fee = feeOf(await kj(kraken, ["withdrawal", "info", c.fiat, key, c.amount]));
@@ -125,7 +130,7 @@ export async function runCashout(c, { kraken, api, cfg, log, now = Date.now() })
       const have = balanceOf(await kj(kraken, ["balance"]), "USDC");
       if (have < Number(volume)) {
         const why = `USDC has not arrived at Kraken (have ${have}, need ${volume})`;
-        if (now - Date.parse(c.createdAt) > 2 * 3_600_000) { if (!cfg.dryRun) await post({ status: "failed", error: why }); }
+        if (now - Date.parse(c.createdAt) > 2 * 3_600_000) { if (!cfg.dryRun) await post({ status: "failed", error: why }, "failed"); }
         else log.info(`cash-out #${c.id}: waiting: ${why}`);
         return;
       }
@@ -136,18 +141,25 @@ export async function runCashout(c, { kraken, api, cfg, log, now = Date.now() })
         return;
       }
       const txid = txidOf(await kj(kraken, sell));
-      await post({ stage: "sold", orderRef: txid, soldUnits: volume });
+      await post({ stage: "sold", orderRef: txid, soldUnits: volume }, "sold");
       status = "sold";
     }
   }
   if (status === "sold") {
     if (cfg.dryRun) { log.info(`[dry run] cash-out #${c.id}: would withdraw ${c.amount} ${c.fiat} to "${key}"`); return; }
+    let w;
     try {
-      const w = await kj(kraken, ["withdraw", c.fiat, key, c.amount]);
-      const info = await kj(kraken, ["withdrawal", "info", c.fiat, key, c.amount]).catch(() => null);
-      await post({ stage: "withdrawn", withdrawalRef: refidOf(w), feeCents: info ? Math.round(feeOf(info) * 100) : null });
+      w = await kj(kraken, ["withdraw", c.fiat, key, c.amount]);
     } catch (err) {
-      await post({ stage: "withdraw_error", error: err instanceof Error ? err.message : String(err) });
+      await post({ stage: "withdraw_error", error: err instanceof Error ? err.message : String(err) }, "withdraw_error");
+      return;
+    }
+    // The money has left: a failure below must never be reported as a failed withdrawal.
+    try {
+      const info = await kj(kraken, ["withdrawal", "info", c.fiat, key, c.amount]).catch(() => null);
+      await post({ stage: "withdrawn", withdrawalRef: refidOf(w), feeCents: info ? Math.round(feeOf(info) * 100) : null }, "withdrawn");
+    } catch (err) {
+      log.error(`cash-out #${c.id}: withdrawn but not recorded (${err instanceof Error ? err.message : String(err)})`);
     }
   }
 }
