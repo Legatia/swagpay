@@ -268,6 +268,37 @@ describe("TreasuryAgent", () => {
     expect(await inboxOf()).not.toContain("Drukarnia");
   });
 
+  it("a moved printer's milestone says which address it is fixed to; re-registering it and approving pays it, with no loop", async () => {
+    const { order } = await newOrderRow();
+    const at = "2099-01-01T10:00:00.000Z";
+    const old = "0x" + "12".repeat(20);
+    const v = (await env.DB.prepare(
+      "INSERT INTO vendors (name, city, country, methods, status, payout_address, payout_chain, source_ref, created_at, updated_at) VALUES ('Drukarnia Moved', 'Warsaw', 'PL', '[]', 'partner', ?, 'BASE', ?, ?, ?)",
+    ).bind(old, `ta:${crypto.randomUUID()}`, at, at).run()).meta.last_row_id as number;
+    const m1 = await createObligation(env.DB, {
+      orderId: order.id, kind: "printer_cost", token: "USDC", amountUnits: 125_000_000, destination: old, chain: "BASE", dueAt: new Date(),
+      sourceRef: `m1:${crypto.randomUUID()}`, vendorId: v,
+    });
+    await SELF.fetch(fromOwner(`/vendor ${v} pay ${"0x" + "34".repeat(20)} BASE`));
+    const stub = await getAgentByName(env.TreasuryAgent, "treasury");
+    const pay = async () => runInDurableObject(stub, async (agent: TreasuryAgent) => {
+      agent.telegramOverride = quiet;
+      agent.rpcOverride = rich;
+      agent.modelOverride = scriptedModel([msg([toolUse("pay_obligation", { obligationId: m1.id, reason: "first milestone is due" })], "tool_use"), msg([], "end_turn")]);
+      await agent.notify(`Milestone obligation #${m1.id} is due.`);
+      await agent.processTurn();
+    });
+    await pay();
+    const asked = (await listEscalations(env.DB)).find((x) => x.summary.startsWith(`Treasury: printer_cost obligation #${m1.id} `))!;
+    expect(asked.summary).toBe(`Treasury: printer_cost obligation #${m1.id} (order ${order.id}) for 125.000000 USDC can't be paid: it is fixed to printer #${v}'s old address ${old} on BASE. Re-register that address with /vendor ${v} pay ${old} BASE and approve, or reject and pay the printer by hand (that settles it).`);
+    await SELF.fetch(fromOwner(`/vendor ${v} pay ${old} BASE`));
+    await SELF.fetch(fromOwner(`/approve ${asked.id}`));
+    await pay();
+    expect((await getObligation(env.DB, m1.id))?.status).toBe("queued");
+    expect((await listQueuedPayouts(env.DB, 200)).filter((p) => p.obligation_id === m1.id)).toHaveLength(1);
+    expect(await inboxOf()).not.toContain("Drukarnia");
+  });
+
   it("a printer escalation after a withheld payout can still be decided: approve re-checks, reject settles", async () => {
     const { order } = await newOrderRow();
     const at = "2099-01-01T10:00:00.000Z";

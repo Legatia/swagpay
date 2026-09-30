@@ -157,19 +157,22 @@ describe("treasury tools", () => {
     });
 
     it("sends a milestone whose printer isn't a partner, or whose address or chain changed, to the owner", async () => {
+      const notPartner = (why: string) => `Treasury: printer_cost obligation #1 (order 7) for 128.750000 USDC can't be paid: printer #3 ${why}. Approve once the printer is registered again (the treasury re-checks); reject if you pay it by hand or it isn't owed (that settles it).`;
+      // Approving alone would loop: the milestone keeps its old address, so the owner re-registers it or pays by hand.
+      const moved = (chain: string) => `Treasury: printer_cost obligation #1 (order 7) for 128.750000 USDC can't be paid: it is fixed to printer #3's old address ${VADDR} on ${chain}. Re-register that address with /vendor 3 pay ${VADDR} ${chain} and approve, or reject and pay the printer by hand (that settles it).`;
       const cases: Array<[ObligationRow, VendorRow[], string, string]> = [
         // Pausing clears the payout, as the registry does.
-        [milestone(), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner", "is not a partner"],
-        [milestone(), [vendor({ status: "screened", payout_address: null, payout_chain: null })], "printer #3 is not a partner", "is not a partner"],
-        [milestone(), [], "printer #3 is not a partner", "is not a partner"],
+        [milestone(), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner", notPartner("is not a partner")],
+        [milestone(), [vendor({ status: "screened", payout_address: null, payout_chain: null })], "printer #3 is not a partner", notPartner("is not a partner")],
+        [milestone(), [], "printer #3 is not a partner", notPartner("is not a partner")],
         // The owner's approval of a late deposit doesn't pass a paused printer.
-        [milestone({ status: "approved", approved_by: "owner" }), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner", "is not a partner"],
-        [milestone(), [vendor({ payout_address: "0x" + "cd".repeat(20) })], "the destination is not printer #3's registered address", "is registered at another address"],
-        [milestone(), [vendor({ payout_address: null, payout_chain: null })], "the destination is not printer #3's registered address", "has no registered address"],
-        [milestone(), [vendor({ payout_chain: "ARC" })], "the chain is not printer #3's registered chain", "is registered on another chain"],
-        [milestone({ chain: "MATIC" }), [vendor()], "the chain is not printer #3's registered chain", "is registered on another chain"],
+        [milestone({ status: "approved", approved_by: "owner" }), [vendor({ status: "paused", payout_address: null, payout_chain: null })], "printer #3 is not a partner", notPartner("is not a partner")],
+        [milestone(), [vendor({ payout_address: "0x" + "cd".repeat(20) })], "the destination is not printer #3's registered address", moved("BASE")],
+        [milestone(), [vendor({ payout_address: null, payout_chain: null })], "the destination is not printer #3's registered address", moved("BASE")],
+        [milestone(), [vendor({ payout_chain: "ARC" })], "the chain is not printer #3's registered chain", moved("BASE")],
+        [milestone({ chain: "MATIC" }), [vendor()], "the chain is not printer #3's registered chain", moved("MATIC")],
       ];
-      for (const [o, vendors, what, why] of cases) {
+      for (const [o, vendors, what, summary] of cases) {
         const { h, state } = fake([o], { vendors });
         const r = await h.pay_obligation({ obligationId: 1, reason: "try" });
         expect(r.content, what).toBe(`Not paid: ${what}. Sent to the owner (#9); their decision arrives as an event.`);
@@ -177,9 +180,7 @@ describe("treasury tools", () => {
         expect(state.escalated).toEqual([1]);
         expect(state.escalationKeys).toEqual(["printer:1"]);
         expect(state.escalationPayloads).toEqual([{ obligationId: 1 }]);
-        expect(state.escalations).toEqual([
-          `Treasury: printer_cost obligation #1 (order 7) for 128.750000 USDC can't be paid: printer #3 ${why}. Approve once the printer is registered again (the treasury re-checks); reject if you pay it by hand or it isn't owed (that settles it).`,
-        ]);
+        expect(state.escalations).toEqual([summary]);
         // #3 only: the printer's name never reaches the treasury's texts.
         expect(state.escalations[0]).not.toContain("Drukarnia");
         expect(state.decisions[0]).toMatchObject({ verdict: "escalate", outcome: "escalated", detail: "#9" });

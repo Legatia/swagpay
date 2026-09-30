@@ -55,8 +55,12 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
   const overLimit = (ob: ObligationRow, what: string): Promise<Logged> => toOwner(`limit:${ob.id}`, ob,
     `Treasury: ${named(ob)} for ${formatUnits(ob.amount_units)} ${ob.token} is ${what}. Approve to let the treasury agent pay it anyway (Circle's own limit still applies); reject to handle it yourself.`, what);
   // The printer by number only: the owner's decision forwards this text to the treasury, whose reasons are public.
-  const printerMoved = (ob: ObligationRow, what: string, why: string): Promise<Logged> => toOwner(`printer:${ob.id}`, ob,
-    `Treasury: ${named(ob)} for ${formatUnits(ob.amount_units)} ${ob.token} can't be paid: printer #${ob.vendor_id} ${why}. Approve once the printer is registered again (the treasury re-checks); reject if you pay it by hand or it isn't owed (that settles it).`, what);
+  const notPartner = (ob: ObligationRow, what: string): Promise<Logged> => toOwner(`printer:${ob.id}`, ob,
+    `Treasury: ${named(ob)} for ${formatUnits(ob.amount_units)} ${ob.token} can't be paid: printer #${ob.vendor_id} is not a partner. Approve once the printer is registered again (the treasury re-checks); reject if you pay it by hand or it isn't owed (that settles it).`, what);
+  // A milestone keeps the address and chain it was created with, so approving alone would come straight back: the owner
+  // re-registers that address, or pays by hand.
+  const printerMoved = (ob: ObligationRow, what: string): Promise<Logged> => toOwner(`printer:${ob.id}`, ob,
+    `Treasury: ${named(ob)} for ${formatUnits(ob.amount_units)} ${ob.token} can't be paid: it is fixed to printer #${ob.vendor_id}'s old address ${ob.destination} on ${ob.chain}. Re-register that address with /vendor ${ob.vendor_id} pay ${ob.destination} ${ob.chain} and approve, or reject and pay the printer by hand (that settles it).`, what);
 
   return {
     pay_obligation: logged(ctx, "pay_obligation", PayInput, async ({ obligationId }) => {
@@ -82,10 +86,9 @@ export function makeTreasuryHandlers(ctx: TreasuryContext): Record<string, ToolH
         const vendor = await ctx.getVendor(ob.vendor_id);
         const printer = `printer #${ob.vendor_id}`;
         const address = `the destination is not ${printer}'s registered address`;
-        if (!vendor || vendor.status !== "partner") return printerMoved(ob, `${printer} is not a partner`, "is not a partner");
-        if (!vendor.payout_address) return printerMoved(ob, address, "has no registered address");
-        if (vendor.payout_address.toLowerCase() !== ob.destination.toLowerCase()) return printerMoved(ob, address, "is registered at another address");
-        if (!vendor.payout_chain || vendor.payout_chain !== ob.chain) return printerMoved(ob, `the chain is not ${printer}'s registered chain`, "is registered on another chain");
+        if (!vendor || vendor.status !== "partner") return notPartner(ob, `${printer} is not a partner`);
+        if (!vendor.payout_address || vendor.payout_address.toLowerCase() !== ob.destination.toLowerCase()) return printerMoved(ob, address);
+        if (!vendor.payout_chain || vendor.payout_chain !== ob.chain) return printerMoved(ob, `the chain is not ${printer}'s registered chain`);
       } else {
         const expected = ob.kind === "printer_cost" ? ctx.policy.payoutAddress : ob.kind === "reserve" ? ctx.policy.reserveAddress : ob.destination;
         if (!expected || expected.toLowerCase() !== ob.destination.toLowerCase()) return blocked(`the destination ${ob.destination} is not the configured address`);

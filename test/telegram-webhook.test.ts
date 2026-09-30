@@ -800,7 +800,7 @@ describe("Telegram webhook", () => {
       usage,
       usage,
       `Printer #${v} is paid at ${addr} on ARC-TESTNET.`,
-      `Printer #${v} is now paused. Its payout address was cleared: after /vendor ${v} partner, register it again with /vendor ${v} pay.`,
+      `Printer #${v} is now paused; cleared payout ${addr} on ARC-TESTNET. After /vendor ${v} partner, register it again with /vendor ${v} pay (its unpaid milestones stay fixed to this address and chain).`,
       `Printer #${v} is now screened.`,
       "Printer #999999 doesn't exist.",
       "Printer #999999 doesn't exist.",

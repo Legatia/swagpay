@@ -45,7 +45,12 @@ Owner commands in Telegram:
 
 How a partner is paid: the printer cost goes out as two milestones, half at deposit and half after `/printed`. The second never goes out before `/printed`, and together they add up to the printer's cost at the quote's rate, without the FX buffer: the buffer stays in the wallet as margin. Agree that USDC amount with the printer when you book it. Money goes only to the printer's registered address and chain, only while it is a `partner`, and within the per-payout and 24-hour limits.
 
-If a printer is paused, or its address changes, its queued payouts are withheld and come to you as approvals.
+A milestone stays fixed to the address and chain the printer had when the deposit came in. When the printer is paused, or registers another address or chain, the treasury stops paying it, and you decide in Telegram:
+- **Already queued.** When the wallet runner next fetches payouts, the payout is withheld and comes to you as an approval. Withholding is best-effort: if the runner fetched that batch just before, the payout may still go out, so check the wallet history first. Approve to retry once the printer is registered again, or reject to settle it by hand.
+- **Not a partner** (paused, or back to screened). Approve once the printer is a partner with its payout registered again (the treasury re-checks), or reject if you pay it by hand or it isn't owed.
+- **Address or chain changed.** Approving alone would come straight back: the milestone still goes to the old address. Re-register that address with `/vendor <#> pay <old address> <CHAIN>` and approve, or reject and pay the printer by hand (that settles it).
+
+Pausing or screening a partner clears its payout; the reply shows what was cleared.
 
 Lead times still count Polish business days. `/log` and `/api/metrics` show vendor counts and USDC paid only, never a printer's name.
 

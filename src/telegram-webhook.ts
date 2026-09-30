@@ -416,8 +416,9 @@ async function vendorCommand(env: Env, args: string[]): Promise<string> {
   const status: VendorStatus = action;
   const before = await getVendor(env.DB, id);
   if (!before || !(await setVendorStatus(env.DB, id, status))) return `Printer #${id} doesn't exist.`;
-  const cleared = status !== "partner" && before.payout_address !== null;
-  return `Printer #${id} is now ${status}.${cleared ? ` Its payout address was cleared: after /vendor ${id} partner, register it again with /vendor ${id} pay.` : ""}`;
+  if (status === "partner" || before.payout_address === null) return `Printer #${id} is now ${status}.`;
+  // What was cleared, so the owner can register it again: unpaid milestones stay fixed to it (pay_obligation).
+  return `Printer #${id} is now ${status}; cleared payout ${before.payout_address} on ${before.payout_chain}. After /vendor ${id} partner, register it again with /vendor ${id} pay (its unpaid milestones stay fixed to this address and chain).`;
 }
 
 async function openList(env: Env): Promise<string> {
