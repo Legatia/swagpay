@@ -66,7 +66,8 @@ async function send() {
     });
     show({ stage: "done" });
     store.finish();
-    location.assign(url);
+    // replace, not assign: Back from the order page must not restore this editor from the bfcache.
+    location.replace(url);
   } catch (err) {
     sending = false;
     $("send-status").hidden = true;

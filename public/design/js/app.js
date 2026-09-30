@@ -324,3 +324,8 @@ function init() {
 }
 
 init();
+// A page restored from the back-forward cache keeps stale state (sending stuck, a store that no
+// longer saves), so start over from the saved draft.
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted) location.reload();
+});
