@@ -38,9 +38,12 @@ const kraken = runner(cfg.krakenBin);
 
 const log = { info: (m) => console.log(m), error: (m) => console.error(m) };
 
+// Cash-outs withdrawn but not recorded by the Worker, so a later poll reports them instead of withdrawing again.
+const unrecorded = new Map();
+
 for (;;) {
   try {
-    await runOnce({ api, run, kraken, cfg, log });
+    await runOnce({ api, run, kraken, cfg, log, unrecorded });
   } catch (err) {
     console.error("runner tick failed:", err instanceof Error ? err.message : err);
   }

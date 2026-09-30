@@ -140,6 +140,7 @@ function fakeKraken(answers) {
 }
 const market = {
   "closed-orders": [0, { closed: {} }],
+  "open-orders": [0, { open: {} }],
   "withdrawal info EUR": [0, { method: "SEPA", limit: "10000", fee: "1.00" }],
   "ticker USDCEUR": [0, { USDCEUR: { a: ["0.8812", "1", "1"], b: ["0.8810", "1", "1"] } }],
   "balance": [0, { USDC: "300.000000", ZEUR: "0.0000" }],
@@ -250,4 +251,34 @@ test("a failed or withdraw_error result that is not recorded throws", async () =
   const b = fakeSwagpay([], [], [sold]);
   b.cashoutStatus.withdraw_error = 401;
   await assert.rejects(runCashout(sold, { kraken: fakeKraken({ ...market, "withdraw EUR": [1, {}] }).run, api: b.api, cfg: kcfg, log: quiet }), /withdraw_error result not recorded \(HTTP 401\)/);
+});
+
+test("R1: a withdrawal the Worker did not record is re-posted on the next poll, never withdrawn twice", async () => {
+  const sold = { ...cashout, status: "sold" };
+  const swagpay = fakeSwagpay([], [], [sold]);
+  swagpay.failCashoutPosts.withdrawn = true;
+  const k = fakeKraken(market);
+  const unrecorded = new Map();
+  const ctx = { api: swagpay.api, run: async () => ({ code: 0, stdout: "", stderr: "" }), kraken: k.run, cfg: kcfg, log: quiet, unrecorded };
+  await runOnce(ctx);
+  assert.equal(k.calls.filter((c) => c.startsWith("withdraw EUR")).length, 1);
+  assert.equal(unrecorded.get(5).withdrawalRef, "WREF-1");
+  swagpay.failCashoutPosts.withdrawn = false;
+  await runOnce(ctx);
+  assert.equal(k.calls.filter((c) => c.startsWith("withdraw EUR")).length, 1);
+  const last = swagpay.cashoutPosts[swagpay.cashoutPosts.length - 1];
+  assert.deepEqual(last, { id: 5, body: { stage: "withdrawn", withdrawalRef: "WREF-1", feeCents: 100 } });
+  assert.equal(unrecorded.size, 0);
+});
+
+test("R2: an old cash-out whose sale is still open at Kraken is not failed", async () => {
+  const short = { ...market, balance: [0, { USDC: "10.0" }], "open-orders": [0, { open: { OX: { cl_ord_id: K3, status: "open" } } }] };
+  const old = { ...cashout, createdAt: new Date(Date.now() - 3 * 3_600_000).toISOString() };
+  const swagpay = fakeSwagpay([], [], [old]);
+  const lines = [];
+  const k = fakeKraken(short);
+  await runCashout(old, { kraken: k.run, api: swagpay.api, cfg: kcfg, log: { info: (m) => lines.push(m), error() {} } });
+  assert.ok(k.calls.some((c) => c.startsWith("open-orders")));
+  assert.deepEqual(swagpay.cashoutPosts, []);
+  assert.match(lines.join("\n"), /still open at Kraken/);
 });

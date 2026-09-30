@@ -83,6 +83,9 @@ export const balanceOf = (b, asset) => Number(unwrap(b)?.[asset] ?? 0) || 0;
 export const feeOf = (w) => Number(unwrap(w)?.fee ?? 0) || 0;
 export const txidOf = (o) => { const t = unwrap(o)?.txid; return (Array.isArray(t) ? t[0] : t) ?? null; };
 export const refidOf = (w) => unwrap(w)?.refid ?? null;
+export function openByClOrdId(r, id) {
+  return Object.values(unwrap(r)?.open ?? {}).some((o) => o?.cl_ord_id === id);
+}
 export function closedByClOrdId(r, id) {
   const closed = unwrap(r)?.closed ?? {};
   for (const [txid, o] of Object.entries(closed)) if (o?.cl_ord_id === id && Number(o?.vol_exec) > 0) return { txid, volExec: Number(o.vol_exec) };
@@ -99,7 +102,7 @@ async function kj(kraken, args) {
  * One cash-out: sell just enough USDC (queued), then withdraw to the owner's saved account (sold). The sale carries the
  * cash-out's client order id and is looked up first, so a retry after a lost result never sells twice.
  */
-export async function runCashout(c, { kraken, api, cfg, log, now = Date.now() }) {
+export async function runCashout(c, { kraken, api, cfg, log, now = Date.now(), unrecorded = new Map() }) {
   const send = (body) => api(`/api/treasury/cashouts/${c.id}/result`, { method: "POST", body: JSON.stringify(body) });
   // A result the Worker did not record stops this pass: the next poll decides from the Worker's state.
   const post = async (body, what) => {
@@ -130,8 +133,11 @@ export async function runCashout(c, { kraken, api, cfg, log, now = Date.now() })
       const have = balanceOf(await kj(kraken, ["balance"]), "USDC");
       if (have < Number(volume)) {
         const why = `USDC has not arrived at Kraken (have ${have}, need ${volume})`;
-        if (now - Date.parse(c.createdAt) > 2 * 3_600_000) { if (!cfg.dryRun) await post({ status: "failed", error: why }, "failed"); }
-        else log.info(`cash-out #${c.id}: waiting: ${why}`);
+        if (now - Date.parse(c.createdAt) > 2 * 3_600_000) {
+          // A sale still open at Kraken may fill later: never fail the cash-out while it is.
+          if (openByClOrdId(await kj(kraken, ["open-orders"]), c.clientOrderId)) log.info(`cash-out #${c.id}: waiting: its sale is still open at Kraken (${why})`);
+          else if (!cfg.dryRun) await post({ status: "failed", error: why }, "failed");
+        } else log.info(`cash-out #${c.id}: waiting: ${why}`);
         return;
       }
       const sell = ["order", "sell", fiat.pair, volume, "--type", "market", "--cl-ord-id", c.clientOrderId];
@@ -147,6 +153,13 @@ export async function runCashout(c, { kraken, api, cfg, log, now = Date.now() })
   }
   if (status === "sold") {
     if (cfg.dryRun) { log.info(`[dry run] cash-out #${c.id}: would withdraw ${c.amount} ${c.fiat} to "${key}"`); return; }
+    // Withdrawn earlier in this process but the Worker did not record it: report it again, never withdraw twice.
+    const earlier = unrecorded.get(c.id);
+    if (earlier) {
+      await post({ stage: "withdrawn", ...earlier }, "withdrawn");
+      unrecorded.delete(c.id);
+      return;
+    }
     let w;
     try {
       w = await kj(kraken, ["withdraw", c.fiat, key, c.amount]);
@@ -157,7 +170,10 @@ export async function runCashout(c, { kraken, api, cfg, log, now = Date.now() })
     // The money has left: a failure below must never be reported as a failed withdrawal.
     try {
       const info = await kj(kraken, ["withdrawal", "info", c.fiat, key, c.amount]).catch(() => null);
-      await post({ stage: "withdrawn", withdrawalRef: refidOf(w), feeCents: info ? Math.round(feeOf(info) * 100) : null }, "withdrawn");
+      const body = { withdrawalRef: refidOf(w), feeCents: info ? Math.round(feeOf(info) * 100) : null };
+      unrecorded.set(c.id, body);
+      await post({ stage: "withdrawn", ...body }, "withdrawn");
+      unrecorded.delete(c.id);
     } catch (err) {
       log.error(`cash-out #${c.id}: withdrawn but not recorded (${err instanceof Error ? err.message : String(err)})`);
     }
