@@ -1,11 +1,12 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { toVendorRows, upsertSql } from "../scripts/vendors-import-lib.mjs";
 import { createOrder } from "../src/db";
 import { IntakeSchema } from "../src/intake";
 import { createObligation, getObligation } from "../src/treasury";
 import {
   cityFromPlace, getVendor, listVendors, markJob, proposeVendorJob, setVendorPayout, setVendorStatus, suggestVendors, vendorJobFor, vendorScore,
-  type VendorStatus,
+  type VendorRow, type VendorStatus,
 } from "../src/vendors";
 
 const NOW = "2099-01-01T10:00:00.000Z";
@@ -23,7 +24,7 @@ async function order(): Promise<number> {
   }), new Date(NOW));
   return order.id;
 }
-const job = (orderId: number, vendorId: number, deliverBy = "2099-10-08T17:00") => ({ orderId, vendorId, deliverBy, currency: "PLN", cents: 120_000 });
+const job = (orderId: number, vendorId: number, deliverBy = "2099-10-08T15:00:00.000Z") => ({ orderId, vendorId, deliverBy, currency: "PLN", cents: 120_000 });
 const ADDR = "0x" + "a".repeat(40);
 
 describe("cityFromPlace", () => {
@@ -34,6 +35,10 @@ describe("cityFromPlace", () => {
     expect(cityFromPlace("Jio World Centre, BKC, Mumbai")).toBe("Mumbai");
     expect(cityFromPlace("Berlin")).toBeNull();
     expect(cityFromPlace("Londonderry")).toBeNull();
+    expect(cityFromPlace("Warsaw Road, London")).toBe("London");
+    expect(cityFromPlace("Bombay Street, London")).toBe("London");
+    expect(cityFromPlace("London Road, Warsaw")).toBe("Warsaw");
+    expect(cityFromPlace("Kolektyw3 w Warszawie")).toBe("Warsaw");
   });
 });
 
@@ -70,6 +75,19 @@ describe("vendor status and payout", () => {
     expect((await getVendor(env.DB, id))?.status).toBe("partner");
     expect((await listVendors(env.DB, { city: "Lisbon", statuses: ["partner"] })).map((v) => v.id)).toEqual([id]);
     expect(await listVendors(env.DB, { city: "Lisbon", statuses: ["paused"] })).toEqual([]);
+  });
+
+  it("clears the payout when a vendor leaves partner, so it must register again", async () => {
+    for (const away of ["paused", "screened", "candidate"] as const) {
+      const id = await vendor({ name: `Away ${away}` });
+      expect(await setVendorPayout(env.DB, id, ADDR, "ARC")).toBe("ok");
+      expect(await setVendorStatus(env.DB, id, "partner")).toBe(true);
+      expect(await getVendor(env.DB, id)).toMatchObject({ payout_address: ADDR, payout_chain: "ARC" });
+      await setVendorStatus(env.DB, id, away);
+      expect(await getVendor(env.DB, id)).toMatchObject({ status: away, payout_address: null, payout_chain: null });
+      await setVendorStatus(env.DB, id, "partner");
+      expect(await getVendor(env.DB, id)).toMatchObject({ payout_address: null, payout_chain: null });
+    }
   });
 
   it("stores a payout only for a partner", async () => {
@@ -110,6 +128,14 @@ describe("vendor jobs", () => {
     expect(await markJob(env.DB, late, "delivered", new Date("2099-10-09T10:00:00Z"))).toMatchObject({ status: "delivered", on_time: 0 });
     expect(await vendorScore(env.DB, v)).toEqual({ jobs: 2, onTime: 1 });
     expect(await markJob(env.DB, 999_999, "booked")).toBeNull();
+    const edge = await order();
+    await proposeVendorJob(env.DB, job(edge, v));
+    await markJob(env.DB, edge, "booked");
+    expect(await markJob(env.DB, edge, "delivered", new Date("2099-10-08T15:00:30.000Z"))).toMatchObject({ on_time: 0 });
+    const exact = await order();
+    await proposeVendorJob(env.DB, job(exact, v));
+    await markJob(env.DB, exact, "booked");
+    expect(await markJob(env.DB, exact, "delivered", new Date("2099-10-08T15:00:00.000Z"))).toMatchObject({ on_time: 1 });
   });
 });
 
@@ -126,5 +152,35 @@ describe("obligations for vendors", () => {
       orderId: null, kind: "reserve", token: "USDC", amountUnits: 1, destination: ADDR, chain: "ARC", dueAt: new Date(NOW), sourceRef: "vendor-test:2",
     });
     expect(plain.vendor_id).toBeNull();
+  });
+});
+
+describe("import re-run against D1", () => {
+  const rec = { name: "Roundtrip Print", nip: "5342708006", email: "a@b.pl", methods: ["dtg"], lead_days: {}, vat_status: "active", vat_checked_at: "2026-09-29" };
+  const run = async (r: Record<string, unknown>, key: string) => {
+    const [row] = toVendorRows("warsaw", [{ ...rec, ...r }]);
+    await env.DB.prepare(upsertSql([{ ...row, source_ref: key }])).run();
+    return env.DB.prepare("SELECT * FROM vendors WHERE source_ref = ?").bind(key).first<VendorRow>();
+  };
+
+  it("keeps partner status and payout, still updates data", async () => {
+    const first = await run({}, "rt:partner");
+    expect(first).toMatchObject({ status: "screened", payout_address: null });
+    await setVendorStatus(env.DB, first!.id, "partner");
+    expect(await setVendorPayout(env.DB, first!.id, ADDR, "BASE")).toBe("ok");
+    const again = await run({ name: "Renamed Print", email: null, methods: ["screen"] }, "rt:partner");
+    expect(again).toMatchObject({ id: first!.id, status: "partner", payout_address: ADDR, payout_chain: "BASE", name: "Renamed Print", email: null, methods: '["screen"]' });
+  });
+
+  it("keeps paused status and payout, still updates data", async () => {
+    const first = await run({}, "rt:paused");
+    await env.DB.prepare("UPDATE vendors SET status = 'paused', payout_address = ?, payout_chain = 'BASE' WHERE id = ?").bind(ADDR, first!.id).run();
+    const again = await run({ name: "Renamed Paused" }, "rt:paused");
+    expect(again).toMatchObject({ status: "paused", payout_address: ADDR, payout_chain: "BASE", name: "Renamed Paused" });
+  });
+
+  it("demotes a screened row to candidate when its email disappears", async () => {
+    expect(await run({}, "rt:screened")).toMatchObject({ status: "screened" });
+    expect(await run({ email: null }, "rt:screened")).toMatchObject({ status: "candidate" });
   });
 });

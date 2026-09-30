@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toVendorRows, upsertSql } from "./vendors-import.mjs";
+import { toVendorRows, upsertSql } from "./vendors-import-lib.mjs";
 
 const warsaw = { name: "Projektant Nadruków", nip: "5342708006", email: "a@b.pl", website: "https://x.pl/", methods: ["dtg", "sublimation"], lead_days: {}, lat: 52.2, lng: 21, vat_status: "active", vat_checked_at: "2026-09-29" };
 
@@ -54,4 +54,12 @@ test("upsertSql escapes quotes and never touches payout or a partner/paused stat
   const [insertPart, updatePart] = sql.split("ON CONFLICT");
   assert.ok(!/payout_/.test(insertPart) && !/payout_/.test(updatePart));
   assert.equal(upsertSql([], "x"), "");
+});
+
+test("skips nameless records and duplicate slugs with a warning", () => {
+  const warns = [];
+  const rows = toVendorRows("warsaw", [warsaw, { ...warsaw, name: "" }, { ...warsaw, name: undefined }, { ...warsaw, name: "PROJEKTANT nadrukow", email: "z@z.pl" }], (m) => warns.push(m));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].email, "a@b.pl");
+  assert.equal(warns.length, 3);
 });

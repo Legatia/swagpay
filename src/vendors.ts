@@ -41,17 +41,22 @@ export interface VendorJobRow {
 }
 
 const CITY_ALIASES: Array<[string, string[]]> = [
-  ["Warsaw", ["warsaw", "warszawa"]],
+  ["Warsaw", ["warsaw", "warszawa", "warszawie"]],
   ["Lisbon", ["lisbon", "lisboa"]],
   ["London", ["london"]],
   ["Mumbai", ["mumbai", "bombay", "bkc"]],
 ];
 
-/** The vendor city a delivery place is in, matching names and aliases case-insensitively on word boundaries. */
-export function cityFromPlace(place: string): string | null {
-  const words = new Set(place.toLowerCase().split(/[^\p{L}\p{N}]+/u));
+function matchCity(text: string): string | null {
+  const words = new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u));
   for (const [city, aliases] of CITY_ALIASES) if (aliases.some((a) => words.has(a))) return city;
   return null;
+}
+
+/** The vendor city a delivery place is in: the last comma-separated segment first (the city usually ends an address), then the whole string. Names and aliases match case-insensitively on word boundaries. */
+export function cityFromPlace(place: string): string | null {
+  const last = place.split(",").pop() ?? "";
+  return matchCity(last) ?? matchCity(place);
 }
 
 export async function getVendor(db: D1Database, id: number): Promise<VendorRow | null> {
@@ -70,7 +75,16 @@ export async function listVendors(db: D1Database, f: { city?: string; statuses?:
 }
 
 export async function setVendorStatus(db: D1Database, id: number, status: VendorStatus, now: Date = new Date()): Promise<boolean> {
-  const res = await db.prepare("UPDATE vendors SET status = ?, updated_at = ? WHERE id = ?").bind(status, now.toISOString(), id).run();
+  // Leaving partner drops the registered payout, so a re-promoted printer must register its address again.
+  const res = await db
+    .prepare(
+      `UPDATE vendors SET status = ?1, updated_at = ?2,
+         payout_address = CASE WHEN ?1 = 'partner' THEN payout_address ELSE NULL END,
+         payout_chain = CASE WHEN ?1 = 'partner' THEN payout_chain ELSE NULL END
+       WHERE id = ?3`,
+    )
+    .bind(status, now.toISOString(), id)
+    .run();
   return res.meta.changes === 1;
 }
 
@@ -160,9 +174,9 @@ export async function markJob(
   const from = FROM[to];
   const inList = from.map(() => "?").join(", ");
   if (to === "delivered") {
-    // deliver_by is local wall-clock text (no zone) like "2099-10-08T17:00", so compare to minute precision as text.
+    // Both are toISOString() output (UTC), so text order is time order.
     await db
-      .prepare(`UPDATE vendor_jobs SET status = 'delivered', delivered_at = ?1, on_time = CASE WHEN substr(?1, 1, 16) <= substr(deliver_by, 1, 16) THEN 1 ELSE 0 END WHERE order_id = ?2 AND status IN (${from.map((_, i) => `?${i + 3}`).join(", ")})`)
+      .prepare(`UPDATE vendor_jobs SET status = 'delivered', delivered_at = ?1, on_time = CASE WHEN ?1 <= deliver_by THEN 1 ELSE 0 END WHERE order_id = ?2 AND status IN (${from.map((_, i) => `?${i + 3}`).join(", ")})`)
       .bind(at, orderId, ...from)
       .run();
   } else {
