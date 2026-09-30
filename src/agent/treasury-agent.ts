@@ -10,7 +10,7 @@ import {
 import { SqlR2ConversationStore, repairDanglingToolUse, trimToRecentTurns } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
 import { runTurn, type TurnResult } from "./loop";
-import { createAnthropicModel, type ModelClient } from "./model";
+import { createModel, type ModelClient } from "./model";
 import { TREASURY_PROMPT } from "./treasury-prompt";
 import { TREASURY_TOOLS, makeTreasuryHandlers } from "./treasury-tools";
 
@@ -184,7 +184,7 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
         this.sql`DELETE FROM inbox WHERE id <= ${pending.at(-1)!.id}`;
         this.setMeta("turn_pending", "1");
       }
-      const real = this.modelOverride ?? createAnthropicModel(this.env);
+      const real = this.modelOverride ?? createModel(this.env);
       const model: ModelClient = {
         create: async (req) => {
           const n = this.callsToday();

@@ -14,7 +14,7 @@ import { SqlR2ConversationStore, repairDanglingToolUse } from "./conversation";
 import { formatInbox, type InboxItem } from "./inbox";
 import { runTurn, type ConversationStore, type TurnResult } from "./loop";
 import { previewsIn } from "./previews";
-import { createAnthropicModel, type ModelClient } from "./model";
+import { createModel, type ModelClient } from "./model";
 import { SYSTEM_PROMPT } from "./prompt";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile } from "./tools";
@@ -400,7 +400,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
         this.setMeta("turn_pending", "1");
       }
 
-      const real = this.modelOverride ?? createAnthropicModel(this.env);
+      const real = this.modelOverride ?? createModel(this.env);
       const model: ModelClient = {
         create: async (req) => {
           const n = Number(this.meta("model_calls") ?? "0");

@@ -9,15 +9,30 @@ Brand kit: `docs/brand.md` (visual preview at `/brandkit.html`).
     npm install
     npm run types
     npm test
-    printf 'ANTHROPIC_API_KEY=sk-ant-...\nTURNSTILE_SECRET=1x0000000000000000000000000000000AA\n' > .dev.vars
+    printf 'GEMINI_API_KEY=...\nTURNSTILE_SECRET=1x0000000000000000000000000000000AA\n' > .dev.vars
     npm run dev
+
+## Model
+
+Both agents (order and treasury) run on one model, chosen in `wrangler.jsonc`:
+
+| Var | Set to |
+|---|---|
+| `MODEL_PROVIDER` | `gemini` (default here) or `anthropic` |
+| `GEMINI_MODEL` | e.g. `gemini-3.8-flash` (Google's recommended model for agents) |
+| `MODEL` | the Claude model, used when `MODEL_PROVIDER` is `anthropic` |
+
+Gemini runs through `src/agent/gemini.ts`, which translates the agents' requests to `generateContent` and back:
+tools go as JSON Schema (`parametersJsonSchema`), artwork previews as inline data, and Gemini's thought signatures
+are kept on each call and sent back, which multi-step tool use needs. Switching providers keeps existing
+conversations working. The key only ever travels in the `x-goog-api-key` header; errors never include it.
 
 ## Deploy (owner)
 
     npx wrangler d1 create swagpay            # put the printed database_id into wrangler.jsonc
     npx wrangler r2 bucket create swagpay-artwork
     npx wrangler d1 migrations apply swagpay --remote
-    npx wrangler secret put ANTHROPIC_API_KEY  # a Claude Console API key
+    npx wrangler secret put GEMINI_API_KEY     # a Google AI Studio API key (or ANTHROPIC_API_KEY, see "Model")
     npm run deploy
 
 ## Owner setup (plan 2)
@@ -26,7 +41,8 @@ Secrets (`npx wrangler secret put <NAME>`; for local dev put them in `.dev.vars`
 
 | Secret | What it is |
 |---|---|
-| `ANTHROPIC_API_KEY` | Claude Console API key |
+| `GEMINI_API_KEY` | Google AI Studio API key, when `MODEL_PROVIDER` is `gemini` |
+| `ANTHROPIC_API_KEY` | Claude Console API key, when `MODEL_PROVIDER` is `anthropic` |
 | `TURNSTILE_SECRET` | Turnstile widget secret (dev: `1x0000000000000000000000000000000AA`, always passes) |
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
 | `TELEGRAM_OWNER_CHAT_ID` | Your private chat id with the bot, never a group: message the bot, then read `chat.id` from `getUpdates`. Anyone in a group chat could press the buttons. |
