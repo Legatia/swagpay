@@ -23,3 +23,10 @@ CREATE TABLE sandbox_runner_sends (
   tx_hash TEXT,
   created_at TEXT NOT NULL
 );
+
+-- The owner panel's rate limit: one row per POST, counted per order over the last hour.
+CREATE TABLE sandbox_owner_calls (
+  order_id INTEGER NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE INDEX sandbox_owner_calls_order ON sandbox_owner_calls(order_id, at);
