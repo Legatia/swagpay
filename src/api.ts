@@ -13,6 +13,7 @@ import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
 import { addClaim, createPaymentRequest, findPaymentRequest, getPaymentRequest, listPaymentRequests, type PaymentRequestRow } from "./payments";
 import { EMPTY_SPEC, itemsKey, type OrderSpec } from "./order-spec";
 import { loadPolicy, quoteStillValid } from "./policy";
+import { CREATE_KEY, completeCreateKey, intakeHash, lookupCreateKey, releaseCreateKey, reserveCreateKey, type KeyLookup } from "./order-create-keys";
 import { acceptQuoteForOrder, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
@@ -37,6 +38,14 @@ function orderCap(env: Env): number {
   return 20;
 }
 const fail = (status: number, error: string) => json(status, { error });
+
+/** The answer for a create key seen before, or null when it is new. */
+function answerSeenKey(seen: KeyLookup): Response | null {
+  if (seen.kind === "replay") return json(200, { token: seen.token, url: `/o/${seen.token}` }, NO_STORE);
+  if (seen.kind === "conflict") return fail(409, "This idempotencyKey was already used for a different order.");
+  if (seen.kind === "pending") return json(503, { error: "This order is still being created. Try again in a moment." }, { ...NO_STORE, "retry-after": "2" });
+  return null;
+}
 
 async function readJson(request: Request): Promise<unknown | undefined> {
   try {
@@ -100,6 +109,16 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
   if (path === "/api/orders" && request.method === "POST") {
     const body = await readJson(request);
     if (body === undefined) return fail(400, "body must be JSON");
+    const now = new Date();
+    // A retried create with the same key gets the same order. Checked before the human check: a Turnstile token is single-use.
+    const rawKey = (body as { idempotencyKey?: unknown } | null)?.idempotencyKey;
+    let createKey: { key: string; hash: string } | null = null;
+    if (rawKey !== undefined) {
+      if (typeof rawKey !== "string" || !CREATE_KEY.test(rawKey)) return fail(400, "idempotencyKey: use 16 to 64 letters, digits, - or _");
+      createKey = { key: rawKey, hash: await intakeHash(body as Record<string, unknown>) };
+      const seen = answerSeenKey(await lookupCreateKey(env.DB, createKey.key, createKey.hash, now));
+      if (seen) return seen;
+    }
     if (String(env.REQUIRE_TURNSTILE) !== "0") {
       const secret = env.TURNSTILE_SECRET;
       const verifyHuman = deps.verifyHuman ?? (secret ? (token: unknown, ip: string | null) => verifyTurnstile(token, ip, secret) : async () => false);
@@ -109,21 +128,33 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     }
     const parsed = IntakeSchema.safeParse(body);
     if (!parsed.success) return fail(400, issueText(parsed.error));
-    const now = new Date();
     const dateProblem = checkIntakeDates(parsed.data, now);
     if (dateProblem) return fail(400, dateProblem);
     const cap = orderCap(env);
     if ((await countOrdersSince(env.DB, new Date(now.getTime() - 86_400_000))) >= cap) {
       return fail(429, "Swagpay is taking as many new orders as it can today. Please try again tomorrow.");
     }
-    const { order, token } = await createOrder(env.DB, parsed.data, now);
+    // Only a create that passed every check claims its key, so a refused one can be corrected and retried.
+    if (createKey && !(await reserveCreateKey(env.DB, createKey.key, createKey.hash, now))) {
+      return answerSeenKey(await lookupCreateKey(env.DB, createKey.key, createKey.hash, now)) ?? fail(503, "Please try again.");
+    }
+    let created: { order: OrderRow; token: string };
+    try {
+      created = await createOrder(env.DB, parsed.data, now);
+    } catch (err) {
+      if (createKey) await releaseCreateKey(env.DB, createKey.key);
+      throw err;
+    }
+    const { order, token } = created;
     try {
       const agent = await getAgentByName(env.OrderAgent, order.instance);
       await agent.init(order.id, parsed.data);
     } catch (err) {
+      if (createKey) await releaseCreateKey(env.DB, createKey.key);
       await deleteOrder(env.DB, order.id);
       throw err;
     }
+    if (createKey) await completeCreateKey(env.DB, createKey.key, order.id, token);
     return json(201, { token, url: `/o/${token}` }, NO_STORE);
   }
 

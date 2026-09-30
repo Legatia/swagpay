@@ -3,6 +3,8 @@ const error = document.getElementById("error");
 const submit = document.getElementById("submit");
 let turnstileToken = null;
 let widgetId = null;
+// One key per form: a retry after a lost response returns the order already created instead of a second one.
+const idempotencyKey = crypto.randomUUID();
 
 async function setUpTurnstile() {
   try {
@@ -17,6 +19,8 @@ async function setUpTurnstile() {
     });
     widgetId = window.turnstile.render("#turnstile", {
       sitekey: turnstileSiteKey,
+      // The normal widget is 300 px wide and overflows the narrowest phones.
+      size: matchMedia("(max-width: 365px)").matches ? "compact" : "normal",
       callback: (token) => { turnstileToken = token; },
       "expired-callback": () => { turnstileToken = null; },
     });
@@ -31,6 +35,7 @@ form.addEventListener("submit", async (event) => {
   submit.disabled = true;
   const body = Object.fromEntries(new FormData(form).entries());
   body.turnstile = turnstileToken;
+  body.idempotencyKey = idempotencyKey;
   try {
     const res = await fetch("/api/orders", {
       method: "POST",

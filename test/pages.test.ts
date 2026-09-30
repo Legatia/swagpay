@@ -12,6 +12,9 @@ it("serves the landing page, the form and the order page", async () => {
   const form = await SELF.fetch(`${base}/new`);
   expect(form.status).toBe(200);
   expect(await form.text()).toContain('id="order-form"');
+  const newJs = await (await SELF.fetch(`${base}/new.js`)).text();
+  expect(newJs).toContain("body.idempotencyKey = idempotencyKey");
+  expect(newJs).toContain('matchMedia("(max-width: 365px)").matches ? "compact" : "normal"');
 
   const order = await SELF.fetch(`${base}/o/${"a".repeat(43)}`);
   expect(order.status).toBe(200);
