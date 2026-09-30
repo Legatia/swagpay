@@ -1,5 +1,8 @@
 import { Agent } from "agents";
 import { getOrderById, insertDecision, saveOrderSpec } from "../db";
+import { isSandbox } from "../sandbox/config";
+import { PRINTER_STEPS, nextStep, stepDelaySeconds, stepMessage, type PrinterStep } from "../sandbox/printer";
+import { markPrinted } from "../telegram-webhook";
 import { createEscalation, type EscalationKind } from "../escalations";
 import { ratesFor, refreshRates } from "../fx";
 import type { Intake } from "../intake";
@@ -16,7 +19,7 @@ import { runTurn, type ConversationStore, type TurnResult } from "./loop";
 import { previewsIn } from "./previews";
 import { createModel, type ModelClient } from "./model";
 import { SYSTEM_PROMPT } from "./prompt";
-import { cityFromPlace, suggestFarVendors, suggestVendors } from "../vendors";
+import { cityFromPlace, getVendor, suggestFarVendors, suggestVendors, vendorJobFor } from "../vendors";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile } from "./tools";
 
@@ -186,6 +189,63 @@ export class OrderAgent extends Agent<Env, OrderState> {
     const notePart = note ? ` Note from the owner: ${JSON.stringify(note)}.` : "";
     this.addInbox({ kind: "event", text: `Owner decision on escalation #${e.id} (summary: ${JSON.stringify(e.summary)}): ${decision}.${notePart}` });
     await this.trigger();
+  }
+
+  private sandboxOnly(): void {
+    if (!isSandbox(this.env)) throw new Error("sandbox only");
+  }
+
+  private pendingPrinterStep(): { id: string; step: PrinterStep; time: number } | null {
+    const row = this.getSchedules().find((s) => s.callback === "sandboxPrinterStep");
+    const step = (row?.payload as { step?: PrinterStep } | undefined)?.step;
+    return row && step && PRINTER_STEPS.includes(step) ? { id: row.id, step, time: row.time } : null;
+  }
+
+  /** Sandbox: the simulated printer takes the job after the deposit. Does nothing while a step is pending or once it has started. */
+  async sandboxStartPrinter(): Promise<void> {
+    this.sandboxOnly();
+    this.ensureTables();
+    this.orderId();
+    if (this.pendingPrinterStep() || this.meta("sandbox_last_step")) return;
+    await this.schedule(stepDelaySeconds("accepted"), "sandboxPrinterStep", { step: "accepted" });
+  }
+
+  /** Schedule callback: one simulated printer step. Adds a labelled thread line (no model turn); `printed` runs the owner's /printed. */
+  async sandboxPrinterStep(payload: { step: PrinterStep }): Promise<void> {
+    this.sandboxOnly();
+    this.ensureTables();
+    const orderId = this.orderId();
+    const { step } = payload;
+    if (!PRINTER_STEPS.includes(step)) throw new Error(`unknown printer step ${String(step)}`);
+    const order = await getOrderById(this.env.DB, orderId);
+    if (!order) return;
+    const job = await vendorJobFor(this.env.DB, orderId);
+    const vendor = job ? await getVendor(this.env.DB, job.vendor_id) : null;
+    this.addThread("system", stepMessage(step, order, vendor));
+    if (step === "printed") await markPrinted(this.env, orderId); // a no-op message when the order is not at deposit_paid
+    this.setMeta("sandbox_last_step", step);
+    const next = nextStep(step);
+    if (next) await this.schedule(stepDelaySeconds(next), "sandboxPrinterStep", { step: next });
+  }
+
+  /** Sandbox: run the pending printer step now. */
+  async sandboxSkip(): Promise<string> {
+    this.sandboxOnly();
+    this.ensureTables();
+    this.orderId();
+    const pending = this.pendingPrinterStep();
+    if (!pending) return "Nothing to skip.";
+    await this.cancelSchedule(pending.id);
+    await this.sandboxPrinterStep({ step: pending.step });
+    return `Skipped ahead: the printer's "${pending.step}" step ran now.`;
+  }
+
+  /** Sandbox: the simulated printer's progress, for the owner panel. */
+  sandboxPrinterState(): { lastStep: string | null; nextStep: string | null; nextAt: string | null } {
+    this.sandboxOnly();
+    this.ensureTables();
+    const pending = this.pendingPrinterStep();
+    return { lastStep: this.meta("sandbox_last_step"), nextStep: pending?.step ?? null, nextAt: pending ? new Date(pending.time * 1000).toISOString() : null };
   }
 
   private orderId(): number {

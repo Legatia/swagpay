@@ -8,6 +8,7 @@ import { suggestVendors, cityFromPlace } from "../vendors";
 import { giveCost, COST_CURRENCIES, type CostCurrency } from "../telegram-webhook";
 import type { OrderSpec } from "../order-spec";
 import { warsawDate } from "../time";
+import { getAgentByName } from "agents";
 import { isSandbox } from "./config";
 import { simulatedQuote } from "./printer";
 
@@ -48,6 +49,14 @@ async function pendingFor(env: Env, orderId: number): Promise<EscalationRow[]> {
     ).bind(orderId).all<EscalationRow>()).results;
 }
 
+async function printerState(env: Env, order: OrderRow): Promise<SandboxOwnerState["printer"]> {
+  try {
+    return await (await getAgentByName(env.OrderAgent, order.instance)).sandboxPrinterState();
+  } catch {
+    return { lastStep: null, nextStep: null, nextAt: null }; // an order the agent never saw
+  }
+}
+
 async function ownerState(env: Env, order: OrderRow): Promise<SandboxOwnerState> {
   const pending = await pendingFor(env, order.id);
   const costRow = await env.DB
@@ -74,7 +83,7 @@ async function ownerState(env: Env, order: OrderRow): Promise<SandboxOwnerState>
     cashout: row?.cashout
       ? { id: row.cashout.id, status: row.cashout.status, fiat: row.cashout.fiat, amount: (row.cashout.fiat_cents / 100).toFixed(2), withdrawalRef: row.cashout.withdrawal_ref }
       : null,
-    printer: { lastStep: null, nextStep: null, nextAt: null }, // Task 5 wires the simulated printer in.
+    printer: await printerState(env, order),
   };
 }
 
@@ -160,7 +169,13 @@ export async function handleSandboxOwner(request: Request, env: Env, token: stri
       return result(c ? await retryCashoutWithdrawal(env, c.id, who) : { ok: false, message: "This order has no cash-out to retry." });
     }
     case "skip":
-      return result({ ok: false, message: "Nothing to skip." }); // Task 5 runs the next printer step here.
+      try {
+        const message = await (await getAgentByName(env.OrderAgent, order.instance)).sandboxSkip();
+        return result({ ok: message !== "Nothing to skip.", message });
+      } catch (err) {
+        console.error("sandbox skip failed", err);
+        return result({ ok: false, message: "Nothing to skip." });
+      }
     default:
       return bad("Unknown action.");
   }
