@@ -1,7 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { insertDecision } from "../src/db";
-import { redactReason } from "../src/public-log";
+import { redactReason, renderLog } from "../src/public-log";
 import { insertTreasuryDecision } from "../src/treasury";
 import { newOrderRow } from "./fixtures";
 
@@ -76,5 +76,17 @@ describe("public log and metrics", () => {
     expect(m.obligations.open - before.obligations.open).toBe(0);
     expect(m.decisions.escalated - before.decisions.escalated).toBe(1);
     expect(m.decisions.total).toBeGreaterThanOrEqual(m.decisions.escalated);
+  });
+});
+
+describe("renderLog", () => {
+  it("shows an empty state and money with two decimals", () => {
+    const html = renderLog([], {
+      orders: {}, received: { USDC: "1234.500000", EURC: "0.000000" }, paidOut: { USDC: "0.000000", EURC: "0.000000" },
+      obligations: { settledByAgent: 0, settledWithOwner: 0, open: 0 }, decisions: { total: 0, escalated: 0, blocked: 0 },
+    });
+    expect(html).toContain("No decisions yet.");
+    expect(html).toContain("<strong>1234.50</strong>");
+    expect(html).toContain("Escalated to the owner");
   });
 });

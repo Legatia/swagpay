@@ -12,20 +12,26 @@ it("serves the landing page, the form and the order page", async () => {
   const form = await SELF.fetch(`${base}/new`);
   expect(form.status).toBe(200);
   expect(await form.text()).toContain('id="order-form"');
+  const newJs = await (await SELF.fetch(`${base}/new.js`)).text();
+  expect(newJs).toContain("body.idempotencyKey = idempotencyKey");
+  expect(newJs).toContain('matchMedia("(max-width: 365px)").matches ? "compact" : "normal"');
 
   const order = await SELF.fetch(`${base}/o/${"a".repeat(43)}`);
   expect(order.status).toBe(200);
-  expect(await order.text()).toContain('id="thread"');
+  const orderHtml = await order.text();
+  expect(orderHtml).toContain('id="thread"');
+  expect(orderHtml).toContain('class="chat-launcher" id="chat-open"');
+  expect(orderHtml).toContain('class="chat-panel" id="chat-panel" role="dialog"');
   expect(await (await SELF.fetch(`${base}/o/${"b".repeat(43)}`)).text()).toContain('id="pay-box"');
   expect(await (await SELF.fetch(`${base}/o/${"c".repeat(43)}`)).text()).toContain('id="received"');
 });
 
 it("tells the payer exactly what to send, and the agent to repeat amounts exactly", async () => {
   const page = await (await SELF.fetch(`${base}/o/${"c".repeat(43)}`)).text();
-  expect(page).toContain("Send exactly the amount shown, on Arc, to the address below. If an exchange takes a withdrawal fee from the amount, the difference shows as still due.");
+  expect(page).toContain("Send exactly this amount, on Arc, to this address. The last digits identify your order, so don't round it. If an exchange takes a withdrawal fee from the amount, the difference shows as still due.");
   expect(page).toContain('id="pay-token"');
   const script = await (await SELF.fetch(`${base}/order.js`)).text();
-  expect(script).toContain("send exactly ${p.due} ${p.token} (the rest of this payment)");
+  expect(script).toContain("$(\"pay-amount\").textContent = open.due;");
   expect(script).toContain("Token: ${payTo.tokens[open.token]}");
   // "We received it" closes the order: the host confirms first.
   expect(script).toContain('if (!confirm("Confirm the swag arrived? This closes the order.")) return;');

@@ -14,6 +14,8 @@
   "routes": [{ "pattern": "app.swagpay.me", "custom_domain": true }],
   "triggers": { "crons": ["* * * * *", "17 * * * *", "0 7 * * *"] },
   "vars": {
+    "MODEL_PROVIDER": "gemini",
+    "GEMINI_MODEL": "gemini-3.8-flash",
     "MODEL": "claude-sonnet-5-5",
     "AGENT_AUTORUN": "1",
     "MAX_NEW_ORDERS_PER_DAY": "20",
