@@ -109,8 +109,8 @@ export function renderPanel(container, state, { store, area, announce }) {
     }
     const del = document.createElement("button");
     del.type = "button";
-    del.className = "secondary";
-    del.textContent = "Remove layer";
+    del.className = "secondary danger";
+    del.textContent = layer.type === "text" ? "Remove text" : "Remove logo";
     del.addEventListener("click", () => {
       store.set((st) => removeLayer(st, st.side, layer.id));
       announce("Layer removed.");
@@ -118,7 +118,10 @@ export function renderPanel(container, state, { store, area, announce }) {
       document.getElementById("stage")?.focus({ preventScroll: true });
     });
     parts.push(del);
-    container.replaceChildren(...parts);
+    const title = document.createElement("h2");
+    title.className = "card-title";
+    title.textContent = layer.type === "text" ? "Text" : "Logo";
+    container.replaceChildren(title, ...parts);
   }
   syncFields(container, layer, false);
 }

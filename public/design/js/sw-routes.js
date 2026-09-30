@@ -1,7 +1,7 @@
 // What the editor's service worker caches. Kept apart from sw.js so it can be unit-tested.
 // Bump CACHE when PRECACHE changes, and on any deploy that changes a module's exports or the page
 // markup, so the editor updates as one unit. When adding a file to public/design/js, add it here too.
-export const CACHE = "swagpay-design-v1";
+export const CACHE = "swagpay-design-v2";
 
 const SHARED = new Set(["/brand-tokens.css", "/logo.svg", "/logo-on-dark.svg", "/mascot.svg", "/mark.svg", "/apple-touch-icon.png"]);
 const FONT_HOSTS = new Set(["fonts.googleapis.com", "fonts.gstatic.com"]);
