@@ -5,7 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Design your swag · Swagpay</title>
   <meta name="description" content="Design t-shirts, stickers, banners, roll-ups and flags for your event and send them to the Swagpay agent.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Design your swag · Swagpay">
+  <meta property="og:description" content="Design event swag, get it printed locally, and pay in USDC or EURC.">
+  <meta property="og:image" content="https://app.swagpay.me/thumbnail.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://app.swagpay.me/thumbnail.png">
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
   <link rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
   <link rel="manifest" href="/design/manifest.webmanifest">
   <meta name="theme-color" content="#171a38">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -19,7 +29,7 @@
 <body>
   <main id="design-app" data-step="product">
     <header class="top">
-      <a href="/" class="home"><picture><source media="(prefers-color-scheme: dark)" srcset="/logo-on-dark.svg"><img src="/logo.svg" alt="Swagpay" width="150" height="40"></picture></a>
+      <a href="/" class="home"><picture><source media="(prefers-color-scheme: dark)" srcset="/logo-on-dark.svg"><img src="/logo.svg" alt="Swagpay" width="150" height="33"></picture></a>
       <ol class="steps" aria-label="Steps">
         <li data-for="product">Product</li><li data-for="design">Design</li><li data-for="details">Details</li><li data-for="review">Review</li>
       </ol>
@@ -41,19 +51,23 @@
             <img src="/mascot.svg" alt="" width="120" height="124">
             <p>Add your logo to start</p>
           </div>
+          <div class="toolbar" role="toolbar" aria-label="Design tools">
+            <input id="logo-file" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" class="visually-hidden">
+            <label class="tool tool-main" for="logo-file"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M4 17l5-4.5 3.5 3 3-2.5 4.5 4"/></svg>Add logo</label>
+            <button type="button" class="tool tool-main" id="add-text"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5V5h14v1.5M12 5v14M9 19h6"/></svg>Add text</button>
+            <span class="tool-divider" aria-hidden="true"></span>
+            <button type="button" class="tool tool-icon" id="undo" aria-label="Undo" title="Undo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 010 11H11"/></svg></button>
+            <button type="button" class="tool tool-icon" id="redo" aria-label="Redo" title="Redo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 000 11H13"/></svg></button>
+          </div>
         </div>
-        <aside class="side">
-          <div id="product-controls" class="controls"></div>
-          <div id="panel" class="panel"></div>
+        <aside class="side" aria-label="Design settings">
+          <div id="product-controls" class="controls inspector-card"></div>
+          <div class="inspector-card">
+            <div id="panel" class="panel"></div>
+            <p id="panel-hint" class="panel-hint">Select a logo or text on the product to change its size, position and colour.</p>
+          </div>
           <ul id="quality" class="quality"></ul>
         </aside>
-      </div>
-      <div class="toolbar" role="toolbar" aria-label="Design tools">
-        <input id="logo-file" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" class="visually-hidden">
-        <label class="tool" for="logo-file">Add logo</label>
-        <button type="button" class="tool" id="add-text">Add text</button>
-        <button type="button" class="tool" id="undo" aria-label="Undo">Undo</button>
-        <button type="button" class="tool" id="redo" aria-label="Redo">Redo</button>
       </div>
     </section>
 

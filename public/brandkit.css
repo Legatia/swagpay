@@ -52,6 +52,8 @@ h3 { font-size: 1.1rem; margin-bottom: 8px; }
 .mascot-card.art img { max-height: 320px; }
 .mascot-card.avatar { display: grid; place-items: center; min-height: 360px; background: #171a38; }
 .mascot-card.avatar img { width: min(100%, 280px); border-radius: 50%; }
+.thumbnail-card { overflow: hidden; border: 1px solid #d9dcea; border-radius: 18px; background: #fff; }
+.thumbnail-card img { width: 100%; height: auto; }
 .ui-card .chip { display: inline-block; border: 1px solid #d9dcea; border-radius: 999px; padding: 4px 9px; font-family: var(--font-mono); font-size: .72rem; }
 .ui-card .sample-button { display: inline-block; margin: 16px 0; padding: 11px 16px; border-radius: 8px; background: #d7266f; color: #fff; font-weight: 700; }
 .chat { display: grid; gap: 9px; margin-top: 14px; }

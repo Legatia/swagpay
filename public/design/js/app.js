@@ -54,6 +54,7 @@ const initial = {
   cutPathD: null,
   contact: { eventName: "", eventDate: "", deliverBy: "", deliveryPlace: "Kolektyw3, Koszykowa 54, Warsaw", contactName: "", contactEmail: "" },
   send: null,
+  orderKey: null,
 };
 
 // A draft saved while storage was full keeps its layers but not its images (the store saves
@@ -80,7 +81,7 @@ function dropUnsavedImages(draft) {
 const { storage, writable: storageWritable } = probeStorage();
 const loaded = dropUnsavedImages(loadDraft(storage));
 const draft = loaded.draft;
-export const store = createStore({ initial: draft ? { ...initial, ...draft } : initial, storage, keep: ["step", "sizes", "quantity", "currency", "contact", "send"] });
+export const store = createStore({ initial: draft ? { ...initial, ...draft } : initial, storage, keep: ["step", "sizes", "quantity", "currency", "contact", "send", "orderKey"] });
 
 export function area() {
   const s = store.get();

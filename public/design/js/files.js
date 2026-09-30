@@ -28,6 +28,10 @@ async function mockupPng(s, view) {
     g.fill(body);
     g.stroke(body);
     g.stroke(new Path2D(TEE.neck[view.side]));
+    if (TEE.collar[view.side]) {
+      g.fillStyle = "rgba(0, 0, 0, 0.3)";
+      g.fill(new Path2D(TEE.collar[view.side]));
+    }
     g.restore();
   } else {
     g.strokeStyle = "#171a38";

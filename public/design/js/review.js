@@ -1,7 +1,7 @@
 import { currentEstimate } from "./details.js";
 import { buildFiles } from "./files.js";
 import { buildSpec, summarize } from "./spec.js";
-import { SendError, buildIntake, progressText, sendOrder, sha256 } from "./submit.js";
+import { SendError, buildIntake, orderKey, progressText, sendOrder, sha256 } from "./submit.js";
 import { NO_CHECK, mountTurnstile, nextToken } from "./turnstile.js";
 
 const $ = (id) => document.getElementById(id);
@@ -56,10 +56,14 @@ async function send() {
   try {
     show({ stage: "prepare" });
     const files = await buildFiles(s, spec);
+    const base = buildIntake(s.contact, summarize(spec));
+    const key = orderKey(s.orderKey, base);
+    if (key !== s.orderKey) store.set({ orderKey: key }, { record: false });
+    const intake = { ...base, idempotencyKey: key.key };
     const { url } = await sendOrder({
       spec,
       files,
-      intake: buildIntake(s.contact, summarize(spec)),
+      intake,
       pending: s.send,
       deps: {
         fetch: (...args) => fetch(...args),
@@ -77,7 +81,8 @@ async function send() {
   } catch (err) {
     sending = false;
     $("send-status").hidden = true;
-    if (err?.reset) store.set({ send: null }, { record: false });
+    // Forgetting an order also forgets its key, or the server would replay the old order.
+    if (err?.reset) store.set({ send: null, orderKey: null }, { record: false });
     $("send-error").textContent = err instanceof SendError ? err.message : "Something went wrong while sending. Send again; your design is kept.";
     if (err?.url) {
       const a = $("order-link");
@@ -114,7 +119,7 @@ export function initReview({ store }) {
   // The one way out of a pending order. The host has to choose it, so a second order is never an accident.
   $("new-order").addEventListener("click", () => {
     if (sending) return;
-    store.set({ send: null }, { record: false });
+    store.set({ send: null, orderKey: null }, { record: false });
     $("send-error").textContent = "";
     $("order-link").hidden = true;
     renderReview(store.get());

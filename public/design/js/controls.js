@@ -15,16 +15,32 @@ function chip(key, label, pressed, onClick, extra) {
   return b;
 }
 
-function group(title, chips) {
+// A labelled row of chips. "segmented" draws them as one control (Front | Back); "swatches" as
+// colour swatches.
+function group(title, chips, variant = "") {
   const wrap = document.createElement("div");
+  wrap.className = "group";
   const h = document.createElement("p");
-  h.className = "muted";
+  h.className = "group-label";
   h.textContent = title;
   const row = document.createElement("div");
-  row.className = "chips";
+  row.className = `chips ${variant}`.trim();
   row.append(...chips);
   wrap.append(h, row);
   return wrap;
+}
+
+// New text starts white on black and navy, ink on white and grey (app.js addText). When the
+// garment changes, text still in the old default colour follows, so it never vanishes into the shirt.
+const DARK = ["black", "navy"];
+const textDefault = (colour) => (DARK.includes(colour) ? "#ffffff" : "#171a38");
+function recolourText(s, colour) {
+  const from = textDefault(s.options.colour);
+  const to = textDefault(colour);
+  if (from === to) return s.layers;
+  const out = {};
+  for (const [side, list] of Object.entries(s.layers)) out[side] = list.map((l) => (l.type === "text" && l.colour.toLowerCase() === from ? { ...l, colour: to } : l));
+  return out;
 }
 
 const PX_PER_MM = 8;
@@ -86,17 +102,20 @@ export function renderControls(container, s, { store }) {
 function buildControls(container, s, { store }) {
   const p = PRODUCTS[s.product];
   if (!p) return container.replaceChildren();
-  const parts = [];
+  const title = document.createElement("h2");
+  title.className = "card-title";
+  title.textContent = p.name;
+  const parts = [title];
   if (p.views && p.views.length > 1) {
-    parts.push(group("Side", p.views.map((v) => chip(`side:${v.side}`, v.side === "front" ? "Front" : "Back", s.side === v.side, () => store.set({ side: v.side, selectedId: null }, { record: false })))));
+    parts.push(group("Side", p.views.map((v) => chip(`side:${v.side}`, v.side === "front" ? "Front" : "Back", s.side === v.side, () => store.set({ side: v.side, selectedId: null }, { record: false }))), "segmented"));
   }
   if (p.colours) {
     parts.push(group("Colour", p.colours.map((c) => {
       const dot = document.createElement("span");
       dot.className = "swatch";
       dot.style.background = c.hex;
-      return chip(`colour:${c.key}`, c.label, s.options.colour === c.key, () => store.set({ options: { ...s.options, colour: c.key } }), dot);
-    })));
+      return chip(`colour:${c.key}`, c.label, s.options.colour === c.key, () => store.set({ options: { ...s.options, colour: c.key }, layers: recolourText(s, c.key) }), dot);
+    }), "swatches"));
   }
   if (p.presets && p.presets.length > 1) {
     parts.push(group("Size", p.presets.map((x) => chip(`preset:${x.key}`, x.label, s.options.size === x.key, () => {
