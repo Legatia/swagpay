@@ -78,3 +78,20 @@ test("skips nameless records and duplicate slugs with a warning", () => {
   assert.equal(rows[0].email, "a@b.pl");
   assert.equal(warns.length, 3);
 });
+
+test("a far printer keeps its own city and country; one without a city or country is skipped with a warning", () => {
+  const base = { email: "p@x.pt", methods: ["screen"], tax_id_type: "NIF", tax_id: "500000000", tax_status: "valid" };
+  const warnings = [];
+  const rows = toVendorRows("far", [
+    { ...base, name: "Porto Press", city: "Porto", country: "PT" },
+    { ...base, name: "Nowhere Ltd" },
+    { ...base, name: "Bad Country", city: "Riga", country: "Latvia" },
+  ], (w) => warnings.push(w));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].city, "Porto");
+  assert.equal(rows[0].country, "PT");
+  assert.equal(rows[0].status, "screened");
+  assert.equal(rows[0].source_ref, "far:porto:porto-press");
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /Nowhere Ltd/);
+});

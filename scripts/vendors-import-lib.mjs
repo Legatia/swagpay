@@ -25,10 +25,11 @@ function screened(r, email) {
   return Boolean(str(r.company_number)) && String(r.company_status).toLowerCase() === "active";
 }
 
+/** cityKey is one of CITIES, or "far": printers elsewhere, each record carrying its own city and ISO-2 country. */
 export function toVendorRows(cityKey, records, warn = () => {}) {
+  const far = cityKey === "far";
   const found = CITIES[cityKey];
-  if (!found) throw new Error(`unknown city "${cityKey}"`);
-  const [city, country] = found;
+  if (!far && !found) throw new Error(`unknown city "${cityKey}"`);
   const seen = new Set();
   const out = [];
   for (const r of records) {
@@ -36,22 +37,26 @@ export function toVendorRows(cityKey, records, warn = () => {}) {
       warn(`${cityKey}: skipped a record without a name`);
       continue;
     }
-    const ref = `${cityKey}:${slug(r.name)}`;
+    if (far && (!str(r.city) || !/^[A-Z]{2}$/.test(String(r.country ?? "")))) {
+      warn(`far: skipped "${r.name}", it has no city or no ISO-2 country`);
+      continue;
+    }
+    const ref = far ? `far:${slug(r.city)}:${slug(r.name)}` : `${cityKey}:${slug(r.name)}`;
     if (seen.has(ref)) {
       warn(`${cityKey}: skipped "${r.name}", duplicate of ${ref}`);
       continue;
     }
     seen.add(ref);
-    out.push(r);
+    out.push([r, ref]);
   }
-  return out.map((r) => {
+  return out.map(([r, ref]) => {
     const email = str(r.email);
     const nip = str(r.nip);
     const taxStatus = r.vat_status ?? r.tax_status;
     return {
       name: r.name.trim(),
-      city,
-      country,
+      city: far ? r.city.trim() : found[0],
+      country: far ? r.country : found[1],
       methods: JSON.stringify((Array.isArray(r.methods) ? r.methods : []).filter((m) => METHODS.has(m))),
       email,
       website: str(r.website),
@@ -63,7 +68,7 @@ export function toVendorRows(cityKey, records, warn = () => {}) {
       lat: typeof r.lat === "number" ? r.lat : null,
       lng: typeof r.lng === "number" ? r.lng : null,
       status: screened(r, email) ? "screened" : "candidate",
-      source_ref: `${cityKey}:${slug(r.name)}`,
+      source_ref: ref,
     };
   });
 }

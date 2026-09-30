@@ -40,7 +40,7 @@ describe("quote texts", () => {
     const by = new Date("2099-10-08T15:00:00Z");
     const plain = costRequestText(7, completeSpec, by, "Kolektyw3", "two colours");
     const head = plain.split("\n").slice(0, -1).join("\n");
-    const cases: Array<string[] | null> = [["v3 Secret Print (screen; covers all; 0 jobs, 0 on time)"], [], null];
+    const cases: Array<string[] | null> = [["v3 Secret Print (screen; covers all; 0 jobs, 0 on time)", "far (Lisbon): ask about delivery; v9 Far Secret (screen; covers all; 0 jobs, 0 on time)"], [], null];
     for (const suggestions of cases) {
       const text = costRequestText(7, completeSpec, by, "Kolektyw3", "two colours", suggestions);
       expect(costRequestWithoutPrinters(text)).toBe(head);

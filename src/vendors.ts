@@ -120,14 +120,10 @@ function methodsOf(v: VendorRow): string[] {
   }
 }
 
-/** Partner and screened vendors in a city, best first: partner, then covering every method, then on-time jobs, then name. */
-export async function suggestVendors(
-  db: D1Database, city: string, methods: string[], limit = 3,
-): Promise<Array<{ vendor: VendorRow; covers: boolean; score: { jobs: number; onTime: number } }>> {
-  const vendors = (await db
-    .prepare("SELECT * FROM vendors WHERE city = ? AND status IN ('partner', 'screened')")
-    .bind(city)
-    .all<VendorRow>()).results;
+type Suggestion = { vendor: VendorRow; covers: boolean; score: { jobs: number; onTime: number } };
+
+/** Best first: partner, then covering every method, then on-time jobs, then name. */
+async function rankVendors(db: D1Database, vendors: VendorRow[], methods: string[], limit: number): Promise<Suggestion[]> {
   const ranked = await Promise.all(vendors.map(async (vendor) => {
     const have = new Set(methodsOf(vendor));
     return { vendor, covers: methods.every((m) => have.has(m)), score: await vendorScore(db, vendor.id) };
@@ -138,6 +134,18 @@ export async function suggestVendors(
     || b.score.onTime - a.score.onTime
     || a.vendor.name.localeCompare(b.vendor.name));
   return ranked.slice(0, limit);
+}
+
+/** Partner and screened vendors in a city, best first. */
+export async function suggestVendors(db: D1Database, city: string, methods: string[], limit = 3): Promise<Suggestion[]> {
+  const vendors = (await db.prepare("SELECT * FROM vendors WHERE city = ? AND status IN ('partner', 'screened')").bind(city).all<VendorRow>()).results;
+  return rankVendors(db, vendors, methods, limit);
+}
+
+/** Screened or partner vendors outside `city`, ranked like suggestVendors, for large orders. */
+export async function suggestFarVendors(db: D1Database, city: string, methods: string[], limit = 2): Promise<Suggestion[]> {
+  const vendors = (await db.prepare("SELECT * FROM vendors WHERE city != ? AND status IN ('partner', 'screened')").bind(city).all<VendorRow>()).results;
+  return rankVendors(db, vendors, methods, limit);
 }
 
 /** One job per order. A new proposal replaces the vendor and cost while the job is `proposed`; null once it has moved on. */

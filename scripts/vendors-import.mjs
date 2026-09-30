@@ -1,4 +1,4 @@
-// node scripts/vendors-import.mjs <city>-printers.json... : prints upsert SQL to stdout, counts per status to stderr.
+// node scripts/vendors-import.mjs <city>-printers.json|far-printers.json... : prints upsert SQL to stdout, counts per status to stderr.
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { CITIES, toVendorRows, upsertSql } from "./vendors-import-lib.mjs";
@@ -6,15 +6,15 @@ import { CITIES, toVendorRows, upsertSql } from "./vendors-import-lib.mjs";
 {
   const files = process.argv.slice(2);
   if (!files.length) {
-    console.error("usage: node scripts/vendors-import.mjs <city>-printers.json...");
+    console.error("usage: node scripts/vendors-import.mjs <city>-printers.json|far-printers.json...");
     process.exit(2);
   }
   const counts = {};
   const out = [];
   for (const file of files) {
     const m = basename(file).match(/^([a-z]+)-printers\.json$/);
-    if (!m || !CITIES[m[1]]) {
-      console.error(`can't tell the city from "${file}" (expected <city>-printers.json)`);
+    if (!m || !(CITIES[m[1]] || m[1] === "far")) {
+      console.error(`can't tell the city from "${file}" (expected <city>-printers.json or far-printers.json)`);
       process.exit(2);
     }
     const rows = toVendorRows(m[1], JSON.parse(readFileSync(file, "utf8")), (m) => console.error(`warning: ${m}`));

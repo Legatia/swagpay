@@ -101,6 +101,26 @@ export function renderOrders(rows: OrderListRow[], page: number, who: string | n
   return layout("Orders", who, msg, `<h1>Orders</h1>${table(["Order", "Event", "Customer", "Status", "Price", "Received", "Printer", "Printer cost", "Margin", "Printer paid"], trs, "No orders.")}${nav}`);
 }
 
+function offersSection(l: Ledger): string {
+  const back = `/admin/orders/${l.order.id}`;
+  const name = (id: number) => { const v = l.offerVendors.find((x) => x.id === id); return v ? `${v.name} (${v.city})` : `#${id}`; };
+  const rows = l.offers.map(({ offer: o, landedGrosze, late }) => {
+    const actions = [
+      l.openCost !== null && !o.chosen_at ? postButton(`/admin/offers/${o.id}/use`, "Use this offer", back) : "",
+      !o.chosen_at ? postButton(`/admin/offers/${o.id}/delete`, "Delete", back, {}, "secondary") : "",
+    ].join(" ");
+    return `<tr><td>${esc(name(o.vendor_id))}${o.note ? `<br><small>${esc(o.note)}</small>` : ""}</td><td>${esc(cents(o.price_cents, o.currency))}</td><td>${esc(cents(o.delivery_cents, o.currency))}</td><td>${esc(cents(o.other_cents, o.currency))}</td><td>${landedGrosze === null ? "no rate" : esc(cents(landedGrosze, "PLN"))}</td><td>${esc(o.arrives_at)}${late ? " <strong>late</strong>" : ""}</td><td>${o.chosen_at ? `used ${when(o.chosen_at)}` : "—"}</td><td>${actions}</td></tr>`;
+  });
+  const byCity = [...new Set(l.offerVendors.map((v) => v.city))].map((city) =>
+    `<optgroup label="${esc(city)}">${l.offerVendors.filter((v) => v.city === city).map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join("")}</optgroup>`).join("");
+  const add = `<form method="post" action="/admin/orders/${l.order.id}/offers" class="inline"><input type="hidden" name="back" value="${esc(back)}">
+<select name="vendor_id" aria-label="Printer">${byCity}</select>
+<select name="currency" aria-label="Currency">${PAY_CURRENCIES.map((c) => `<option>${c}</option>`).join("")}</select>
+${field("price", "Price", ' inputmode="decimal" size="8"')}${field("delivery", "Delivery", ' inputmode="decimal" size="8"')}${field("other", "Other", ' inputmode="decimal" size="8"')}
+<input type="date" name="arrives_at" aria-label="Arrives">${field("note", "Note", ' maxlength="200"')}<button>Add offer</button></form>`;
+  return `<section><h2>Offers</h2>${table(["Printer", "Price", "Delivery", "Other", "Landed PLN", "Arrives", "Used", ""], rows, "No offers yet.")}${l.openCost === null ? "<p>Using an offer needs an open cost request.</p>" : ""}${add}</section>`;
+}
+
 export function renderLedger(l: Ledger, explorer: string, who: string | null = null, msg: string | null = null): string {
   const o = l.order;
   const customer = `<ul><li>${esc(o.contact_name)} &lt;${esc(o.contact_email)}&gt;</li><li>${esc(o.event_name)}, ${esc(o.event_date)}</li><li>${esc(o.delivery_place)}</li><li>Deliver by ${when(o.deliver_by)}</li><li>Status: ${esc(o.status)}</li></ul>`;
@@ -149,6 +169,7 @@ export function renderLedger(l: Ledger, explorer: string, who: string | null = n
 <section><h2>Quotes</h2>${quotes}</section>
 <section><h2>Money in</h2>${moneyIn}${orphan.length ? `<p>Transfers not attached to a request: ${orphan.length}.</p>` : ""}</section>
 <section><h2>Printer</h2>${job}</section>
+${offersSection(l)}
 <section><h2>Money out</h2>${table(["Obligation", "Status", "Amount", "Chain", "Destination", "Payout"], obs, "No obligations.")}${cashouts}${sp}</section>
 <section><h2>Margin</h2>${margin}</section>
 <section><h2>History</h2>${history}</section>`;

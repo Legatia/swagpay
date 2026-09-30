@@ -1,4 +1,6 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
+import { getAgentByName } from "agents";
+import type { OrderAgent } from "../src/agent/order-agent";
 import { describe, expect, it } from "vitest";
 import { handleAdmin } from "../src/admin";
 import { createSupplierPayment, getSupplierPayment, latestCashout, queueCashout, recordCashoutFailed, recordCashoutSold } from "../src/back-office";
@@ -6,7 +8,7 @@ import { createEscalation, getEscalation, listEscalations } from "../src/escalat
 import { createObligation, queuePayout, recordPayoutResult } from "../src/treasury";
 import { getVendor } from "../src/vendors";
 import { TEAM, makeSigner } from "./access-signer";
-import { insertQuote, newOrderRow } from "./fixtures";
+import { insertQuote, intakeFor, newOrderRow } from "./fixtures";
 
 async function post(path: string, fields: Record<string, string>, opts: { origin?: string | null; token?: string | null } = {}) {
   const { sign, fetchImpl } = await makeSigner();
@@ -111,5 +113,63 @@ describe("admin actions", () => {
     const { sp } = await readyToCashOut();
     const res = await post(`/admin/payments/${sp.id}/cancel`, { back: "https://evil.example/x", note: "" });
     expect(res.headers.get("location")).toMatch(/^\/admin\?msg=/);
+  });
+
+  describe("printer offers", () => {
+    const newVendor = async (city = "Lisbon") => (await env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, source_ref, created_at, updated_at) VALUES ('Offer Press', ?, 'PT', '[]', 'screened', ?, 'x', 'x') RETURNING id").bind(city, `o:${crypto.randomUUID()}`).first<{ id: number }>())!.id;
+    const offerFields = (vendor: number, extra: Record<string, string> = {}) => ({ back: "", vendor_id: String(vendor), currency: "EUR", price: "200", delivery: "30,5", other: "", arrives_at: "2099-10-06", note: "", ...extra });
+    const ledgerHtml = async (orderId: number) => {
+      const { sign, fetchImpl } = await makeSigner();
+      const token = await sign({ aud: ["test-aud"], iss: TEAM, exp: Math.floor(Date.now() / 1000) + 600, email: "owner@example.com" });
+      return (await handleAdmin(new Request(`https://swagpay.test/admin/orders/${orderId}`, { headers: { "cf-access-jwt-assertion": token } }), env, { fetch: fetchImpl })).text();
+    };
+
+    it("adds an offer, shows it ranked on the order page, and audits it", async () => {
+      const { order } = await newOrderRow();
+      await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('EUR', 4.3, '2099-09-30', ?)").bind(new Date().toISOString()).run();
+      const v = await newVendor();
+      const res = await post(`/admin/orders/${order.id}/offers`, offerFields(v, { back: `/admin/orders/${order.id}` }));
+      expect(msgOf(res)).toMatch(/^Offer #\d+ added\.$/);
+      expect(await audit()).toMatchObject({ action: "offer_add", target: `order:${order.id}` });
+      const html = await ledgerHtml(order.id);
+      expect(html).toContain("Offer Press (Lisbon)");
+      expect(html).toContain("200.00 EUR");
+      expect(html).toContain("991.15 PLN");
+    });
+
+    it("refuses a bad amount, a date, a currency or an unscreened printer with a message", async () => {
+      const { order } = await newOrderRow();
+      const v = await newVendor();
+      const n = async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM printer_offers").first<{ n: number }>())!.n;
+      const before = await n();
+      expect(msgOf(await post(`/admin/orders/${order.id}/offers`, offerFields(v, { price: "12.345" })))).toMatch(/^Give the price/);
+      expect(msgOf(await post(`/admin/orders/${order.id}/offers`, offerFields(v, { price: "0" })))).toMatch(/^Give the price/);
+      expect(msgOf(await post(`/admin/orders/${order.id}/offers`, offerFields(v, { delivery: "-3" })))).toMatch(/^Give the price/);
+      expect(msgOf(await post(`/admin/orders/${order.id}/offers`, offerFields(v, { arrives_at: "soon" })))).toBe("Give the arrival date as YYYY-MM-DD.");
+      expect(msgOf(await post(`/admin/orders/${order.id}/offers`, offerFields(v, { currency: "BTC" })))).toMatch(/^Currency must be/);
+      await env.DB.prepare("UPDATE vendors SET status = 'candidate' WHERE id = ?").bind(v).run();
+      expect(msgOf(await post(`/admin/orders/${order.id}/offers`, offerFields(v)))).toBe("Choose a screened or partner printer.");
+      expect(await n()).toBe(before);
+    });
+
+    it("deletes an unused offer, and 'Use this offer' answers with giveCost's reply", async () => {
+      const { order } = await newOrderRow();
+      const agent = await getAgentByName(env.OrderAgent, order.instance);
+      await agent.init(order.id, intakeFor());
+      await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('EUR', 4.3, '2099-09-30', ?)").bind(new Date().toISOString()).run();
+      const v = await newVendor();
+      await post(`/admin/orders/${order.id}/offers`, offerFields(v));
+      await post(`/admin/orders/${order.id}/offers`, offerFields(v, { price: "300" }));
+      const [a, b] = (await env.DB.prepare("SELECT id FROM printer_offers WHERE order_id = ? ORDER BY id").bind(order.id).all<{ id: number }>()).results;
+      expect(msgOf(await post(`/admin/offers/${b.id}/delete`, { back: "" }))).toBe(`Offer #${b.id} deleted.`);
+      expect(await audit()).toMatchObject({ action: "offer_delete", target: `offer:${b.id}` });
+      expect(msgOf(await post(`/admin/offers/${a.id}/use`, { back: "" }))).toBe("This order has no open cost request.");
+      const cost = await createEscalation(env.DB, { orderId: order.id, kind: "cost", summary: "Printer cost needed", payload: {} });
+      await runInDurableObject(agent, async (o: OrderAgent) => { o.sql`INSERT INTO escalated (key, escalation_id) VALUES (${`cost:k-${cost.id}`}, ${cost.id})`; });
+      expect(msgOf(await post(`/admin/offers/${a.id}/use`, { back: "" }))).toMatch(new RegExp(`^#${cost.id}: 9\\d\\d\\.\\d\\d PLN recorded for order ${order.id}`));
+      expect(await audit()).toMatchObject({ action: "offer_use", target: `offer:${a.id}` });
+      expect(msgOf(await post(`/admin/offers/${a.id}/use`, { back: "" }))).toBe("This offer was already used.");
+      expect(msgOf(await post(`/admin/offers/${a.id}/delete`, { back: "" }))).toMatch(/already used/);
+    });
   });
 });

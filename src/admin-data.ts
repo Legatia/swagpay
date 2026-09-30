@@ -3,7 +3,8 @@ import { configWarnings } from "./admin-util";
 import { latestCashout, runnerLastSeen, supplierPaymentForOrder, type CashoutRow, type SupplierPaymentRow } from "./back-office";
 import { getOrderById, listDecisions, type DecisionRow, type OrderRow } from "./db";
 import type { EscalationRow } from "./escalations";
-import { ratesFor } from "./fx";
+import { plnPer, ratesFor } from "./fx";
+import { listOffers, rankOffers } from "./offers";
 import { isAddress } from "./money";
 import { listPaymentRequests, type PaymentRequestRow, type TransferRow } from "./payments";
 import type { QuoteRow } from "./quotes";
@@ -173,6 +174,9 @@ export interface Ledger {
   escalations: EscalationRow[];
   /** Id of an open cost escalation for this order, or null. */
   openCost: number | null;
+  /** Printer offers, cheapest landed cost first; `vendors` names the printers they come from. */
+  offers: ReturnType<typeof rankOffers>;
+  offerVendors: VendorRow[];
 }
 
 export async function orderLedger(db: D1Database, id: number): Promise<Ledger | null> {
@@ -182,6 +186,9 @@ export async function orderLedger(db: D1Database, id: number): Promise<Ledger | 
   const job = await vendorJobFor(db, id);
   const payment = await supplierPaymentForOrder(db, id);
   const escalations = await list<EscalationRow>("SELECT * FROM escalations WHERE order_id = ? ORDER BY id DESC");
+  const rawOffers = await listOffers(db, id);
+  const rates = new Map<string, number | null>();
+  for (const code of new Set(rawOffers.map((o) => o.currency))) rates.set(code, await plnPer(db, code));
   return {
     order,
     quotes: await list<QuoteRow>("SELECT * FROM quotes WHERE order_id = ? ORDER BY id"),
@@ -198,6 +205,10 @@ export async function orderLedger(db: D1Database, id: number): Promise<Ledger | 
     treasury: await list<TreasuryDecisionRow>("SELECT * FROM treasury_decisions WHERE order_id = ? ORDER BY id DESC LIMIT 50"),
     escalations,
     openCost: escalations.find((e) => e.kind === "cost" && e.status === "open")?.id ?? null,
+    offers: rankOffers(rawOffers, (c) => rates.get(c) ?? null, order.deliver_by),
+    offerVendors: (await db
+      .prepare("SELECT * FROM vendors WHERE status IN ('screened', 'partner') OR id IN (SELECT vendor_id FROM printer_offers WHERE order_id = ?) ORDER BY city, name")
+      .bind(id).all<VendorRow>()).results,
   };
 }
 

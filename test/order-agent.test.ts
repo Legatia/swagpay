@@ -383,6 +383,36 @@ describe("OrderAgent", () => {
     expect(summary).not.toContain("Paused Co");
   });
 
+  it("lists far printers under the suggestions only for big orders", async () => {
+    const now = new Date().toISOString();
+    for (const [name, city, status] of [["Local Shop", "Warsaw", "screened"], ["Porto Press", "Lisbon", "screened"], ["Cand Co", "Lisbon", "candidate"]]) {
+      await env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, source_ref, created_at, updated_at) VALUES (?, ?, 'PL', '[\"screen\", \"diecut\"]', ?, ?, ?, ?)")
+        .bind(name, city, status, `t:far-${name}`, now, now).run();
+    }
+    const ask = async (quantity: number) => {
+      const { order, stub } = await newAgent();
+      await runInDurableObject(stub, async (agent: OrderAgent) => {
+        agent.telegramOverride = { async send() { return 1; }, async answerCallback() {} };
+        await agent.init(order.id, intake);
+        const spec = { ...completeSpec, items: [{ ...completeSpec.items[0], quantity, sizes: { M: quantity } }] };
+        agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(spec)})`;
+        agent.modelOverride = scriptedModel([msg([toolUse("request_printer_cost", { reason: "order complete" })], "tool_use"), msg([], "end_turn")]);
+        await agent.processTurn();
+      });
+      return (await env.DB.prepare("SELECT summary FROM escalations WHERE kind = 'cost' AND order_id = ?").bind(order.id).first<{ summary: string }>())!.summary;
+    };
+    const big = (await ask(120)).split("\n");
+    const at = big.indexOf("Suggested printers:");
+    expect(big.slice(at + 1).some((l) => /^v\d+ Local Shop /.test(l))).toBe(true);
+    // Local printers first, then the far ones, all under the header; the candidate is never listed.
+    const far = big.filter((l) => l.startsWith("far ("));
+    expect(far).toHaveLength(1);
+    expect(far[0]).toMatch(/^far \(Lisbon\): ask about delivery; v\d+ Porto Press \(screen, diecut; covers all; 0 jobs, 0 on time\)$/);
+    expect(big.indexOf(far[0])).toBe(big.length - 2);
+    expect(big.join("\n")).not.toContain("Cand Co");
+    expect((await ask(60))).not.toContain("far (");
+  });
+
   it("withdraws an open quote when update_order changes the items", async () => {
     const { order, stub } = await newAgent();
     const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: "old-items" }, new Date(), new Date(Date.now() + 48 * 3_600_000));

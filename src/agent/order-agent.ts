@@ -16,7 +16,7 @@ import { runTurn, type ConversationStore, type TurnResult } from "./loop";
 import { previewsIn } from "./previews";
 import { createModel, type ModelClient } from "./model";
 import { SYSTEM_PROMPT } from "./prompt";
-import { cityFromPlace, suggestVendors } from "../vendors";
+import { cityFromPlace, suggestFarVendors, suggestVendors } from "../vendors";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile } from "./tools";
 
@@ -343,14 +343,20 @@ export class OrderAgent extends Agent<Env, OrderState> {
           const city = row ? cityFromPlace(row.delivery_place) : null;
           if (!city) return null;
           const methods = [...new Set(this.readSpec().items.map((i) => i.method).filter((m): m is string => !!m))];
-          const found = await suggestVendors(this.env.DB, city, methods, 3);
-          return found.map(({ vendor, covers, score }) => {
+          const line = ({ vendor, covers, score }: Awaited<ReturnType<typeof suggestVendors>>[number]) => {
             let have: string[] = [];
             try { const m: unknown = JSON.parse(vendor.methods); have = Array.isArray(m) ? m.map(String) : []; } catch { /* no methods listed */ }
             const n = methods.filter((m) => have.includes(m)).length;
             const name = vendor.name.replace(/\s+/g, " ").trim().slice(0, 40);
             return `v${vendor.id} ${name} (${have.join(", ")}; ${covers ? "covers all" : `covers ${n} of ${methods.length}`}; ${score.jobs} jobs, ${score.onTime} on time)`;
-          });
+          };
+          const lines = (await suggestVendors(this.env.DB, city, methods, 3)).map(line);
+          // Big orders also list printers elsewhere; these lines sit under "Suggested printers:", so the agent never reads them.
+          const units = this.readSpec().items.reduce((n, i) => n + i.quantity, 0);
+          if (units >= (Number(this.env.FAR_PRINTER_MIN_UNITS) || 100)) {
+            for (const f of await suggestFarVendors(this.env.DB, city, methods, 2)) lines.push(`far (${f.vendor.city}): ask about delivery; ${line(f)}`);
+          }
+          return lines;
         },
         orderSummary: async () => {
           const row = await getOrderById(this.env.DB, orderId);
