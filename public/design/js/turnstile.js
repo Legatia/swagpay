@@ -44,6 +44,8 @@ async function mount(el) {
   await loadScript();
   widgetId = window.turnstile.render(el, {
     sitekey: turnstileSiteKey,
+    // Compact (150 x 140) fits the editor sheet at 320 px; the normal 300 px widget does not.
+    size: matchMedia("(max-width: 365px)").matches ? "compact" : "normal",
     callback: (t) => {
       token = t;
       used = false;
