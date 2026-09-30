@@ -1,4 +1,5 @@
 import { esc } from "./admin-util";
+import { PAY_CURRENCIES } from "./back-office";
 import { toPayState, type Ledger, type MoneySummary, type OrderListRow, type SupplierListRow, type ToPayRow } from "./admin-data";
 import type { EscalationRow } from "./escalations";
 import { statusWord } from "./escalations";
@@ -154,9 +155,15 @@ export function renderLedger(l: Ledger, explorer: string, who: string | null = n
   return layout(`Order #${o.id}`, who, msg, body);
 }
 
+function payForm(v: SupplierListRow): string {
+  const opts = PAY_CURRENCIES.map((c) => `<option${c === v.pay_currency ? " selected" : ""}>${c}</option>`).join("");
+  return `<form method="post" action="/admin/suppliers/${v.id}" class="inline"><input type="hidden" name="back" value="/admin/suppliers">
+<select name="pay_currency" aria-label="Currency">${opts}</select><input name="how_to_pay" value="${esc(v.how_to_pay ?? "")}" placeholder="How to pay" aria-label="How to pay" maxlength="300"><button class="secondary">Save</button></form>`;
+}
+
 export function renderSuppliers(rows: SupplierListRow[], who: string | null = null, msg: string | null = null): string {
   const cities = [...new Set(rows.map((r) => r.city))];
   const body = `<h1>Printers</h1>` + (cities.length ? cities.map((city) => `<section><h2>${esc(city)}</h2>${table(["Name", "Status", "Currency", "How to pay", "Crypto payout", "Jobs", "On time", "Last job"],
-    rows.filter((r) => r.city === city).map((v) => `<tr><td>${esc(v.name)}</td><td>${esc(v.status)}</td><td>${esc(v.pay_currency ?? "—")}</td><td class="how">${esc(v.how_to_pay ?? "—")}</td><td class="mono">${v.payout_address ? `${esc(v.payout_address)} (${esc(v.payout_chain ?? "?")})` : "—"}</td><td>${v.jobs}</td><td>${v.delivered ? `${v.on_time}/${v.delivered}` : "—"}</td><td>${when(v.last_job)}</td></tr>`), "")}</section>`).join("") : "<p>No printers.</p>");
+    rows.filter((r) => r.city === city).map((v) => `<tr><td>${esc(v.name)}</td><td>${esc(v.status)}</td><td colspan="2">${payForm(v)}</td><td class="mono">${v.payout_address ? `${esc(v.payout_address)} (${esc(v.payout_chain ?? "?")})` : "—"}</td><td>${v.jobs}</td><td>${v.delivered ? `${v.on_time}/${v.delivered}` : "—"}</td><td>${when(v.last_job)}</td></tr>`), "")}</section>`).join("") : "<p>No printers.</p>");
   return layout("Printers", who, msg, body);
 }

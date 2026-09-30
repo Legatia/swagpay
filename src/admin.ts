@@ -1,5 +1,6 @@
 import { adminWarningsFull, moneySummary, ORDERS_PER_PAGE, orderLedger, ordersPage, suppliersPage, toPayRows } from "./admin-data";
 import { layout, renderLedger, renderOrders, renderSuppliers, renderToday } from "./admin-views";
+import { handleAdminPost } from "./admin-actions";
 import { verifyAccessJwt } from "./access";
 import type { RpcClient } from "./arc";
 import { listEscalations } from "./escalations";
@@ -23,8 +24,8 @@ export async function handleAdmin(request: Request, env: Env, deps: AdminDeps = 
   if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return new Response("Admin is not configured.", { status: 503 });
   const who = await verifyAccessJwt(request.headers.get("cf-access-jwt-assertion"), env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, deps.fetch);
   if (!who) return new Response("Forbidden", { status: 403 });
-  // Task 3 wires the POST actions here.
-  if (request.method !== "GET" && request.method !== "HEAD") return new Response("Method not allowed", { status: 405, headers: { allow: "GET, HEAD" } });
+  if (request.method === "POST") return handleAdminPost(request, env, { email: who.email ?? null });
+  if (request.method !== "GET" && request.method !== "HEAD") return new Response("Method not allowed", { status: 405, headers: { allow: "GET, HEAD, POST" } });
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const msg = url.searchParams.get("msg")?.slice(0, 200) ?? null;

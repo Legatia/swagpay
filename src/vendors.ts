@@ -190,3 +190,6 @@ export async function markJob(
   const row = await vendorJobFor(db, orderId);
   return row && row.status === to ? row : null;
 }
+export async function setVendorPayDetails(db: D1Database, id: number, d: { payCurrency: string; howToPay: string | null }, now: Date = new Date()): Promise<VendorRow | null> {
+  return db.prepare("UPDATE vendors SET pay_currency = ?, how_to_pay = ?, updated_at = ? WHERE id = ? RETURNING *").bind(d.payCurrency, d.howToPay, now.toISOString(), id).first<VendorRow>();
+}

@@ -114,13 +114,13 @@ describe("admin pages", () => {
     expect(printers).toContain("BLIK 600 000 000");
   });
 
-  it("routes: unknown paths 404, POST is not allowed yet, msg is shown escaped", async () => {
+  it("routes: unknown paths 404, other methods are not allowed, msg is shown escaped", async () => {
     expect((await get("/admin/nope")).status).toBe(404);
     const html = await (await get("/admin?msg=" + encodeURIComponent("Done <b>"))).text();
     expect(html).toContain("Done &lt;b&gt;");
     const { sign, fetchImpl } = await makeSigner();
     const token = await sign({ aud: ["test-aud"], iss: TEAM, exp: Math.floor(Date.now() / 1000) + 600, email: "owner@example.com" });
-    const res = await handleAdmin(new Request("https://swagpay.test/admin", { method: "POST", headers: { "cf-access-jwt-assertion": token } }), env, { fetch: fetchImpl });
+    const res = await handleAdmin(new Request("https://swagpay.test/admin", { method: "PUT", headers: { "cf-access-jwt-assertion": token } }), env, { fetch: fetchImpl });
     expect(res.status).toBe(405);
   });
 
