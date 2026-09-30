@@ -3,6 +3,7 @@ import { TreasuryAgent } from "./agent/treasury-agent";
 import { handleAdmin } from "./admin";
 import { handleApi } from "./api";
 import { computeMetrics, listPublicDecisions, renderLog } from "./public-log";
+import { sandboxGuard } from "./sandbox/config";
 import { handleScheduled } from "./scheduled";
 import { handleTelegram } from "./telegram-webhook";
 import { handleTreasuryApi } from "./treasury-api";
@@ -11,6 +12,11 @@ export { OrderAgent, TreasuryAgent };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const misconfigured = sandboxGuard(env);
+    if (misconfigured) {
+      console.error(misconfigured);
+      return new Response("Sandbox misconfigured.", { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
     const url = new URL(request.url);
     if (url.pathname === "/api/health") return Response.json({ ok: true });
     if (url.pathname === "/api/telegram" && request.method === "POST") {
@@ -60,6 +66,11 @@ export default {
     return env.ASSETS.fetch(request);
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const misconfigured = sandboxGuard(env);
+    if (misconfigured) {
+      console.error(misconfigured);
+      return;
+    }
     ctx.waitUntil(handleScheduled(controller.cron, env, new Date(controller.scheduledTime)).catch((err) => console.error("scheduled run failed", controller.cron, err)));
   },
 } satisfies ExportedHandler<Env>;

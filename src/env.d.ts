@@ -8,6 +8,7 @@ declare namespace Cloudflare {
     TELEGRAM_WEBHOOK_SECRET?: string;
     TREASURY_RUNNER_TOKEN?: string;
     PAYOUT_ADDRESS?: string;
+    SANDBOX_WALLET_KEY?: string;
   }
 }
 

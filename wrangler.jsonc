@@ -15,6 +15,7 @@
   "triggers": { "crons": ["* * * * *"] },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
+    "SANDBOX": "",
     "MODEL_PROVIDER": "gemini",
     "GEMINI_MODEL": "gemini-3.8-flash",
     "MODEL": "claude-sonnet-5-5",
@@ -40,5 +41,45 @@
     "TREASURY_DAILY_USDC": "1500",
     "TREASURY_RESERVE_MIN_BPS": "1000",
     "TREASURY_RESERVE_MAX_BPS": "3000"
+  },
+  "env": {
+    "sandbox": {
+      "name": "swagpay-sandbox",
+      "routes": [{ "pattern": "sandbox.swagpay.me", "custom_domain": true }],
+      "triggers": { "crons": ["* * * * *"] },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "swagpay-sandbox", "database_id": "SANDBOX_D1_ID", "migrations_dir": "migrations" }
+      ],
+      "r2_buckets": [{ "binding": "ARTWORK", "bucket_name": "swagpay-sandbox-artwork", "jurisdiction": "eu" }],
+      "durable_objects": { "bindings": [{ "name": "OrderAgent", "class_name": "OrderAgent" }, { "name": "TreasuryAgent", "class_name": "TreasuryAgent" }] },
+      "vars": {
+        "SANDBOX": "1",
+        "MODEL_PROVIDER": "gemini",
+        "GEMINI_MODEL": "gemini-3.8-flash",
+        "MODEL": "claude-sonnet-5-5",
+        "AGENT_AUTORUN": "1",
+        "MAX_NEW_ORDERS_PER_DAY": "30",
+        "REQUIRE_TURNSTILE": "1",
+        "TURNSTILE_SITE_KEY": "0x4AAAAAAFJklR1Bu4zO6hP5",
+        "ACCESS_TEAM_DOMAIN": "https://falling-shape-11d9.cloudflareaccess.com",
+        "ACCESS_AUD": "83b69731a99ebd14d410fcf7f5a6670913a5be1a2f00f93516bab5ccc574f8eb",
+        "RECEIVING_ADDRESS": "",
+        "ARC_CHAIN_ID": "5042002",
+        "USDC_ADDRESS": "0x3600000000000000000000000000000000000000",
+        "EURC_ADDRESS": "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+        "ARC_RPC_URL": "https://rpc.blockdaemon.testnet.arc.io",
+        "ARC_RPC_FALLBACK_URL": "https://rpc.testnet.arc.io",
+        "PAYOUT_CHAIN": "ARC",
+        "ARC_EXPLORER_URL": "https://explorer.testnet.arc.io",
+        "CASHOUT_FX_BUFFER": "0.02",
+        "KRAKEN_GBP_ENABLED": "0",
+        "FAR_PRINTER_MIN_UNITS": "100",
+        "RESERVE_ADDRESS": "",
+        "TREASURY_PER_TX_USDC": "500",
+        "TREASURY_DAILY_USDC": "1500",
+        "TREASURY_RESERVE_MIN_BPS": "1000",
+        "TREASURY_RESERVE_MAX_BPS": "3000"
+      }
+    }
   }
 }
