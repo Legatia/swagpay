@@ -43,7 +43,7 @@ Owner commands in Telegram:
 - `/vendor <#> pay <0x address> <CHAIN>` registers where a printer is paid.
 - `/cost <#> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]` records an order's printer cost, optionally against a printer.
 
-How a partner is paid: the printer cost goes out as two milestones, half at deposit and half after `/printed`. The second never goes out before `/printed`, and together they add up to the printer cost. Money goes only to the printer's registered address and chain, only while it is a `partner`, and within the per-payout and 24-hour limits.
+How a partner is paid: the printer cost goes out as two milestones, half at deposit and half after `/printed`. The second never goes out before `/printed`, and together they add up to the printer's cost at the quote's rate, without the FX buffer: the buffer stays in the wallet as margin. Agree that USDC amount with the printer when you book it. Money goes only to the printer's registered address and chain, only while it is a `partner`, and within the per-payout and 24-hour limits.
 
 If a printer is paused, or its address changes, its queued payouts are withheld and come to you as approvals.
 

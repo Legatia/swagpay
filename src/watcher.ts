@@ -1,6 +1,6 @@
 import { getAgentByName } from "agents";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, decodeTransfer, type RpcClient } from "./arc";
-import { getOrderById, setOrderStatus, type OrderRow } from "./db";
+import { PRINTED_STATUSES, getOrderById, setOrderStatus, type OrderRow } from "./db";
 import { createEscalation, type EscalationRow } from "./escalations";
 import { formatCents, formatUnits, isAddress, type Token } from "./money";
 import { applyClaims, depositPaid, getPaymentRequest, listUnnotified, markNotified, recordTransfer, type NewTransfer, type PaymentRequestRow, type TransferOutcome, type TransferRow } from "./payments";
@@ -50,9 +50,15 @@ const CHAIN_CODE = /^[A-Z][A-Z0-9-]{1,23}$/;
 /** m2 is null only when m1 already covers the whole printer cost (a retry after the cost changed). */
 type Milestones = { vendor: VendorRow | null; m1: ObligationRow; m2: ObligationRow | null };
 
+/** The printer's payout is usable: a partner with a valid address and chain code. */
+function payable(vendor: VendorRow | null): vendor is VendorRow & { payout_address: string; payout_chain: string } {
+  return !!vendor && vendor.status === "partner" && isAddress(vendor.payout_address) && typeof vendor.payout_chain === "string" && CHAIN_CODE.test(vendor.payout_chain);
+}
+
 /**
  * A partner printer with a registered USDC payout is paid by the treasury directly, in two printer_cost obligations that add up to
- * the printer cost: m1 = ceil(total / 2), open (escalated when the deposit is late), and m2 = the rest, waiting for /printed.
+ * the printer's cost without the FX buffer (the buffer stays in the wallet as margin): m1 = ceil(total / 2), open (escalated when
+ * the deposit is late), and m2 = the rest, waiting for /printed (open when the order was already printed).
  * Null when the owner's payout account takes the cost as one obligation instead. A retried notification takes the path its first
  * attempt took, so one printer cost is never recorded both ways.
  */
@@ -70,11 +76,9 @@ async function createMilestones(
     // Both milestones must be positive.
     if (!o.job || o.configErrors.length > 0 || o.token !== "USDC" || !(o.total >= 2)) return null;
     vendor = await getVendor(env.DB, o.job.vendor_id);
-    const address = vendor?.payout_address;
-    const chain = vendor?.payout_chain;
-    if (!vendor || vendor.status !== "partner" || !isAddress(address) || typeof chain !== "string" || !CHAIN_CODE.test(chain)) return null;
+    if (!payable(vendor)) return null;
     m1 = await createObligation(env.DB, {
-      orderId: o.orderId, kind: "printer_cost", token: "USDC", amountUnits: Math.ceil(o.total / 2), destination: address, chain,
+      orderId: o.orderId, kind: "printer_cost", token: "USDC", amountUnits: Math.ceil(o.total / 2), destination: vendor.payout_address, chain: vendor.payout_chain,
       dueAt: new Date(), sourceRef: `${ref}:m1`, status: o.late ? "escalated" : "open", vendorId: vendor.id,
     });
   }
@@ -84,9 +88,11 @@ async function createMilestones(
     console.error("no milestone 2: milestone 1 already covers the printer cost", m1.id, m1.amount_units, o.total);
     return { vendor, m1, m2: await getObligationByRef(env.DB, `${ref}:m2`) };
   }
+  // A /printed sent while an earlier attempt of this notice was failing found nothing to release: m2 is due at once.
+  const printed = PRINTED_STATUSES.includes((await getOrderById(env.DB, o.orderId))?.status ?? "");
   const m2 = await createObligation(env.DB, {
     orderId: o.orderId, kind: "printer_cost", token: m1.token, amountUnits: rest, destination: m1.destination, chain: m1.chain,
-    dueAt: new Date(), sourceRef: `${ref}:m2`, status: "waiting", ...(m1.vendor_id !== null ? { vendorId: m1.vendor_id } : {}),
+    dueAt: new Date(), sourceRef: `${ref}:m2`, status: printed ? "open" : "waiting", ...(m1.vendor_id !== null ? { vendorId: m1.vendor_id } : {}),
   });
   return { vendor, m1, m2 };
 }
@@ -104,12 +110,13 @@ async function announceMilestones(
   const printer = `printer #${m1.vendor_id}`;
   const units = (ob: ObligationRow) => `${formatUnits(ob.amount_units)} ${ob.token}`;
   const got = `(${formatUnits(paid)} ${r.token}, tx ${t.tx_hash})`;
+  const whenM2 = m2?.status === "waiting" ? "after /printed" : "now too, as the job is already printed";
   // obligationId: on the late approval, the owner's decision moves milestone 1 (deliver()); on the notice it is a reference only.
   const payload = { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, obligationId: m1.id };
   let e: EscalationRow;
   if (late) {
     // Amounts: approving waives the limits for milestone 1 (it is then owner-approved).
-    const plan = m2 ? `in two milestones (#${m1.id}: ${units(m1)} now, #${m2.id}: ${units(m2)} after /printed)` : `(#${m1.id}: ${units(m1)} now)`;
+    const plan = m2 ? `in two milestones (#${m1.id}: ${units(m1)} now, #${m2.id}: ${units(m2)} ${whenM2})` : `(#${m1.id}: ${units(m1)} now)`;
     e = await createEscalation(env.DB, {
       orderId: order.id, kind: "approval", payload,
       summary: `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) ${got}. Approve if printing is still possible: the treasury pays ${printer} ${plan}. Reject to handle the printer yourself: ${m2 ? "neither milestone is then paid by the treasury" : "the treasury then pays nothing"}.`,
@@ -117,7 +124,7 @@ async function announceMilestones(
   } else {
     // Not forwarded to the treasury (a payment notice only settles a manual cost), so it may name the printer.
     const plan = m2
-      ? `is paid by the treasury in two milestones: #${m1.id} (${units(m1)}) now, #${m2.id} (${units(m2)}) after /printed`
+      ? `is paid by the treasury in two milestones: #${m1.id} (${units(m1)}) now, #${m2.id} (${units(m2)}) ${whenM2}`
       : `is paid by the treasury: #${m1.id} (${units(m1)}) now`;
     e = await createEscalation(env.DB, {
       orderId: order.id, kind: "payment", payload,
@@ -126,7 +133,7 @@ async function announceMilestones(
   }
   await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   // No printer name: the treasury's reasons are public.
-  const second = m2 ? `, and obligation #${m2.id} ${units(m2)} once the owner reports the job printed (${m2.status})` : "";
+  const second = m2 ? `, and obligation #${m2.id} ${units(m2)} ${m2.status === "waiting" ? "once the owner reports the job printed" : whenM2} (${m2.status})` : "";
   await tellTreasury(env, `Order ${order.id}: deposit completed${late ? " LATE (the owner must first confirm printing is still possible)" : ""}. The printer cost goes straight to ${printer}${m2 ? " in two milestones" : ""}: obligation #${m1.id} ${units(m1)} now (${m1.status})${second}.`);
 }
 
@@ -204,9 +211,11 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   }
   let milestones: Milestones | null = null;
+  let job: VendorJobRow | null = null;
   if (completedDeposit) {
-    const job = await vendorJobFor(env.DB, order.id);
-    if (quote) milestones = await createMilestones(env, { orderId: order.id, quote, job, token: r.token, total: printerCostUnits(quote, fxBuffer), late, configErrors });
+    job = await vendorJobFor(env.DB, order.id);
+    // No FX buffer: the owner agrees the USDC amount with a partner printer at booking, and the buffer stays in the wallet.
+    if (quote) milestones = await createMilestones(env, { orderId: order.id, quote, job, token: r.token, total: printerCostUnits(quote, 0), late, configErrors });
     // Booked however the printer is paid; before the owner's notices, which a retry would repeat.
     if (job) await markJob(env.DB, order.id, "booked");
     if (milestones) await announceMilestones(env, telegram, { order, request: r, transfer: t, paid, late, milestones });
@@ -235,12 +244,14 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
       await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
     } else {
       const manual = why ? ` The treasury agent can't move it (${why}): pay from the wallet by hand.` : "";
+      // Not forwarded to the treasury (a payment notice only settles a manual cost), so it may name the printer.
+      const recorded = job ? await recordedPrinter(env, job) : "";
       const head = late
         ? `Order ${order.id}: deposit paid LATE (due ${warsawTime(new Date(r.due_by))} Warsaw time) (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Check printing is still possible, then book the printer: ${cost}.`
         : `Order ${order.id}: deposit paid (${formatUnits(paid)} ${r.token}, tx ${t.tx_hash}). Book the printer: ${cost}.`;
       const e = await createEscalation(env.DB, {
         orderId: order.id, kind: "payment",
-        summary: `${head} ${move}${manual}`.trim(),
+        summary: `${head} ${move}${manual}${recorded}`.trim(),
         // manual: the owner pays this cost by hand, so acknowledging the notice settles the obligation (deliver()).
         payload: { txHash: t.tx_hash, logIndex: t.log_index, requestId: r.id, quoteId: r.quote_id, ...(costOb ? { obligationId: costOb.id, ...(why ? { manual: true } : {}) } : {}) },
       });
@@ -258,6 +269,14 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     });
     await notifyOwner(env.DB, telegram, env.TELEGRAM_OWNER_CHAT_ID, e);
   }
+}
+
+/** For the owner-path notice: the printer the owner recorded, when it isn't paid by the treasury because it isn't a partner with a payout. */
+async function recordedPrinter(env: Env, job: VendorJobRow): Promise<string> {
+  const vendor = await getVendor(env.DB, job.vendor_id);
+  if (!vendor || payable(vendor)) return "";
+  const reason = vendor.status !== "partner" ? `it is ${vendor.status}, not a partner` : "it has no registered payout address";
+  return ` Recorded printer: #${vendor.id} ${vendor.name} (not paid by the treasury: ${reason}).`;
 }
 
 /** Wakes the treasury agent. It only logs on failure: a throw here would make notifyPass repeat the owner escalations. */

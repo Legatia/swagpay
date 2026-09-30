@@ -110,6 +110,9 @@ export async function listRecentOrders(db: D1Database, limit: number): Promise<O
   return (await db.prepare(`SELECT ${ORDER_COLUMNS} FROM orders ORDER BY id DESC LIMIT ?`).bind(limit).all<OrderRow>()).results;
 }
 
+/** Statuses only /printed leads to: balance requests are created by /printed alone. */
+export const PRINTED_STATUSES = ["balance_pending", "balance_paid", "closed"];
+
 /** Moves an order to `to` only from one of the `from` states. Returns whether it moved. */
 export async function setOrderStatus(db: D1Database, id: number, from: string[], to: string): Promise<boolean> {
   const res = await db

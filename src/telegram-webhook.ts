@@ -1,5 +1,5 @@
 import { getAgentByName } from "agents";
-import { getOrderById, setOrderStatus, type OrderRow } from "./db";
+import { PRINTED_STATUSES, getOrderById, setOrderStatus, type OrderRow } from "./db";
 import { decideEscalation, getEscalation, listEscalations, listUndelivered, markDelivered, statusWord as word, type EscalationRow } from "./escalations";
 import { TREASURY_NAME } from "./agent/treasury-agent";
 import { fetchNbpRate } from "./fx";
@@ -286,9 +286,6 @@ export async function resend(env: Env, id: number): Promise<string> {
     ? `#${id} re-sent to the agent (${word(row.kind, row.status)}).`
     : `#${id}: the agent could not be told. Try /resend ${id} again later.`;
 }
-
-/** Statuses only /printed leads to: balance requests are created by /printed alone. */
-const PRINTED_STATUSES = ["balance_pending", "balance_paid", "closed"];
 
 /**
  * After /printed: opens this order's printer milestones that wait for it, marks its printer job printed, and tells the treasury.

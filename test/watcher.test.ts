@@ -547,32 +547,36 @@ describe("partner printers paid in two milestones", () => {
   const treasuryInbox = async () => runInDurableObject(await getAgentByName(env.TreasuryAgent, "treasury"), async (agent: TreasuryAgent) =>
     agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text));
 
-  it("pays a partner printer directly: half now, the rest (waiting) after /printed, adding up to the printer cost", async () => {
+  it("pays a partner printer directly: half now, the rest (waiting) after /printed, adding up to the printer's cost without the FX buffer", async () => {
     const { order, req } = await pendingDeposit(3131);
+    // A rate that makes the printer cost odd: 1000 PLN at 7 PLN per USDC is 142.857143 USDC.
+    await env.DB.prepare("UPDATE quotes SET pln_per_unit = 7 WHERE id = ?").bind(req.quote_id).run();
     const v = await partner();
     await propose(order.id, v);
     await setLastBlock(5100);
     const paid = usdcLog(5105, req.amount_units, 3131);
-    // An FX buffer that makes the printer cost odd: 257.500001 USDC.
-    const odd = ({ ...env, POLICY_FX_BUFFER: "0.030000004" }) as unknown as Env;
-    await runWatcher(odd, { rpc: fakeRpc(5140, [paid]).rpc, telegram: silent });
-    const total = printerCostUnits((await getQuote(env.DB, req.quote_id))!, 0.030000004);
-    expect(total).toBe(257_500_001);
+    const buffered = ({ ...env, POLICY_FX_BUFFER: "0.05" }) as unknown as Env;
+    await runWatcher(buffered, { rpc: fakeRpc(5140, [paid]).rpc, telegram: silent });
+    const quote = (await getQuote(env.DB, req.quote_id))!;
+    // The printer is paid its cost; the FX buffer stays in the wallet as margin.
+    const total = printerCostUnits(quote, 0);
+    expect(total).toBe(142_857_143);
+    expect(printerCostUnits(quote, 0.05)).toBeGreaterThan(total);
     const obs = await obligationsOf(order.id);
     expect(obs).toHaveLength(2);
     const [m1, m2] = obs;
     expect(m1).toMatchObject({
-      kind: "printer_cost", token: "USDC", amount_units: 128_750_001, destination: VADDR, chain: "BASE", status: "open", vendor_id: v,
+      kind: "printer_cost", token: "USDC", amount_units: 71_428_572, destination: VADDR, chain: "BASE", status: "open", vendor_id: v,
       source_ref: `printer_cost:quote:${req.quote_id}:m1`,
     });
     expect(m2).toMatchObject({
-      kind: "printer_cost", token: "USDC", amount_units: 128_750_000, destination: VADDR, chain: "BASE", status: "waiting", vendor_id: v,
+      kind: "printer_cost", token: "USDC", amount_units: 71_428_571, destination: VADDR, chain: "BASE", status: "waiting", vendor_id: v,
       source_ref: `printer_cost:quote:${req.quote_id}:m2`,
     });
     expect(m1.amount_units + m2.amount_units).toBe(total);
     // Nothing goes to the owner's payout account.
     expect(obs.some((o) => o.destination === PAYOUT || o.source_ref === `printer_cost:quote:${req.quote_id}`)).toBe(false);
-    // The margin still counts the whole printer cost once.
+    // The margin counts the whole printer cost once.
     expect((await orderMargin(env.DB, order.id))?.printerCostUnits).toBe(total);
     const job = await vendorJobFor(env.DB, order.id);
     expect(job).toMatchObject({ vendor_id: v, status: "booked" });
@@ -581,7 +585,7 @@ describe("partner printers paid in two milestones", () => {
     expect(notices).toHaveLength(1);
     expect(notices[0].kind).toBe("payment");
     expect(notices[0].summary).toBe(
-      `Order ${order.id}: deposit paid (${formatUnits(req.amount_units)} USDC, tx ${paid.transactionHash}). Printer #${v} Drukarnia Partner (partner) is paid by the treasury in two milestones: #${m1.id} (128.750001 USDC) now, #${m2.id} (128.750000 USDC) after /printed. Send the job to the printer with the files from the order page.`,
+      `Order ${order.id}: deposit paid (${formatUnits(req.amount_units)} USDC, tx ${paid.transactionHash}). Printer #${v} Drukarnia Partner (partner) is paid by the treasury in two milestones: #${m1.id} (71.428572 USDC) now, #${m2.id} (71.428571 USDC) after /printed. Send the job to the printer with the files from the order page.`,
     );
     expect(notices[0].summary).not.toContain("Book the printer");
     // Acknowledging the notice settles nothing: the treasury pays the milestones.
@@ -604,12 +608,12 @@ describe("partner printers paid in two milestones", () => {
     await setLastBlock(5200);
     await runWatcher(env, { rpc: fakeRpc(5240, [usdcLog(5205, req.amount_units, 3232)]).rpc, telegram: silent });
     const [m1, m2] = await obligationsOf(order.id);
-    expect(m1).toMatchObject({ amount_units: 128_750_000, status: "escalated", vendor_id: v, destination: VADDR, chain: "BASE" });
-    expect(m2).toMatchObject({ amount_units: 128_750_000, status: "waiting", vendor_id: v });
+    expect(m1).toMatchObject({ amount_units: 125_000_000, status: "escalated", vendor_id: v, destination: VADDR, chain: "BASE" });
+    expect(m2).toMatchObject({ amount_units: 125_000_000, status: "waiting", vendor_id: v });
     const approvals = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.kind === "approval");
     expect(approvals).toHaveLength(1);
     expect(approvals[0].summary).toContain(`Order ${order.id}: deposit paid LATE (due ${warsawTime(due)} Warsaw time)`);
-    expect(approvals[0].summary).toContain(`Approve if printing is still possible: the treasury pays printer #${v} in two milestones (#${m1.id}: 128.750000 USDC now, #${m2.id}: 128.750000 USDC after /printed). Reject to handle the printer yourself: neither milestone is then paid by the treasury.`);
+    expect(approvals[0].summary).toContain(`Approve if printing is still possible: the treasury pays printer #${v} in two milestones (#${m1.id}: 125.000000 USDC now, #${m2.id}: 125.000000 USDC after /printed). Reject to handle the printer yourself: neither milestone is then paid by the treasury.`);
     // The owner's decision forwards this summary to the treasury, whose reasons are public: no printer name.
     expect(approvals[0].summary).not.toContain("Drukarnia");
     expect(JSON.parse(approvals[0].payload_json).obligationId).toBe(m1.id);
@@ -708,18 +712,21 @@ describe("partner printers paid in two milestones", () => {
     });
     const book = (await listEscalations(env.DB)).filter((x) => x.order_id === order.id && x.summary.includes("Book the printer"));
     expect(book).toHaveLength(1);
-    expect(book[0].summary).toBe(`Order ${order.id}: deposit paid (257.503333 USDC, tx ${paid.transactionHash}). Book the printer: cost 1000.00 PLN gross (quote #${req.quote_id}). Printer cost obligation #${obs[0].id}: 257.500000 USDC to the payout account.`);
+    expect(book[0].summary).toBe(`Order ${order.id}: deposit paid (257.503333 USDC, tx ${paid.transactionHash}). Book the printer: cost 1000.00 PLN gross (quote #${req.quote_id}). Printer cost obligation #${obs[0].id}: 257.500000 USDC to the payout account. Recorded printer: #${v} Drukarnia Screened (not paid by the treasury: it is screened, not a partner).`);
     expect((await vendorJobFor(env.DB, order.id))?.status).toBe("booked");
   });
 
   it("keeps the owner path for a partner without a payout, an EURC deposit, or an invalid treasury config", async () => {
     // A partner that has not registered where it is paid.
     const a = await pendingDeposit(3434);
-    await propose(a.order.id, await addVendor({ status: "partner", name: "No Payout" }));
+    const noPayout = await addVendor({ status: "partner", name: "No Payout" });
+    await propose(a.order.id, noPayout);
     await setLastBlock(5400);
     await runWatcher(env, { rpc: fakeRpc(5440, [usdcLog(5405, a.req.amount_units, 3434)]).rpc, telegram: silent });
     expect((await obligationsOf(a.order.id)).map((o) => [o.source_ref, o.destination, o.status, o.vendor_id])).toEqual([[`printer_cost:quote:${a.req.quote_id}`, PAYOUT, "open", null]]);
     expect((await vendorJobFor(env.DB, a.order.id))?.status).toBe("booked");
+    const aNotice = (await listEscalations(env.DB)).find((x) => x.order_id === a.order.id && x.summary.includes("Book the printer"))!;
+    expect(aNotice.summary).toMatch(new RegExp(` Recorded printer: #${noPayout} No Payout \\(not paid by the treasury: it has no registered payout address\\)\\.$`));
 
     // EURC: the treasury only pays USDC.
     const b = await pendingDeposit(3535, { currency: "EUR" });
@@ -733,6 +740,8 @@ describe("partner printers paid in two milestones", () => {
     await runWatcher(env, { rpc: fakeRpc(5540, [eurc]).rpc, telegram: silent });
     const eurcObs = await obligationsOf(b.order.id);
     expect(eurcObs).toHaveLength(1);
+    // A partner with a payout: only the token keeps it off the treasury, which the notice already says.
+    expect((await listEscalations(env.DB)).find((x) => x.order_id === b.order.id && x.summary.includes("deposit paid"))?.summary).not.toContain("Recorded printer");
     expect(eurcObs[0]).toMatchObject({ source_ref: `printer_cost:quote:${b.req.quote_id}`, token: "EURC", status: "escalated", vendor_id: null, note: "only USDC payouts are configured" });
 
     // Invalid treasury config: the printer cost can't be split safely.
@@ -746,6 +755,23 @@ describe("partner printers paid in two milestones", () => {
     // As before plan 5: the policy didn't load, so the owner pays it by hand.
     expect(badObs[0]).toMatchObject({ source_ref: `printer_cost:quote:${c.req.quote_id}`, destination: "", status: "escalated", vendor_id: null });
     expect(badObs[0].note).toMatch(/^treasury config is invalid/);
+  });
+
+  it("opens milestone 2 at once when the order was already printed before the deposit notice went through", async () => {
+    const { order, req } = await pendingDeposit(3030);
+    const v = await partner();
+    await propose(order.id, v);
+    // The first notice attempt failed after the order moved to deposit_paid; the owner sent /printed meanwhile.
+    await setOrderStatus(env.DB, order.id, ["deposit_pending"], "balance_pending");
+    await setLastBlock(5050);
+    await runWatcher(env, { rpc: fakeRpc(5090, [usdcLog(5055, req.amount_units, 3030)]).rpc, telegram: silent });
+    const [m1, m2] = await obligationsOf(order.id);
+    expect(m1).toMatchObject({ status: "open", amount_units: 125_000_000 });
+    expect(m2).toMatchObject({ status: "open", amount_units: 125_000_000, vendor_id: v });
+    const notice = (await listEscalations(env.DB)).find((x) => x.order_id === order.id && x.summary.includes("deposit paid"))!;
+    expect(notice.summary).toContain(`#${m1.id} (125.000000 USDC) now, #${m2.id} (125.000000 USDC) now too, as the job is already printed.`);
+    const told = (await treasuryInbox()).find((x) => x.startsWith(`Order ${order.id}: deposit completed`))!;
+    expect(told).toContain(`obligation #${m2.id} 125.000000 USDC now too, as the job is already printed (open)`);
   });
 
   it("creates no second set of milestones when the notification is retried", async () => {
@@ -779,7 +805,7 @@ describe("partner printers paid in two milestones", () => {
     const v = await partner();
     await propose(b.order.id, v);
     const m1 = await createObligation(env.DB, {
-      orderId: b.order.id, kind: "printer_cost", token: "USDC", amountUnits: 128_750_000, destination: VADDR, chain: "BASE",
+      orderId: b.order.id, kind: "printer_cost", token: "USDC", amountUnits: 125_000_000, destination: VADDR, chain: "BASE",
       dueAt: new Date(), sourceRef: `printer_cost:quote:${b.req.quote_id}:m1`, vendorId: v,
     });
     await setVendorStatus(env.DB, v, "paused");
@@ -789,6 +815,6 @@ describe("partner printers paid in two milestones", () => {
     expect(obs.map((o) => o.source_ref)).toEqual([`printer_cost:quote:${b.req.quote_id}:m1`, `printer_cost:quote:${b.req.quote_id}:m2`]);
     expect(obs[0].id).toBe(m1.id);
     // Milestone 2 goes where milestone 1 goes, and the two add up to the printer cost.
-    expect(obs[1]).toMatchObject({ amount_units: 128_750_000, destination: VADDR, chain: "BASE", vendor_id: v, status: "waiting" });
+    expect(obs[1]).toMatchObject({ amount_units: 125_000_000, destination: VADDR, chain: "BASE", vendor_id: v, status: "waiting" });
   });
 });
