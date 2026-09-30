@@ -25,6 +25,21 @@ test("Lisbon NIF valid as string or boolean screens", () => {
   assert.equal(toVendorRows("lisbon", [base])[0].source_ref, "lisbon:grafica-lisboa");
 });
 
+test("Lisbon screens on the VIES string the research records, and never on a false or invalid one", () => {
+  // As in event-swag/data/lisbon-printers.json (STAMPA).
+  const real = "valid: true; VIES name: S T A M P A - SERIGRAFIA E TRABALHOS ARTISTICOS PARA MATERIAIS DE POLIESTER E ALGODÃO S A";
+  const base = { name: "STAMPA", email: "comercial@stampa.pt", methods: ["screen", "banner"], tax_id: "502334070", tax_checked_at: "2026-09-30" };
+  const [r] = toVendorRows("lisbon", [{ ...base, tax_status: real }]);
+  assert.equal(r.status, "screened");
+  assert.equal(r.tax_status, real);
+  assert.equal(toVendorRows("lisbon", [{ ...base, tax_status: "Valid" }])[0].status, "screened");
+  for (const s of ["valid: false", "Valid: FALSE; VIES name: X", "valid: true; invalid since 2026", "invalid", "not valid", "unverified (NIF not published)", "validated elsewhere"]) {
+    assert.equal(toVendorRows("lisbon", [{ ...base, tax_status: s }])[0].status, "candidate", s);
+  }
+  // Still needs an email.
+  assert.equal(toVendorRows("lisbon", [{ ...base, email: null, tax_status: real }])[0].status, "candidate");
+});
+
 test("a Mumbai GSTIN that is format-checked only stays a candidate", () => {
   const [r] = toVendorRows("mumbai", [{ name: "Print Hungama", email: "i@x.in", methods: ["screen", "dtf"], tax_id_type: "GSTIN", tax_id: "27BRAPP6496D1ZI", tax_status: "format-checked only (15 chars)" }]);
   assert.equal(r.status, "candidate");

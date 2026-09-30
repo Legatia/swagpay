@@ -10,10 +10,18 @@ export function slug(s) {
 
 const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
 
+/** A VAT check that passed: `true`, or text that starts with "valid" (the research records "valid: true; VIES name: …") and never says false or invalid. */
+function taxValid(status) {
+  if (status === true) return true;
+  if (typeof status !== "string") return false;
+  const s = status.trim();
+  return /^valid\b/i.test(s) && !/\bfalse\b|\binvalid\b/i.test(s);
+}
+
 function screened(r, email) {
   if (!email) return false;
   if (r.vat_status === "active") return true;
-  if (r.tax_status === true || (typeof r.tax_status === "string" && r.tax_status.trim().toLowerCase() === "valid")) return true;
+  if (taxValid(r.tax_status)) return true;
   return Boolean(str(r.company_number)) && String(r.company_status).toLowerCase() === "active";
 }
 

@@ -35,6 +35,8 @@ Import the researched printers, run from the swagpay folder. It never demotes a 
 
     node scripts/vendors-import.mjs ../event-swag/data/*-printers.json > /tmp/vendors.sql && npx wrangler d1 execute swagpay --remote --file /tmp/vendors.sql
 
+A printer is `screened` when it has an email and its tax check passed: an active Polish VAT, a valid VAT number (VIES, as the Lisbon research records it: `valid: true; …`), or an active UK company record. Every other printer is a `candidate`. A re-import keeps partners and paused printers as they are, but sets every other status from the data: a printer you screened by hand with `/vendor <#> screened` goes back to `candidate` unless its data qualifies.
+
 Owner commands in Telegram:
 - `/vendors [city]` lists printers.
 - `/vendor <#> partner|screened|paused` sets a printer's status.
