@@ -1,5 +1,5 @@
 import { getAgentByName } from "agents";
-import { getOrderById, setOrderStatus } from "./db";
+import { getOrderById, setOrderStatus, type OrderRow } from "./db";
 import { decideEscalation, getEscalation, listEscalations, listUndelivered, markDelivered, statusWord as word, type EscalationRow } from "./escalations";
 import { TREASURY_NAME } from "./agent/treasury-agent";
 import { fetchNbpRate } from "./fx";
@@ -11,7 +11,7 @@ import { createTelegram, type TelegramClient } from "./telegram";
 import { decideObligation, setObligationStatus } from "./treasury";
 import {
   cityFromPlace, getVendor, listVendors, proposeVendorJob, setVendorPayout, setVendorStatus, vendorJobFor, vendorScore,
-  type VendorRow, type VendorStatus,
+  type VendorJobRow, type VendorRow, type VendorStatus,
 } from "./vendors";
 
 type Update = {
@@ -19,13 +19,15 @@ type Update = {
   callback_query?: { id?: string; data?: string; message?: { chat?: { id?: number } } };
 };
 
+const COST_SYNTAX = "/cost <id> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]";
+
 export const HELP = [
   "Commands:",
   "/open — open escalations",
   "/approve <id> [note]",
   "/reject <id> [note]",
   "/resend <id> — re-send a decision the agent missed",
-  "/cost <id> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note] — printer cost (gross, delivery included) for a cost request",
+  `${COST_SYNTAX} — printer cost (gross, delivery included) for a cost request`,
   "/order <number> — order status",
   "/printed <order> — the printer finished; send the balance request",
   "/vendors [city] — printers, partners first",
@@ -82,7 +84,7 @@ async function deliver(env: Env, row: EscalationRow): Promise<boolean> {
 export async function decide(env: Env, id: number, status: "approved" | "rejected", note: string | null): Promise<string> {
   if (status === "approved") {
     const pending = await getEscalation(env.DB, id);
-    if (pending?.kind === "cost" && pending.status === "open") return `#${id} needs a price: /cost ${id} <PLN gross, delivery included> [note]`;
+    if (pending?.kind === "cost" && pending.status === "open") return `#${id} needs a price: ${COST_SYNTAX.replace("<id>", String(id))}`;
   }
   const row = await decideEscalation(env.DB, id, status, note);
   if (!row) {
@@ -107,10 +109,20 @@ export const COST_CURRENCIES = ["PLN", "EUR", "GBP", "USD", "INR"] as const;
 export type CostCurrency = (typeof COST_CURRENCIES)[number];
 export type CostArgs = { amount: number; currency: CostCurrency; vendorId: number | null; note: string | null };
 
-const COST_USAGE = "Usage: /cost <id> <PLN gross, delivery included> [note]";
+const COST_USAGE = `Usage: ${COST_SYNTAX}`;
 const ONE_EACH = "Give one currency and one printer at most. Nothing was recorded.";
-/** ISO 4217 codes: "350 CHF" is refused rather than read as 350 PLN with the note "CHF". */
 const ISO_CURRENCIES = new Set(Intl.supportedValuesOf("currency"));
+const CURRENCY_WORDS = new Set([
+  "€", "$", "£", "₹", "zł", "zl", "euro", "euros", "dollar", "dollars", "pound", "pounds", "rupee", "rupees",
+  "złoty", "zloty", "złote", "zlote", "złotych", "zlotych",
+]);
+
+/** How to show `w` when it names a currency the amount can't be in ("chf" → "CHF", "€", "euro"), or null. */
+function otherCurrency(w: string): string | null {
+  const code = w.toUpperCase();
+  if (/^[A-Z]{3}$/.test(code) && ISO_CURRENCIES.has(code)) return code;
+  return CURRENCY_WORDS.has(w.toLowerCase().replace(/[.,;:!?]+$/, "")) ? w : null;
+}
 
 /**
  * The words after `/cost <id>`: the amount, with a currency and a printer (`v<#>`) before or after it in either
@@ -119,7 +131,9 @@ const ISO_CURRENCIES = new Set(Intl.supportedValuesOf("currency"));
 export function parseCostArgs(words: string[], id?: number): CostArgs | { error: string } {
   const got: { currency?: CostCurrency; vendorId?: number } = {};
   let i = 0;
-  const takeTokens = (): string | null => {
+  // After the amount, with no currency named yet, a currency the owner can't use ("350 chf", "350 €") must not
+  // become a note on a PLN amount. Naming the currency first ("350 PLN all colours") frees the note.
+  const takeTokens = (afterAmount: boolean): string | null => {
     for (; i < words.length; i++) {
       const w = words[i];
       const printer = /^v(\d{1,9})$/i.exec(w);
@@ -130,14 +144,15 @@ export function parseCostArgs(words: string[], id?: number): CostArgs | { error:
         if (got.vendorId !== undefined) return ONE_EACH;
         got.vendorId = Number(printer[1]);
       } else {
-        return /^[A-Z]{3}$/.test(w) && ISO_CURRENCIES.has(w)
-          ? `${w} can't be converted here: give the cost in PLN, EUR, GBP, USD or INR. Nothing was recorded.`
-          : null;
+        const other = afterAmount && got.currency === undefined ? otherCurrency(w) : null;
+        return other === null
+          ? null
+          : `${other} can't be converted here: give the cost in PLN, EUR, GBP, USD or INR. Nothing was recorded. If it's part of the note, put PLN before it.`;
       }
     }
     return null;
   };
-  const before = takeTokens();
+  const before = takeTokens(false);
   if (before) return { error: before };
   const written = words[i++];
   const amount = parsePln(written);
@@ -147,7 +162,7 @@ export function parseCostArgs(words: string[], id?: number): CostArgs | { error:
   if (next !== undefined && /^\d{3}([.,]\d{1,2})?$/.test(next)) {
     return { error: `Did you mean ${written}${next}? Write the amount without spaces, e.g. /cost ${id ?? "<id>"} 1200.50` };
   }
-  const after = takeTokens();
+  const after = takeTokens(true);
   if (after) return { error: after };
   return { amount, currency: got.currency ?? "PLN", vendorId: got.vendorId ?? null, note: words.slice(i).join(" ").trim().slice(0, 500) || null };
 }
@@ -167,13 +182,26 @@ export async function giveCost(
   if (e.status !== "open") return `#${id} is already ${e.status}.`;
 
   let vendor: VendorRow | null = null;
+  let order: OrderRow | null = null;
+  // A job past `proposed` with this same printer stays as it is; the cost is still recorded.
+  let keptJob: VendorJobRow | null = null;
   if (opts.vendorId !== undefined && opts.vendorId !== null) {
     vendor = await getVendor(env.DB, opts.vendorId);
     if (!vendor) return `Printer #${opts.vendorId} doesn't exist; nothing was recorded.`;
     if (vendor.status === "paused") return `Printer #${vendor.id} is paused; nothing was recorded.`;
     if (vendor.status !== "screened" && vendor.status !== "partner") return `Printer #${vendor.id} isn't screened; nothing was recorded.`;
+    order = e.order_id === null ? null : await getOrderById(env.DB, e.order_id);
+    if (!order) return `#${id} has no order; nothing was recorded.`;
+    const job = await vendorJobFor(env.DB, order.id);
+    if (job && job.status !== "proposed") {
+      if (job.vendor_id !== vendor.id) {
+        return `Order ${order.id} is already ${job.status} with printer #${job.vendor_id}; nothing was recorded. Send /cost without v<#> to record the cost only.`;
+      }
+      keptJob = job;
+    }
   }
 
+  // The amount has at most two decimals, so cents are exact; grosze round once.
   const cents = Math.round(amount * 100);
   let grosze = cents;
   let conversion: { shown: string; noted: string } | null = null;
@@ -185,27 +213,29 @@ export async function giveCost(
       console.error("NBP rate unavailable", currency, err);
       return `Couldn't get the NBP ${currency} rate; nothing was recorded. Try again, or send the cost in PLN.`;
     }
-    grosze = Math.round(amount * rate.plnPerUnit * 100);
+    grosze = Math.round(cents * rate.plnPerUnit);
     const given = `${formatCents(cents)} ${currency} at ${rate.plnPerUnit}`;
     conversion = { shown: ` (${given})`, noted: `${given} PLN (NBP ${rate.effectiveDate})` };
   }
   if (!(grosze >= 1)) return "That's less than 0.01 PLN; nothing was recorded.";
   const pln = `${formatCents(grosze)} PLN`;
 
-  // deliver() reads the leading "<pln> PLN"; the rest reaches the order agent as the owner's note.
-  const decisionNote = [pln, conversion?.noted, vendor && `printer #${vendor.id} ${vendor.name}`, note].filter(Boolean).join("; ");
+  // deliver() reads the leading "<pln> PLN"; the rest reaches the order agent as the owner's note. It names the
+  // printer only when the job is being proposed to it.
+  const named = vendor && !keptJob ? `printer #${vendor.id} ${vendor.name}` : null;
+  const decisionNote = [pln, conversion?.noted, named, note].filter(Boolean).join("; ");
   const row = await decideEscalation(env.DB, id, "approved", decisionNote, opts.now);
   if (!row) return `#${id} is already ${(await getEscalation(env.DB, id))?.status ?? "decided"}.`;
 
   // The job is recorded before the agent is told, so a failed delivery (retried with /resend) doesn't lose it.
   let printer = "";
-  if (vendor) {
+  if (keptJob) printer = `; printer unchanged (job already ${keptJob.status})`;
+  else if (vendor && order) {
     try {
-      const order = row.order_id === null ? null : await getOrderById(env.DB, row.order_id);
-      if (!order) throw new Error(`order ${row.order_id} not found`);
       const job = await proposeVendorJob(env.DB, { orderId: order.id, vendorId: vendor.id, deliverBy: order.deliver_by, currency, cents }, opts.now);
       if (job) printer = `; printer #${vendor.id} ${vendor.name}`;
       else {
+        // Only if the job moved on since the check above.
         const current = await vendorJobFor(env.DB, order.id);
         printer = current ? `; printer NOT changed: the job is already ${current.status} with printer #${current.vendor_id}` : "; printer NOT recorded";
       }
@@ -305,10 +335,11 @@ async function vendorCommand(env: Env, args: string[]): Promise<string> {
     const address = args[2];
     const chain = (args[3] ?? "").toUpperCase();
     if (args.length !== 4 || !isAddress(address) || !/^[A-Z][A-Z0-9-]{1,23}$/.test(chain)) return VENDOR_USAGE;
-    const result = await setVendorPayout(env.DB, id, address, chain);
+    const lower = address.toLowerCase();
+    const result = await setVendorPayout(env.DB, id, lower, chain);
     if (result === "missing") return `Printer #${id} doesn't exist.`;
     if (result === "not_partner") return `Printer #${id} must be a partner first: /vendor ${id} partner`;
-    return `Printer #${id} is paid at ${address} on ${chain}.`;
+    return `Printer #${id} is paid at ${lower} on ${chain}.`;
   }
   if (action !== "partner" && action !== "screened" && action !== "paused") return VENDOR_USAGE;
   const status: VendorStatus = action;

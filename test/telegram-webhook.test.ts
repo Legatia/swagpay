@@ -55,7 +55,7 @@ function nbp(mid: number, seen: string[] = []): typeof fetch {
 }
 const noFetch = (async () => { throw new Error("fetch must not be called"); }) as typeof fetch;
 
-const USAGE = "Usage: /cost <id> <PLN gross, delivery included> [note]";
+const USAGE = "Usage: /cost <id> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]";
 
 describe("parseCostArgs", () => {
   it("reads the amount, then an optional currency and printer in either order, then the note", () => {
@@ -83,12 +83,23 @@ describe("parseCostArgs", () => {
     expect(parseCostArgs(["0"])).toEqual({ error: USAGE });
     expect(parseCostArgs(["EUR"])).toEqual({ error: USAGE });
     expect(parseCostArgs(["drukarnia", "350"])).toEqual({ error: USAGE });
-    // A real currency code the owner can't use here must not be read as 350 PLN.
-    const other = "CHF can't be converted here: give the cost in PLN, EUR, GBP, USD or INR. Nothing was recorded.";
-    expect(parseCostArgs(["350", "CHF", "rush"])).toEqual({ error: other });
-    expect(parseCostArgs(["350", "v3", "CHF"])).toEqual({ error: other });
     expect(parseCostArgs(["350", "EUR", "usd"])).toEqual({ error: "Give one currency and one printer at most. Nothing was recorded." });
     expect(parseCostArgs(["v3", "350", "v4"])).toEqual({ error: "Give one currency and one printer at most. Nothing was recorded." });
+  });
+
+  it("refuses a currency it can't convert, however it's written, instead of reading it as PLN", () => {
+    const refused = (what: string) => ({
+      error: `${what} can't be converted here: give the cost in PLN, EUR, GBP, USD or INR. Nothing was recorded. If it's part of the note, put PLN before it.`,
+    });
+    expect(parseCostArgs(["350", "CHF", "rush"])).toEqual(refused("CHF"));
+    expect(parseCostArgs(["350", "v3", "chf"])).toEqual(refused("CHF"));
+    for (const w of ["€", "$", "£", "₹", "zł", "zl", "ZŁ", "euro", "Euros", "dollar", "dollars", "pound", "pounds", "rupee", "rupees", "złoty", "zloty", "zł."]) {
+      expect(parseCostArgs(["350", w]), w).toEqual(refused(w));
+    }
+    expect(parseCostArgs(["350", "all", "colours"])).toEqual(refused("ALL"));
+    // Once the currency is named, the rest is the note.
+    expect(parseCostArgs(["350", "PLN", "all", "colours"])).toEqual({ amount: 350, currency: "PLN", vendorId: null, note: "all colours" });
+    expect(parseCostArgs(["350", "XYZ"])).toEqual({ amount: 350, currency: "PLN", vendorId: null, note: "XYZ" });
   });
 });
 
@@ -350,10 +361,10 @@ describe("Telegram webhook", () => {
     await handleTelegram(update(fromOwner(`/cost ${other.e.id} 100`)), env, t);
     await handleTelegram(update(fromOwner(`/approve ${e.id}`)), env, t);
     expect(t.sent).toEqual([
-      "Usage: /cost <id> <PLN gross, delivery included> [note]",
-      "Usage: /cost <id> <PLN gross, delivery included> [note]",
+      USAGE,
+      USAGE,
       `#${other.e.id} is not a cost request.`,
-      `#${e.id} needs a price: /cost ${e.id} <PLN gross, delivery included> [note]`,
+      `#${e.id} needs a price: /cost ${e.id} <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]`,
     ]);
     expect((await getEscalation(env.DB, e.id))?.status).toBe("open");
   });
@@ -374,6 +385,7 @@ describe("Telegram webhook", () => {
       expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(148936);
       const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
       expect(inbox).toContain(`Printer cost from the owner (escalation #${e.id}): 1489.36 PLN gross`);
+      expect(inbox).toContain(`Owner's note: "350.00 EUR at 4.2553 PLN (NBP 2026-10-01); printer #${v} Drukarnia Euro; rush job".`);
     });
     expect(await vendorJobFor(env.DB, order.id)).toMatchObject({
       vendor_id: v, status: "proposed", cost_currency: "EUR", cost_cents: 35000, deliver_by: order.deliver_by,
@@ -449,22 +461,74 @@ describe("Telegram webhook", () => {
     expect(await vendorJobFor(env.DB, order.id)).toBeNull();
   });
 
-  it("keeps the cost but not the printer once the order's job is booked", async () => {
+  it("refuses a currency written as a symbol, name or other code, and records nothing", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const t = fakeTelegram();
+    const deps = { telegram: t.telegram, fetch: noFetch };
+    for (const w of ["chf", "€", "zł", "euro rush"]) await handleTelegram(update(fromOwner(`/cost ${e.id} 350 ${w}`)), env, deps);
+    const hint = "can't be converted here: give the cost in PLN, EUR, GBP, USD or INR. Nothing was recorded. If it's part of the note, put PLN before it.";
+    expect(t.sent).toEqual([`CHF ${hint}`, `€ ${hint}`, `zł ${hint}`, `euro ${hint}`]);
+    expect(await getEscalation(env.DB, e.id)).toMatchObject({ status: "open", decision_note: null });
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM printer_costs`[0].n).toBe(0);
+    });
+    expect(await vendorJobFor(env.DB, order.id)).toBeNull();
+  });
+
+  /** The order agent's "Printer cost from the owner" line for escalation `id`. */
+  async function costLine(stub: Awaited<ReturnType<typeof orderWithCostRequest>>["stub"], id: number): Promise<string> {
+    let line = "";
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      line = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).find((x) => x.startsWith(`Printer cost from the owner (escalation #${id})`)) ?? "";
+    });
+    return line;
+  }
+
+  it("refuses another printer once the order's job is booked; the cost alone still records", async () => {
     const { order, stub, e } = await orderWithCostRequest();
     const first = await addVendor({ name: "First Print", status: "partner" });
     const second = await addVendor({ name: "Second Print", status: "screened" });
     await proposeVendorJob(env.DB, { orderId: order.id, vendorId: first, deliverBy: order.deliver_by, currency: "PLN", cents: 90_000 });
     await markJob(env.DB, order.id, "booked");
     const t = fakeTelegram();
-    await handleTelegram(update(fromOwner(`/cost ${e.id} 1000 v${second}`)), env, { telegram: t.telegram, fetch: noFetch });
-    expect(t.sent).toEqual([
-      `#${e.id}: 1000.00 PLN recorded for order ${order.id}; printer NOT changed: the job is already booked with printer #${first}.`,
-    ]);
-    expect((await getEscalation(env.DB, e.id))?.status).toBe("approved");
-    await runInDurableObject(stub, async (agent: OrderAgent) => {
-      expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(100000);
-    });
-    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: first, status: "booked", cost_cents: 90_000 });
+    const deps = { telegram: t.telegram, fetch: noFetch };
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1000 v${second}`)), env, deps);
+    expect(t.sent[0]).toBe(`Order ${order.id} is already booked with printer #${first}; nothing was recorded. Send /cost without v<#> to record the cost only.`);
+    expect(await getEscalation(env.DB, e.id)).toMatchObject({ status: "open", decision_note: null });
+    expect(await costLine(stub, e.id)).toBe("");
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1000`)), env, deps);
+    expect(t.sent[1]).toBe(`#${e.id}: 1000.00 PLN recorded for order ${order.id}.`);
+    const line = await costLine(stub, e.id);
+    expect(line).toContain("1000.00 PLN gross");
+    expect(line).not.toContain("printer #");
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: first, status: "booked", cost_currency: "PLN", cost_cents: 90_000 });
+  });
+
+  it("records the cost but leaves a booked job alone when it's the same printer", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const first = await addVendor({ name: "Booked Print", status: "partner" });
+    await proposeVendorJob(env.DB, { orderId: order.id, vendorId: first, deliverBy: order.deliver_by, currency: "PLN", cents: 90_000 });
+    await markJob(env.DB, order.id, "booked");
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 350 EUR v${first}`)), env, { telegram: t.telegram, fetch: nbp(4.2553) });
+    expect(t.sent).toEqual([`#${e.id}: 1489.36 PLN (350.00 EUR at 4.2553) recorded for order ${order.id}; printer unchanged (job already booked).`]);
+    expect((await getEscalation(env.DB, e.id))?.decision_note).toBe("1489.36 PLN; 350.00 EUR at 4.2553 PLN (NBP 2026-10-01)");
+    const line = await costLine(stub, e.id);
+    expect(line).toContain('1489.36 PLN gross, delivery included. Owner\'s note: "350.00 EUR at 4.2553 PLN (NBP 2026-10-01)".');
+    expect(line).not.toContain("printer #");
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: first, status: "booked", cost_currency: "PLN", cost_cents: 90_000 });
+  });
+
+  it("moves a still-proposed job to the printer the owner names", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const first = await addVendor({ name: "Proposed Print", status: "partner" });
+    const second = await addVendor({ name: "Chosen Print", status: "screened" });
+    await proposeVendorJob(env.DB, { orderId: order.id, vendorId: first, deliverBy: order.deliver_by, currency: "PLN", cents: 90_000 });
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1200 v${second}`)), env, { telegram: t.telegram, fetch: noFetch });
+    expect(t.sent).toEqual([`#${e.id}: 1200.00 PLN recorded for order ${order.id}; printer #${second} Chosen Print.`]);
+    expect(await costLine(stub, e.id)).toContain(`Owner's note: "printer #${second} Chosen Print".`);
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: second, status: "proposed", cost_currency: "PLN", cost_cents: 120_000 });
   });
 
   it("records the printer's job even when the agent can't be told", async () => {
@@ -524,13 +588,14 @@ describe("Telegram webhook", () => {
 
   it("/vendor sets a status, and registers a payout address only for a partner", async () => {
     const v = await addVendor({ name: "Payable Print", status: "screened" });
-    const addr = "0x" + "b".repeat(40);
+    const given = "0x" + "Ab".repeat(20);
+    const addr = given.toLowerCase();
     const t = fakeTelegram();
     const say = (text: string) => handleTelegram(update(fromOwner(text)), env, t);
-    await say(`/vendor ${v} pay ${addr} BASE`);
+    await say(`/vendor ${v} pay ${given} BASE`);
     expect((await getVendor(env.DB, v))?.payout_address).toBeNull();
     await say(`/vendor ${v} partner`);
-    await say(`/vendor ${v} pay ${addr} BASE`);
+    await say(`/vendor ${v} pay ${given} BASE`);
     expect(await getVendor(env.DB, v)).toMatchObject({ status: "partner", payout_address: addr, payout_chain: "BASE" });
     await say(`/vendor ${v} pay 0x1234 BASE`);
     await say(`/vendor ${v} pay ${addr} base!`);

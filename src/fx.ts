@@ -10,8 +10,10 @@ export async function fetchNbpRate(code: string, fetchImpl: typeof fetch = fetch
   if (!res.ok) throw new Error(`NBP ${code}: HTTP ${res.status}`);
   const body = (await res.json()) as { rates?: { mid?: unknown; effectiveDate?: unknown }[] };
   const rate = body.rates?.[0];
-  const mid = Number(rate?.mid);
-  if (!(mid > 0) || typeof rate?.effectiveDate !== "string") throw new Error(`NBP ${code}: unexpected response`);
+  const mid = rate?.mid;
+  if (typeof mid !== "number" || !Number.isFinite(mid) || !(mid > 0) || typeof rate?.effectiveDate !== "string") {
+    throw new Error(`NBP ${code}: unexpected response`);
+  }
   return { plnPerUnit: mid, effectiveDate: rate.effectiveDate };
 }
 

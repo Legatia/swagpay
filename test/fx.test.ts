@@ -25,6 +25,13 @@ describe("NBP rates", () => {
     await expect(fetchNbpRate("EUR", odd)).rejects.toThrow("unexpected response");
   });
 
+  it("accepts only a positive finite number as the mid rate", async () => {
+    for (const mid of [0, -4.2, undefined, true, "4.2", null]) {
+      const answer = (async () => Response.json({ rates: [{ mid, effectiveDate: "2099-09-30" }] })) as unknown as typeof fetch;
+      await expect(fetchNbpRate("EUR", answer), String(mid)).rejects.toThrow("unexpected response");
+    }
+  });
+
   it("stores both rates and derives USD per EUR", async () => {
     const now = new Date("2099-10-01T10:00:00Z");
     await refreshRates(env.DB, nbp({ USD: 4, EUR: 4.3 }), now);
