@@ -87,6 +87,14 @@ describe("admin actions", () => {
     expect(msgOf(await post(`/admin/escalations/${e.id}/decide`, { back: "/admin", decision: "approve", note: "" }))).toBe(`#${e.id} acknowledged.`);
     expect((await getEscalation(env.DB, e.id))?.status).toBe("approved");
     expect(msgOf(await post(`/admin/escalations/${e.id}/decide`, { back: "/admin", decision: "reject" }))).toMatch(new RegExp(`^#${e.id} is already`));
+    const count = async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM admin_actions").first<{ n: number }>())!.n;
+    const logged = await env.DB.prepare("SELECT action, target, detail FROM admin_actions ORDER BY id DESC LIMIT 1").first<{ action: string; target: string; detail: string }>();
+    expect(logged).toMatchObject({ action: "approve", target: `escalation:${e.id}` });
+    expect(logged!.detail).toContain(`#${e.id} acknowledged.`);
+    const n = await count();
+    await post(`/admin/escalations/${e.id}/decide`, { back: "/admin", decision: "reject" });
+    await post(`/admin/escalations/999999/decide`, { back: "/admin", decision: "approve" });
+    expect(await count()).toBe(n);
   });
 
   it("editing a printer's payment details is logged and sent to the owner in Telegram", async () => {

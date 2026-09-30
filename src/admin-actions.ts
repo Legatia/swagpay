@@ -1,5 +1,5 @@
 import { cashoutAmount, getCashout, getSupplierPayment, latestCashout, logAdminAction, PAY_CURRENCIES, queueCashout, retryWithdrawal, setSupplierPaymentStatus, type PayMethod } from "./back-office";
-import { createEscalation } from "./escalations";
+import { createEscalation, getEscalation } from "./escalations";
 import { plnPer } from "./fx";
 import { createTelegram, notifyOwner } from "./telegram";
 import { decide } from "./telegram-webhook";
@@ -32,8 +32,12 @@ export async function handleAdminPost(request: Request, env: Env, who: { email: 
   if ((m = /^\/admin\/escalations\/(\d{1,9})\/decide$/.exec(path))) {
     const decision = field("decision");
     if (decision !== "approve" && decision !== "reject") return redirect(back, "Choose approve or reject.");
-    const reply = await decide(env, Number(m[1]), decision === "approve" ? "approved" : "rejected", field("note").slice(0, 500) || null);
-    await log(decision, `escalation:${m[1]}`);
+    const id = Number(m[1]);
+    const before = await getEscalation(env.DB, id);
+    const reply = await decide(env, id, decision === "approve" ? "approved" : "rejected", field("note").slice(0, 500) || null);
+    // Audit only a decision this request made: decide() also answers "already decided", "doesn't exist" and "needs a price".
+    const after = before?.status === "open" ? await getEscalation(env.DB, id) : null;
+    if (after && after.status !== "open") await log(decision, `escalation:${id}`, { reply });
     return redirect(back, reply);
   }
 
