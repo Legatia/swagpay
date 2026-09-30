@@ -175,6 +175,14 @@ describe("sendOrder", () => {
     expect(Object.keys(d.saved.at(-1).uploaded)).toEqual(["logo-1", "mockup-front", "print-front"]);
   });
 
+  it("gives every request a timeout signal, so a stalled one turns into a retry", async () => {
+    const fake = backend();
+    const d = deps(fake);
+    await sendOrder({ spec, files, intake, pending: null, deps: d.deps });
+    expect(fake.calls).toHaveLength(5);
+    for (const c of fake.calls) expect(c.init.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("resumes an order that already exists", async () => {
     const fake = backend();
     const d = deps(fake);

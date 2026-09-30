@@ -9,22 +9,37 @@ let enabled = false;
 let ready = null; // the newest mount attempt
 const waiters = [];
 
+const CONFIG_TIMEOUT_MS = 10_000;
+const SCRIPT_TIMEOUT_MS = 20_000;
+
 function loadScript() {
   // window.turnstile is also the <div id="turnstile"> until the real API replaces it.
   if (typeof window.turnstile?.render === "function") return Promise.resolve();
   return new Promise((resolve, reject) => {
     const s = document.createElement("script");
+    const fail = (err) => {
+      clearTimeout(timer);
+      s.remove(); // a later attempt adds a fresh tag
+      reject(err);
+    };
+    const timer = setTimeout(() => fail(new Error("script timeout")), SCRIPT_TIMEOUT_MS);
     s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
-    s.onload = resolve;
-    s.onerror = reject;
+    s.onload = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    s.onerror = () => fail(new Error("script"));
     document.head.append(s);
   });
 }
 
-// Resolves false when the server has no site key (local development without Turnstile).
+// Resolves false only when the server answers with no site key; the backend then accepts orders
+// only if REQUIRE_TURNSTILE is 0. Any other failure rejects, so the mount is tried again.
 async function mount(el) {
-  const res = await fetch("/api/config");
-  const { turnstileSiteKey } = res.ok ? await res.json() : {};
+  const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(CONFIG_TIMEOUT_MS) : undefined;
+  const res = await fetch("/api/config", signal ? { signal } : undefined);
+  if (!res.ok) throw new Error("config");
+  const { turnstileSiteKey } = await res.json();
   if (!turnstileSiteKey) return false;
   await loadScript();
   widgetId = window.turnstile.render(el, {
@@ -53,7 +68,7 @@ export function mountTurnstile(el) {
   return ready;
 }
 
-const NO_CHECK = "The human check couldn't load. Check your connection, then refresh the page and send again.";
+export const NO_CHECK = "The human check couldn't load. Check your connection; it tries again when you're back online, then send again.";
 
 export async function nextToken() {
   let mountedOk = false;

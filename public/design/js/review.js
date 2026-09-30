@@ -2,7 +2,7 @@ import { currentEstimate } from "./details.js";
 import { buildFiles } from "./files.js";
 import { buildSpec, summarize } from "./spec.js";
 import { SendError, buildIntake, progressText, sendOrder, sha256 } from "./submit.js";
-import { mountTurnstile, nextToken } from "./turnstile.js";
+import { NO_CHECK, mountTurnstile, nextToken } from "./turnstile.js";
 
 const $ = (id) => document.getElementById(id);
 let sending = false;
@@ -12,10 +12,15 @@ let storeRef = null;
 function mount() {
   if (mounted) return;
   mounted = true;
-  mountTurnstile($("turnstile")).catch(() => {
-    mounted = false; // try again on the next render, e.g. after coming back online
-    $("send-error").textContent = "The human check could not load. Check your connection; it retries when you're back online.";
-  });
+  mountTurnstile($("turnstile")).then(
+    () => {
+      if ($("send-error").textContent === NO_CHECK) $("send-error").textContent = "";
+    },
+    () => {
+      mounted = false; // try again on the next render, e.g. after coming back online
+      $("send-error").textContent = NO_CHECK;
+    },
+  );
 }
 
 export function renderReview(s) {

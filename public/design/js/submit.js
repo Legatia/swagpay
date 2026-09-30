@@ -86,11 +86,20 @@ const TOO_LARGE = "This design is too large to send. Remove a text layer or two,
 const GONE = "That order no longer exists. Send again to start a new one.";
 const NOT_ATTACHED = "Your design couldn't be attached. Send again, or continue on your order page and tell the agent.";
 
-// Status 0 means the request never got an answer (offline, DNS, CORS, aborted).
-async function call(fetchFn, url, init) {
+const TIMEOUT_MS = 30_000;
+const UPLOAD_TIMEOUT_MS = 120_000;
+
+// Older browsers (Safari before 16) have no AbortSignal.timeout; they just wait.
+function timeoutSignal(ms) {
+  return typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined;
+}
+
+// Status 0 means the request never got an answer (offline, DNS, CORS, timed out).
+async function call(fetchFn, url, init, ms = TIMEOUT_MS) {
   let res;
   try {
-    res = await fetchFn(url, init);
+    const signal = timeoutSignal(ms);
+    res = await fetchFn(url, signal ? { ...init, signal } : init);
   } catch {
     return { status: 0, data: null };
   }
@@ -160,7 +169,7 @@ export async function sendOrder({ spec, files, intake, pending, deps }) {
       const form = new FormData();
       form.append("file", new File([f.blob], f.name, { type: f.blob.type }));
       form.append("role", f.role);
-      return call(deps.fetch, `${base}/artwork`, { method: "POST", body: form });
+      return call(deps.fetch, `${base}/artwork`, { method: "POST", body: form }, UPLOAD_TIMEOUT_MS);
     });
     if (r.status === 201 && r.data?.fileId) {
       p = { ...p, uploaded: { ...p.uploaded, [f.key]: { hash, fileId: r.data.fileId } } };
