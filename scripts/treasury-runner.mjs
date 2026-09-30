@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Runs on the owner's machine, where `circle wallet login` holds the agent wallet session.
-// Polls Swagpay for payouts the treasury agent queued, sends each from the Circle agent wallet, and reports back.
+// Polls Swagpay for payouts the treasury agent queued, sends each from the Circle agent wallet, and reports back,
+// and sells USDC on Kraken for the owner's printer payments (cash-outs), withdrawing to the owner's own account.
 import { execFile } from "node:child_process";
 import { runOnce } from "./treasury-runner-lib.mjs";
 
@@ -12,6 +13,9 @@ const cfg = {
   chain: process.env.CIRCLE_CHAIN ?? "ARC",
   circle: process.env.CIRCLE_BIN ?? "circle",
   intervalMs: Number(process.env.INTERVAL_MS ?? 30_000),
+  eurKey: process.env.KRAKEN_EUR_KEY ?? null,
+  gbpKey: process.env.KRAKEN_GBP_KEY ?? null,
+  krakenBin: process.env.KRAKEN_BIN ?? "kraken",
   dryRun: process.env.DRY_RUN === "1",
 };
 if (!Number.isFinite(cfg.intervalMs) || cfg.intervalMs < 1000) throw new Error("INTERVAL_MS must be at least 1000");
@@ -22,19 +26,21 @@ const api = (path, init = {}) => fetch(`${cfg.base}${path}`, { ...init, headers:
 const childEnv = { ...process.env };
 delete childEnv.TREASURY_RUNNER_TOKEN;
 
-function run(args) {
+const runner = (bin) => (args) => {
   return new Promise((resolve) => {
-    execFile(cfg.circle, args, { timeout: 180_000, maxBuffer: 1 << 20, env: childEnv }, (err, stdout, stderr) => {
+    execFile(bin, args, { timeout: bin === cfg.krakenBin ? 60_000 : 180_000, maxBuffer: 1 << 20, env: childEnv }, (err, stdout, stderr) => {
       resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout: String(stdout), stderr: String(stderr || (err && !err.code ? err.message : "")) });
     });
   });
-}
+};
+const run = runner(cfg.circle);
+const kraken = runner(cfg.krakenBin);
 
 const log = { info: (m) => console.log(m), error: (m) => console.error(m) };
 
 for (;;) {
   try {
-    await runOnce({ api, run, cfg, log });
+    await runOnce({ api, run, kraken, cfg, log });
   } catch (err) {
     console.error("runner tick failed:", err instanceof Error ? err.message : err);
   }

@@ -5,6 +5,7 @@ import type { TreasuryAgent } from "../src/agent/treasury-agent";
 import { listEscalations } from "../src/escalations";
 import { handleTreasuryApi } from "../src/treasury-api";
 import { createObligation, getObligation, queuePayout } from "../src/treasury";
+import { createSupplierPayment, getSupplierPayment, queueCashout, runnerLastSeen } from "../src/back-office";
 import { newOrderRow } from "./fixtures";
 import { setVendorPayout, setVendorStatus } from "../src/vendors";
 
@@ -174,5 +175,50 @@ describe("treasury runner API", () => {
       await env.DB.prepare("UPDATE vendors SET payout_address = ? WHERE id = ?").bind("0x" + "AB".repeat(20), v).run();
       expect(await list()).toContain(payout.id);
     });
+  });
+});
+
+describe("treasury runner API: cash-outs", () => {
+  const postC = (id: number, b: unknown) => SELF.fetch(`https://swagpay.test/api/treasury/cashouts/${id}/result`, { method: "POST", headers: auth, body: JSON.stringify(b) });
+  const listC = async () => (await (await SELF.fetch("https://swagpay.test/api/treasury/cashouts", { headers: auth })).json<{ cashouts: Array<Record<string, unknown>> }>()).cashouts;
+  async function queuedC() {
+    const { order } = await newOrderRow();
+    const sp = await createSupplierPayment(env.DB, { orderId: order.id, vendorId: null, currency: "PLN", amountCents: 100_000 });
+    return { order, sp, c: (await queueCashout(env.DB, sp.id, { fiat: "EUR", fiatCents: 23_721 }))! };
+  }
+
+  it("lists live cash-outs, remembers the runner's poll, and records sold then withdrawn once", async () => {
+    const { order, sp, c } = await queuedC();
+    const listed = (await listC()).find((x) => x.id === c.id);
+    expect(listed).toMatchObject({ fiat: "EUR", amount: "237.21", clientOrderId: c.client_order_id, status: "queued" });
+    expect(await runnerLastSeen(env.DB)).not.toBeNull();
+    expect((await postC(c.id, { stage: "sold", orderRef: "OABC", soldUnits: "240.500000" })).status).toBe(200);
+    expect((await postC(c.id, { stage: "sold", orderRef: "OABC", soldUnits: "240.500000" })).status).toBe(409);
+    expect((await postC(c.id, { stage: "withdrawn", withdrawalRef: "WREF", feeCents: 100 })).status).toBe(200);
+    expect((await getSupplierPayment(env.DB, sp.id))?.status).toBe("ready");
+    const notice = (await listEscalations(env.DB)).find((e) => e.summary.startsWith(`237.21 EUR withdrawn to your EUR account for order ${order.id}`))!;
+    expect(notice).toMatchObject({ kind: "payment", order_id: null });
+    expect(notice.summary).toContain(`https://app.swagpay.me/admin/orders/${order.id}`);
+    expect((await postC(c.id, { stage: "withdrawn", withdrawalRef: "WREF", feeCents: 100 })).status).toBe(409);
+    expect((await listC()).some((x) => x.id === c.id)).toBe(false);
+  });
+
+  it("tells the owner when a cash-out fails, or its withdrawal fails three times", async () => {
+    const a = await queuedC();
+    expect((await postC(a.c.id, { status: "failed", error: "USDC has not arrived at Kraken" })).status).toBe(200);
+    expect((await listEscalations(env.DB)).some((e) => e.kind === "system" && e.summary.includes(`Cash-out #${a.c.id} for order ${a.order.id} failed: USDC has not arrived at Kraken`))).toBe(true);
+    const b = await queuedC();
+    await postC(b.c.id, { stage: "sold", orderRef: "O", soldUnits: "1.000000" });
+    for (const e of ["e1", "e2"]) expect((await postC(b.c.id, { stage: "withdraw_error", error: e })).status).toBe(200);
+    expect((await listEscalations(env.DB)).some((e) => e.summary.includes(`cash-out #${b.c.id}`))).toBe(false);
+    expect((await postC(b.c.id, { stage: "withdraw_error", error: "e3" })).status).toBe(200);
+    expect((await listEscalations(env.DB)).some((e) => e.summary.startsWith(`The withdrawal for cash-out #${b.c.id} failed 3 times`))).toBe(true);
+  });
+
+  it("rejects bad bodies", async () => {
+    const { c } = await queuedC();
+    expect((await postC(c.id, { stage: "sold", orderRef: "O", soldUnits: "-1" })).status).toBe(400);
+    expect((await postC(c.id, { stage: "nope" })).status).toBe(400);
+    expect((await postC(c.id, { stage: "withdrawn", withdrawalRef: "W", feeCents: 1.5 })).status).toBe(400);
   });
 });

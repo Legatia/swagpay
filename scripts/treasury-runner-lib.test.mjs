@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildCommand, classifyResult, runOnce } from "./treasury-runner-lib.mjs";
+import { buildCommand, classifyResult, runOnce, runCashout, bidOf, balanceOf, closedByClOrdId } from "./treasury-runner-lib.mjs";
 
 const DEST = "0x" + "d".repeat(40);
 const K1 = "11111111-1111-4111-8111-111111111111";
@@ -51,16 +51,26 @@ test("classifies CLI results", () => {
   assert.equal(failed.error, "RPC timeout");
 });
 
-/** A fake Swagpay: lists `queued`, records posted results (a recorded payout is no longer queued); `failPosts` makes result POSTs throw. */
-function fakeSwagpay(queued) {
-  const s = { queued, posts: [], failPosts: 0 };
+/** A fake Swagpay: lists `queued` payouts and `cashouts`, records posted results (a recorded payout is no longer queued); `failPosts` makes result POSTs throw. */
+function fakeSwagpay(queued, swaps = [], cashouts = []) {
+  const s = { queued, swaps, cashouts, posts: [], cashoutPosts: [], failPosts: 0 };
   s.api = async (path, init = {}) => {
     if (path === "/api/treasury/payouts" && init.method === undefined) return Response.json({ payouts: s.queued });
+    if (path === "/api/treasury/cashouts" && init.method === undefined) return Response.json({ cashouts: s.cashouts });
     const m = /^\/api\/treasury\/payouts\/(\d+)\/result$/.exec(path);
     if (m && init.method === "POST") {
       if (s.failPosts > 0) { s.failPosts--; throw new TypeError("fetch failed"); }
       s.posts.push({ id: Number(m[1]), body: JSON.parse(init.body) });
       s.queued = s.queued.filter((p) => p.id !== Number(m[1]));
+      return Response.json({ ok: true });
+    }
+    const c = /^\/api\/treasury\/cashouts\/(\d+)\/result$/.exec(path);
+    if (c && init.method === "POST") {
+      const id = Number(c[1]);
+      const body = JSON.parse(init.body);
+      s.cashoutPosts.push({ id, body });
+      if (body.stage === "sold") s.cashouts = s.cashouts.map((x) => (x.id === id ? { ...x, status: "sold" } : x));
+      else if (body.stage === "withdrawn" || body.status === "failed") s.cashouts = s.cashouts.filter((x) => x.id !== id);
       return Response.json({ ok: true });
     }
     throw new Error(`unexpected ${init.method ?? "GET"} ${path}`);
@@ -106,4 +116,99 @@ test("a dry run neither runs nor reports", async () => {
   assert.equal(ran, false);
   assert.deepEqual(swagpay.posts, []);
   assert.match(lines.join("\n"), /\[dry run\] payout #7: circle wallet transfer /);
+});
+
+const K3 = "33333333-3333-4333-8333-333333333333";
+const cashout = { id: 5, fiat: "EUR", amount: "237.21", clientOrderId: K3, status: "queued", createdAt: new Date().toISOString() };
+const kcfg = { ...runCfg, eurKey: "My EUR account", gbpKey: null };
+
+/** A fake kraken-cli: `answers` maps a command prefix to [code, json]. */
+function fakeKraken(answers) {
+  const k = { calls: [] };
+  k.run = async (args) => {
+    const line = args.filter((a) => a !== "-o" && a !== "json").join(" ");
+    k.calls.push(line);
+    const hit = Object.entries(answers).find(([prefix]) => line.startsWith(prefix));
+    if (!hit) return { code: 1, stdout: "", stderr: `unexpected kraken ${line}` };
+    const [code, out] = typeof hit[1] === "function" ? hit[1](line) : hit[1];
+    return { code, stdout: JSON.stringify(out), stderr: code ? "kraken error" : "" };
+  };
+  return k;
+}
+const market = {
+  "closed-orders": [0, { closed: {} }],
+  "withdrawal info EUR": [0, { method: "SEPA", limit: "10000", fee: "1.00" }],
+  "ticker USDCEUR": [0, { USDCEUR: { a: ["0.8812", "1", "1"], b: ["0.8810", "1", "1"] } }],
+  "balance": [0, { USDC: "300.000000", ZEUR: "0.0000" }],
+  "order sell USDCEUR": [0, { txid: ["OTX-1"], descr: { order: "sell" } }],
+  "withdraw EUR": [0, { refid: "WREF-1" }],
+};
+
+test("a cash-out sells just enough USDC with its client order id, then withdraws to the saved account", async () => {
+  const swagpay = fakeSwagpay([], [], [cashout]);
+  const k = fakeKraken(market);
+  await runCashout(cashout, { kraken: k.run, api: swagpay.api, cfg: kcfg, log: quiet });
+  // (237.21 + 1.00) / 0.8810 x 1.01 = 273.0897..., rounded up to 6 decimals
+  const sell = k.calls.find((c) => c.startsWith("order sell"));
+  assert.equal(sell, `order sell USDCEUR 273.089785 --type market --cl-ord-id ${K3}`);
+  assert.ok(k.calls.includes('withdraw EUR My EUR account 237.21'));
+  assert.deepEqual(swagpay.cashoutPosts, [
+    { id: 5, body: { stage: "sold", orderRef: "OTX-1", soldUnits: "273.089785" } },
+    { id: 5, body: { stage: "withdrawn", withdrawalRef: "WREF-1", feeCents: 100 } },
+  ]);
+});
+
+test("a retry after a lost 'sold' result finds the order by client order id and never sells twice", async () => {
+  const swagpay = fakeSwagpay([], [], [cashout]);
+  const k = fakeKraken({ ...market, "closed-orders": [0, { closed: { "OTX-9": { cl_ord_id: K3, status: "closed", vol_exec: "273.089785" } } }] });
+  await runCashout(cashout, { kraken: k.run, api: swagpay.api, cfg: kcfg, log: quiet });
+  assert.equal(k.calls.some((c) => c.startsWith("order sell")), false);
+  assert.deepEqual(swagpay.cashoutPosts[0], { id: 5, body: { stage: "sold", orderRef: "OTX-9", soldUnits: "273.089785" } });
+});
+
+test("waits for the USDC, then gives up after two hours", async () => {
+  const short = { ...market, balance: [0, { USDC: "10.0" }] };
+  const fresh = fakeSwagpay([], [], [cashout]);
+  await runCashout(cashout, { kraken: fakeKraken(short).run, api: fresh.api, cfg: kcfg, log: quiet });
+  assert.deepEqual(fresh.cashoutPosts, []);
+  const old = { ...cashout, createdAt: new Date(Date.now() - 3 * 3_600_000).toISOString() };
+  const late = fakeSwagpay([], [], [old]);
+  await runCashout(old, { kraken: fakeKraken(short).run, api: late.api, cfg: kcfg, log: quiet });
+  assert.equal(late.cashoutPosts[0].body.status, "failed");
+  assert.match(late.cashoutPosts[0].body.error, /^USDC has not arrived at Kraken/);
+});
+
+test("a sold cash-out only withdraws; a withdrawal error is reported for the Worker to count", async () => {
+  const sold = { ...cashout, status: "sold" };
+  const swagpay = fakeSwagpay([], [], [sold]);
+  const k = fakeKraken({ ...market, "withdraw EUR": [1, { error: ["EFunding:Unknown withdraw key"] }] });
+  await runCashout(sold, { kraken: k.run, api: swagpay.api, cfg: kcfg, log: quiet });
+  assert.equal(k.calls.some((c) => c.startsWith("order sell") || c.startsWith("closed-orders")), false);
+  assert.equal(swagpay.cashoutPosts[0].body.stage, "withdraw_error");
+});
+
+test("a dry run validates the sale and moves nothing", async () => {
+  const swagpay = fakeSwagpay([], [], [cashout]);
+  const k = fakeKraken({ ...market, "order sell USDCEUR": [0, { descr: { order: "sell (validate)" } }] });
+  await runCashout(cashout, { kraken: k.run, api: swagpay.api, cfg: { ...kcfg, dryRun: true }, log: quiet });
+  assert.ok(k.calls.some((c) => c.startsWith("order sell") && c.endsWith("--validate")));
+  assert.equal(k.calls.some((c) => c.startsWith("withdraw ")), false);
+  assert.deepEqual(swagpay.cashoutPosts, []);
+});
+
+test("runOnce skips cash-outs without kraken, and runs them with it", async () => {
+  const a = fakeSwagpay([], [], [cashout]);
+  await runOnce({ api: a.api, run: async () => ({ code: 0, stdout: "", stderr: "" }), cfg: kcfg, log: quiet });
+  assert.deepEqual(a.cashoutPosts, []);
+  const b = fakeSwagpay([], [], [cashout]);
+  await runOnce({ api: b.api, run: async () => ({ code: 0, stdout: "", stderr: "" }), kraken: fakeKraken(market).run, cfg: kcfg, log: quiet });
+  assert.equal(b.cashoutPosts.length, 2);
+});
+
+test("parses kraken-cli JSON defensively", () => {
+  assert.equal(bidOf({ XXUSDCZEUR: { b: ["0.9", "1", "1"] } }), 0.9);
+  assert.throws(() => bidOf({}));
+  assert.equal(balanceOf({ USDC: "12.5" }, "USDC"), 12.5);
+  assert.equal(balanceOf({}, "USDC"), 0);
+  assert.equal(closedByClOrdId({ closed: { A: { cl_ord_id: "x", vol_exec: "0" } } }, "x"), null);
 });

@@ -143,9 +143,7 @@ Setup:
   - This transfer limit is the backstop the treasury relies on.
   - Circle allows only ONE stablecoin policy per wallet and chain (`circle wallet limit set --help`: "If a policy already exists for the same wallet/chain/policy-type, the request will fail"). A recipient allowlist (`--rule-type recipient-allowlist --targets [addr1,addr2]`) would replace the transfer limit, not add to it, so don't set one.
   - Spending limits only exist on mainnet; the CLI refuses testnet chains.
-- **Payout account.**
-  - `PAYOUT_ADDRESS` and `PAYOUT_CHAIN` are where printer costs go. For example, your Revolut USDC deposit address on Polygon with `PAYOUT_CHAIN=MATIC`: payouts then bridge with CCTP's forwarding service, with no gas needed on Polygon.
-  - Use `ARC` for an Arc address.
+- **Payout account.** `PAYOUT_ADDRESS` is now your Kraken USDC deposit address, stored as a secret (see "Back office" below). Printer costs are sent there, and you cash them out to your own bank account.
 - **Reserve.** `RESERVE_ADDRESS` is where reserve sweeps go, on Arc.
 - **Code limits.** `TREASURY_PER_TX_USDC`, `TREASURY_DAILY_USDC` and `TREASURY_RESERVE_MIN_BPS`/`MAX_BPS` are the code limits. Keep them at or below Circle's. Above them the agent asks you in Telegram.
 - **Runner token.** `wrangler secret put TREASURY_RUNNER_TOKEN` (a long random string).
@@ -159,8 +157,27 @@ Setup:
   - When Circle's limit refuses a payout, you get an approval request in Telegram.
   - When the `circle` login session expires (about four weeks), every payout comes back failed: log in again.
 - **Refunds.** Refunds always wait for your approval.
-- **EUR (EURC) orders.** The treasury only pays USDC; printer costs for EUR orders come to you to pay by hand.
+- **EUR (EURC) orders.** The treasury only pays USDC. Printer costs always go to your Kraken account in USDC; you cash out to fiat from the dashboard (see "Back office").
 - **Approve or reject.** On a payout question in Telegram, approve lets the treasury agent pay it (USDC only); reject means you handle it yourself, and the obligation is marked settled.
+
+### Back office
+
+- **Where it is.** The `/admin` pages (Today, orders, money in, money out, printers) sit behind a Cloudflare Access application that covers `/admin` and `/admin/*`. The actions (decide, cash out, paid, cancel, retry withdrawal, printer details) are POSTs on the same pages.
+- **Setting the payout account.**
+  - `wrangler secret put PAYOUT_ADDRESS` (Kraken's USDC deposit address).
+  - `PAYOUT_CHAIN` is `ARC` or `BASE`: set it after the 5 USDC test deposit has arrived at Kraken.
+- **The Kraken API key.**
+  - Permissions: query funds, create and modify orders, and withdraw funds. Lock the key to your IP.
+  - In Kraken, save your EUR (and GBP) bank accounts as withdrawal destinations; the runner withdraws only to these saved accounts by name.
+- **The runner.**
+  - Install `kraken-cli` and configure it with the API key (see its README).
+  - Add `KRAKEN_EUR_KEY` (and `KRAKEN_GBP_KEY`): the saved withdrawal account names. `KRAKEN_BIN` overrides the binary path.
+  - Start with `DRY_RUN=1`: a cash-out then validates the sale with Kraken (`--validate`) and moves nothing.
+  - Without `KRAKEN_EUR_KEY` or `KRAKEN_GBP_KEY` the runner only sends payouts.
+  - Each cash-out sells just enough USDC, (amount + withdrawal fee) / bid x 1.01, with a client order id, so a retry never sells twice; then it withdraws.
+  - If the USDC has not reached Kraken within two hours, the cash-out fails and you are told.
+- **Check first.** `kraken withdrawal methods --asset EUR` and `kraken withdrawal info EUR "<saved account>" 10` confirm that fiat withdrawal works by API. If it doesn't, the runner stops after selling and you withdraw in the Kraken app, then press Paid.
+- **Rates.** PLN printers are cashed out in EUR at NBP plus `CASHOUT_FX_BUFFER` (default 2%).
 
 ### Before real money
 

@@ -3,7 +3,7 @@ import { getAgentByName } from "agents";
 import { expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
 import type { ModelClient, ModelRequest } from "../src/agent/model";
-import type { TreasuryAgent } from "../src/agent/treasury-agent";
+import { TREASURY_NAME, type TreasuryAgent } from "../src/agent/treasury-agent";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, type RawLog, type RpcClient } from "../src/arc";
 import { getOrderById, getOrderByToken, saveOrderSpec } from "../src/db";
 import { listEscalations } from "../src/escalations";
@@ -11,9 +11,13 @@ import { formatUnits } from "../src/money";
 import { listPaymentRequests } from "../src/payments";
 import type { TelegramClient } from "../src/telegram";
 import { handleTelegram } from "../src/telegram-webhook";
-import { getObligation, type ObligationRow } from "../src/treasury";
+import { createObligation, getObligation, queuePayout, type ObligationRow } from "../src/treasury";
+import { createSupplierPayment } from "../src/back-office";
 import { runWatcher } from "../src/watcher";
-import { completeSpec } from "./fixtures";
+import { handleAdmin } from "../src/admin";
+import { getSupplierPayment } from "../src/back-office";
+import { TEAM, makeSigner } from "./access-signer";
+import { completeSpec, insertQuote, newOrderRow } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
 const base = "https://swagpay.test";
@@ -121,7 +125,7 @@ it("runs one order from intake through the printer payout, balance, delivery and
   });
 
   // 8. Treasury turn: the agent queues the printer's money.
-  const treasury = await getAgentByName(env.TreasuryAgent, "treasury");
+  const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
   await runInDurableObject(treasury, async (agent: TreasuryAgent) => {
     agent.telegramOverride = quiet;
     agent.rpcOverride = fakeRpc(1040);
@@ -238,4 +242,61 @@ it("runs one order from intake through the printer payout, balance, delivery and
   expect(decisions).toEqual(expect.arrayContaining([
     expect.objectContaining({ agent: "treasury", tool: "sweep_to_reserve", reason: "order closed; 20% of its margin to the reserve" }),
   ]));
+});
+
+it("cashes out a printer payment: payout reaches Kraken, runner sells and withdraws, owner marks it paid", async () => {
+  const VENDOR_PHONE = "BLIK to 600 111 222";
+  const { order } = await newOrderRow();
+  const vendor = (await env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, how_to_pay, pay_currency, payout_address, payout_chain, source_ref, created_at, updated_at) VALUES ('Druk E2E', 'Warsaw', 'PL', '[]', 'partner', ?, 'PLN', '0x3333333333333333333333333333333333333333', 'MATIC', 'w:e2e-cashout', 'x', 'x') RETURNING id").bind(VENDOR_PHONE).first<{ id: number }>())!.id;
+  const quoteId = await insertQuote(env.DB, order.id);
+  await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('EUR', 4.3, '2099-09-30', ?), ('USD', 4, '2099-09-30', ?)").bind(new Date().toISOString(), new Date().toISOString()).run();
+  const metricsUrl = `${base}/api/metrics`;
+
+  // The treasury's payout of the printer cost to Kraken, as the runner sees it.
+  const ob = await createObligation(env.DB, { orderId: order.id, kind: "printer_cost", token: "USDC", amountUnits: PRINTER_COST_UNITS, destination: "0x3333333333333333333333333333333333333333", chain: "MATIC", dueAt: new Date(), sourceRef: `printer_cost:quote:${quoteId}` });
+  const payout = (await queuePayout(env.DB, ob))!;
+  expect((await listPayouts()).some((p) => p.id === payout.id)).toBe(true);
+  expect((await postResult(payout.id, { status: "sent", ref: "circle-tx-e2e" })).status).toBe(200);
+  const before = await (await SELF.fetch(metricsUrl)).json();
+  const sp = await createSupplierPayment(env.DB, { orderId: order.id, vendorId: vendor, currency: "PLN", amountCents: 100_000 });
+
+  // The owner presses Cash out, through the Access-protected dashboard.
+  const { sign, fetchImpl } = await makeSigner();
+  const jwt = await sign({ aud: ["test-aud"], iss: TEAM, exp: Math.floor(Date.now() / 1000) + 600, email: "owner@example.com" });
+  const admin = (path: string, init: RequestInit = {}) => handleAdmin(new Request(`${base}${path}`, { ...init, headers: { "cf-access-jwt-assertion": jwt, origin: base, "content-type": "application/x-www-form-urlencoded" } }), env, { fetch: fetchImpl, rpc: { erc20Balance: async () => 1_000_000_000 } });
+  const cashed = await admin(`/admin/payments/${sp.id}/cashout`, { method: "POST", body: "back=%2Fadmin" });
+  expect(cashed.status).toBe(303);
+  expect(decodeURIComponent(cashed.headers.get("location")!)).toContain("Cash-out queued");
+  expect(await (await admin("/admin")).text()).not.toContain("ready to pay");
+
+  // The runner finds it, sells, withdraws.
+  const listed = (await (await SELF.fetch(`${base}/api/treasury/cashouts`, { headers: runner })).json<{ cashouts: Array<{ id: number; fiat: string; amount: string; status: string }> }>()).cashouts;
+  const c = listed.find((x) => x.amount === "237.21")!;
+  expect(c).toMatchObject({ fiat: "EUR", status: "queued" });
+  const res = (b: unknown) => SELF.fetch(`${base}/api/treasury/cashouts/${c.id}/result`, { method: "POST", headers: runner, body: JSON.stringify(b) });
+  expect((await res({ stage: "sold", orderRef: "OTX-E2E", soldUnits: "273.089785" })).status).toBe(200);
+  expect((await res({ stage: "withdrawn", withdrawalRef: "WREF-E2E", feeCents: 100 })).status).toBe(200);
+
+  // Today shows it ready to pay; Paid (card) closes it.
+  expect(await (await admin("/admin")).text()).toContain("ready to pay");
+  const paid = await admin(`/admin/payments/${sp.id}/paid`, { method: "POST", body: new URLSearchParams({ back: "/admin", method: "card", date: "2099-10-02" }).toString() });
+  expect(paid.status).toBe(303);
+  expect((await getSupplierPayment(env.DB, sp.id))?.status).toBe("paid");
+  expect(await (await admin("/admin")).text()).not.toContain("ready to pay");
+
+  // Public numbers do not move for the cash-out; the owner got exactly one "withdrawn" notice; no agent heard the printer's payment details.
+  expect(await (await SELF.fetch(metricsUrl)).json()).toEqual(before);
+  const notices = (await listEscalations(env.DB)).filter((e) => e.summary.includes(`withdrawn to your EUR account for order ${order.id}`));
+  expect(notices).toHaveLength(1);
+  expect(notices[0].order_id).toBeNull();
+  expect(notices[0].summary).not.toContain("600 111 222");
+  const treasury = await getAgentByName(env.TreasuryAgent, TREASURY_NAME);
+  const orderAgent = await getAgentByName(env.OrderAgent, order.instance);
+  for (const stub of [treasury, orderAgent]) {
+    const inbox = await runInDurableObject(stub as never, async (_agent: unknown, state: DurableObjectState) => {
+      state.storage.sql.exec("CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, text TEXT NOT NULL)");
+      return state.storage.sql.exec("SELECT text FROM inbox").toArray().map((r) => String(r.text)).join("\n");
+    });
+    expect(inbox).not.toContain("600 111 222");
+  }
 });
