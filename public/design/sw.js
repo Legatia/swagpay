@@ -19,17 +19,21 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
   const kind = route(new URL(req.url), self.location.origin);
   if (kind === "network") return;
+  // Started here, not inside respondWith, so waitUntil can keep the worker alive until the cache is
+  // updated. Otherwise the browser may stop it mid-refresh and leave modules from two deploys side by side.
+  const network = fetch(req)
+    .then((res) => {
+      // Clone now: once the page starts reading res, it can't be cloned.
+      const copy = res.ok || res.type === "opaque" ? res.clone() : null;
+      return { res, put: copy ? caches.open(CACHE).then((c) => c.put(req, copy)) : null };
+    })
+    .catch(() => ({ res: null, put: null }));
+  event.waitUntil(network.then(({ put }) => put).catch(() => {}));
   event.respondWith(
     caches.open(CACHE).then(async (cache) => {
       const cached = await cache.match(req, { ignoreSearch: kind === "static" });
-      const network = fetch(req)
-        .then((res) => {
-          if (res.ok || res.type === "opaque") cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => null);
       if (cached) return cached;
-      const res = await network;
+      const { res } = await network;
       if (res) return res;
       if (req.mode === "navigate") return (await cache.match("/design/")) ?? Response.error();
       return Response.error();
