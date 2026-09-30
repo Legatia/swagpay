@@ -71,4 +71,24 @@ describe("sandbox cleanup", () => {
     expect(await cleanupSandbox(env, NOW)).toEqual({ orders: 0 });
     expect(await count("SELECT COUNT(*) AS n FROM orders WHERE id = ?", old.order.id)).toBe(1);
   });
+
+  it("deletes an order whose agent was never initialised", async () => {
+    const { order } = await newOrderRow(new Date(NOW.getTime() - 49 * HOUR));
+    await env.DB.prepare("INSERT INTO sandbox_owner_calls (order_id, at) VALUES (?, ?)").bind(order.id, NOW.toISOString()).run();
+    expect((await cleanupSandbox(sandbox, NOW)).orders).toBeGreaterThanOrEqual(1);
+    expect(await count("SELECT COUNT(*) AS n FROM orders WHERE id = ?", order.id)).toBe(0);
+    expect(await count("SELECT COUNT(*) AS n FROM sandbox_owner_calls WHERE order_id = ?", order.id)).toBe(0);
+  });
+
+  it("skips an order whose agent is mid-turn", async () => {
+    const busy = await fullOrder(49);
+    const stub = await getAgentByName(env.OrderAgent, busy.order.instance);
+    await runInDurableObject(stub, (inst: OrderAgent) => { (inst as unknown as { turnRunning: boolean }).turnRunning = true; });
+    await cleanupSandbox(sandbox, NOW);
+    expect(await count("SELECT COUNT(*) AS n FROM orders WHERE id = ?", busy.order.id)).toBe(1);
+    expect(await env.ARTWORK.get(busy.key)).not.toBeNull();
+    await runInDurableObject(stub, (inst: OrderAgent) => { (inst as unknown as { turnRunning: boolean }).turnRunning = false; });
+    await cleanupSandbox(sandbox, NOW);
+    expect(await count("SELECT COUNT(*) AS n FROM orders WHERE id = ?", busy.order.id)).toBe(0);
+  });
 });

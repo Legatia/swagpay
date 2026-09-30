@@ -12,9 +12,10 @@ export async function cleanupSandbox(env: Env, now: Date = new Date()): Promise<
   for (const o of results) {
     try {
       const agent = await getAgentByName(env.OrderAgent, o.instance);
-      const view = await agent.getView();
-      for (const a of view.artwork) await env.ARTWORK.delete(a.key);
-      await agent.destroy();
+      // An agent that was never initialised (or is already destroyed) throws: no artwork, not busy, delete the rows anyway.
+      const view = await agent.getView().catch(() => null);
+      if (view?.busy) continue; // mid-turn: retry next hour
+      for (const a of view?.artwork ?? []) await env.ARTWORK.delete(a.key);
       const sp = "SELECT id FROM supplier_payments WHERE order_id = ?";
       const ob = "SELECT id FROM obligations WHERE order_id = ?";
       const pr = "SELECT id FROM payment_requests WHERE order_id = ?";
@@ -40,6 +41,8 @@ export async function cleanupSandbox(env: Env, now: Date = new Date()): Promise<
         del("DELETE FROM orders WHERE id = ?"),
       ]);
       orders++;
+      // Only after the rows are gone, so a failed batch never leaves an order with a destroyed agent.
+      try { await agent.destroy(); } catch (err) { console.error("sandbox cleanup could not destroy the agent of order", o.id, err); }
     } catch (err) {
       console.error("sandbox cleanup failed for order", o.id, err);
     }
