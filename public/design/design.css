@@ -53,8 +53,6 @@ main[data-step="review"] .steps [data-for="review"] { background: var(--agent-bu
 #stage .layer { cursor: move; }
 #stage .selection rect { fill: none; stroke: #d7266f; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 #stage .selection circle { fill: #ffffff; stroke: #d7266f; stroke-width: 2; vector-effect: non-scaling-stroke; cursor: pointer; }
-/* The #stage-empty overlay carries this message now, with the mascot. */
-#stage .empty-hint { display: none; }
 
 .toolbar { position: sticky; bottom: 72px; display: flex; gap: 8px; flex-wrap: wrap; padding: 8px; background: var(--page, #f5f6f9); z-index: 2; }
 .tool { display: inline-flex; align-items: center; padding: 10px 14px; border-radius: 8px; font-weight: 700; cursor: pointer; }
