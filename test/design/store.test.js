@@ -81,4 +81,17 @@ describe("store", () => {
     s.set({ x: 1 }, { record: false, persist: false });
     expect(storage.data.size).toBe(0);
   });
+  it("stops saving after finish()", () => {
+    const storage = memoryStorage();
+    const s = createStore({ initial: { a: 1 }, storage });
+    s.set({ a: 2 });
+    expect(storage.data.has(DRAFT_KEY)).toBe(true);
+    s.finish();
+    expect(storage.data.has(DRAFT_KEY)).toBe(false);
+    s.set({ a: 3 });
+    s.undo();
+    s.redo();
+    expect(storage.data.has(DRAFT_KEY)).toBe(false);
+    expect(s.get().a).toBe(3);
+  });
 });
