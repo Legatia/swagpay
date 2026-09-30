@@ -14,6 +14,7 @@ export default defineConfig(async () => {
             ANTHROPIC_API_KEY: "test-key",
             MAX_NEW_ORDERS_PER_DAY: "50",
             REQUIRE_TURNSTILE: "0",
+            TURNSTILE_SITE_KEY: "1x00000000000000000000AA",
             TELEGRAM_OWNER_CHAT_ID: "42",
             TELEGRAM_BOT_TOKEN: "",
             TELEGRAM_WEBHOOK_SECRET: "test-secret",
