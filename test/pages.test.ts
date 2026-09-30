@@ -18,7 +18,10 @@ it("serves the landing page, the form and the order page", async () => {
 
   const order = await SELF.fetch(`${base}/o/${"a".repeat(43)}`);
   expect(order.status).toBe(200);
-  expect(await order.text()).toContain('id="thread"');
+  const orderHtml = await order.text();
+  expect(orderHtml).toContain('id="thread"');
+  expect(orderHtml).toContain('class="chat-launcher" id="chat-open"');
+  expect(orderHtml).toContain('class="chat-panel" id="chat-panel" role="dialog"');
   expect(await (await SELF.fetch(`${base}/o/${"b".repeat(43)}`)).text()).toContain('id="pay-box"');
   expect(await (await SELF.fetch(`${base}/o/${"c".repeat(43)}`)).text()).toContain('id="received"');
 });

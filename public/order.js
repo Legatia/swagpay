@@ -32,7 +32,7 @@ function statusFor(order, quote, missing) {
     case "closed":
       return { step: 6, title: "Delivered. Thank you!", text: "This order is closed. We hope the event goes great." };
     default:
-      if (missing.length) return { step: 0, title: "Tell the agent what you need", text: "Answer the agent's questions in the conversation below and upload your artwork. You get a price as soon as the order is complete." };
+      if (missing.length) return { step: 0, title: "Tell the agent what you need", text: "Answer the agent's questions in the chat and upload your artwork below. You get a price as soon as the order is complete." };
       return { step: 0, title: "Getting your price", text: "Your order is complete. We check the price with a local printer; the quote appears here, usually within a few hours." };
   }
 }
@@ -44,6 +44,7 @@ function renderStatus(order, quote, missing) {
   $("step-label").textContent = s.step >= STEPS.length ? "Complete" : `Step ${s.step + 1} of ${STEPS.length} · ${STEPS[s.step]}`;
   $("status-title").textContent = s.title;
   $("status-text").textContent = s.text;
+  $("status-chat").hidden = s.step !== 0;
 }
 
 function renderSpec(spec, missing) {
@@ -66,10 +67,64 @@ function renderArtwork(artwork, reviews) {
   }));
 }
 
+// The chat: a panel in the lower right (full screen on phones), with a launcher that counts unread agent replies.
+const seenKey = `swagpay:seen:${token}`;
+let agentReplies = 0;
+let seenReplies = null;
+try { const v = localStorage.getItem(seenKey); seenReplies = v === null ? null : Number(v); } catch {}
+const chatIsOpen = () => !$("chat-panel").hidden;
+const narrow = () => matchMedia("(max-width: 560px)").matches;
+
+function markSeen() {
+  seenReplies = agentReplies;
+  try { localStorage.setItem(seenKey, String(seenReplies)); } catch {}
+  renderBadge();
+}
+
+function renderBadge() {
+  const unread = Math.max(0, agentReplies - (seenReplies ?? 0));
+  $("chat-badge").hidden = unread === 0;
+  $("chat-badge").textContent = String(unread);
+  $("chat-open").setAttribute("aria-label", unread ? `Chat with the agent, ${unread} new ${unread === 1 ? "reply" : "replies"}` : "Chat with the agent");
+}
+
+function scrollChat() {
+  const body = $("chat-body");
+  body.scrollTop = body.scrollHeight;
+}
+
+function openChat() {
+  $("chat-panel").hidden = false;
+  $("chat-open").hidden = true;
+  $("chat-open").setAttribute("aria-expanded", "true");
+  document.body.classList.toggle("chat-lock", narrow());
+  markSeen();
+  scrollChat();
+  $("text").focus();
+}
+
+function closeChat() {
+  $("chat-panel").hidden = true;
+  $("chat-open").hidden = false;
+  $("chat-open").setAttribute("aria-expanded", "false");
+  document.body.classList.remove("chat-lock");
+  $("chat-open").focus();
+}
+
 function renderThread(thread) {
   if (thread.length === lastThreadLength) return;
+  const first = lastThreadLength === -1;
   lastThreadLength = thread.length;
+  const body = $("chat-body");
+  const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
   $("thread").replaceChildren(...thread.map((t) => el("div", `bubble ${t.from}`, t.text)));
+  agentReplies = thread.filter((t) => t.from === "agent").length;
+  if (chatIsOpen()) {
+    markSeen();
+    if (atBottom || first) scrollChat();
+  } else {
+    renderBadge();
+  }
 }
 
 let openQuoteId = null;
@@ -131,14 +186,29 @@ async function refresh() {
   $("event").textContent = order.eventName;
   $("delivery").textContent = `Deliver to ${order.deliveryPlace} by ${warsaw(order.deliverBy)} (Warsaw time)`;
   renderStatus(order, quote, view.missing);
+  const firstVisit = seenReplies === null;
   renderSpec(view.spec, view.missing);
   renderArtwork(view.artwork, view.spec.artwork);
   renderThread(view.thread);
+  if (firstVisit && order.status === "draft" && !narrow() && !chatIsOpen()) openChat();
   renderQuote(quote);
   renderPayments(payments, payTo);
   $("received-box").hidden = order.status !== "balance_paid";
   $("busy").hidden = !view.busy;
+  if (view.busy && chatIsOpen()) scrollChat();
 }
+
+$("chat-open").addEventListener("click", openChat);
+$("status-chat").addEventListener("click", openChat);
+$("chat-close").addEventListener("click", closeChat);
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && chatIsOpen()) closeChat(); });
+$("text").addEventListener("keydown", (event) => {
+  // Enter sends on a keyboard; on touch screens it adds a line.
+  if (event.key === "Enter" && !event.shiftKey && !matchMedia("(pointer: coarse)").matches) {
+    event.preventDefault();
+    $("message-form").requestSubmit();
+  }
+});
 
 for (const button of document.querySelectorAll("button.copy")) {
   button.addEventListener("click", async () => {
@@ -156,7 +226,7 @@ for (const button of document.querySelectorAll("button.copy")) {
 
 $("message-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  $("error").textContent = "";
+  $("chat-error").textContent = "";
   $("send").disabled = true;
   try {
     const res = await fetch(`/api/o/${token}/messages`, {
@@ -168,10 +238,12 @@ $("message-form").addEventListener("submit", async (event) => {
     if (!res.ok) throw new Error(data.error || "Could not send the message.");
     $("text").value = "";
     await refresh();
+    scrollChat();
   } catch (err) {
-    $("error").textContent = err.message;
+    $("chat-error").textContent = err.message;
   } finally {
     $("send").disabled = false;
+    $("text").focus();
   }
 });
 

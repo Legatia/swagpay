@@ -25,6 +25,7 @@
     <span class="label" id="step-label"></span>
     <h2 id="status-title"></h2>
     <p class="muted" id="status-text"></p>
+    <div><button type="button" class="button-secondary" id="status-chat" hidden>Open the chat</button></div>
   </section>
 
   <section class="sheet" id="quote-box" hidden>
@@ -83,16 +84,6 @@
   <p class="error" id="error" role="alert"></p>
 
   <section class="sheet">
-    <h2>Conversation</h2>
-    <div id="thread" class="thread"></div>
-    <p class="muted" id="busy" hidden>The agent is working…</p>
-    <form id="message-form">
-      <label>Message the agent <textarea id="text" rows="3" maxlength="4000" required placeholder="Questions, changes, sizes…"></textarea></label>
-      <button type="submit" id="send">Send</button>
-    </form>
-  </section>
-
-  <section class="sheet">
     <h2>Order so far</h2>
     <div id="spec" class="spec muted">Nothing yet.</div>
     <div id="missing"></div>
@@ -110,6 +101,32 @@
 
   <p class="muted small footnote">This page is your order: bookmark it to come back. Keep the link private, because anyone with it can see and change the order.</p>
 </main>
+
+<button type="button" class="chat-launcher" id="chat-open" aria-controls="chat-panel" aria-expanded="false">
+  <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
+  <span>Chat with the agent</span>
+  <span class="badge" id="chat-badge" hidden></span>
+</button>
+
+<section class="chat-panel" id="chat-panel" role="dialog" aria-labelledby="chat-title" hidden>
+  <header class="chat-head">
+    <div class="who">
+      <strong id="chat-title">Swagpay agent</strong>
+      <span class="muted small">An AI agent runs your order; a person checks anything unusual.</span>
+    </div>
+    <button type="button" class="chat-close" id="chat-close" aria-label="Close the chat">✕</button>
+  </header>
+  <div class="chat-body" id="chat-body">
+    <div id="thread" class="thread"></div>
+    <p class="muted small" id="busy" hidden>The agent is typing…</p>
+  </div>
+  <form id="message-form" class="chat-form">
+    <label class="visually-hidden" for="text">Message the agent</label>
+    <textarea id="text" rows="2" maxlength="4000" required placeholder="Ask a question or change your order…"></textarea>
+    <button type="submit" id="send">Send</button>
+    <p class="error small" id="chat-error" role="alert"></p>
+  </form>
+</section>
 <script src="/order.js"></script>
 </body>
 </html>
