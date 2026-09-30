@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { REQUEST_MAX, SendError, buildIntake, plainError, progressText, requestText, sendOrder, sha256, withFileIds } from "../../public/design/js/submit.js";
+import { REQUEST_MAX, SendError, buildIntake, orderKey, plainError, progressText, requestText, sendOrder, sha256, withFileIds } from "../../public/design/js/submit.js";
 
 const contact = { eventName: "  Builders meetup ", eventDate: "2026-10-20", deliverBy: "2026-10-19T12:00", deliveryPlace: " Kolektyw3, Koszykowa 54, Warsaw ", contactName: " Ada ", contactEmail: " ada@example.com " };
 
@@ -296,5 +296,40 @@ describe("sendOrder", () => {
     const d = deps(fake, { onProgress: (p) => seen.push(p.stage) });
     await sendOrder({ spec, files, intake, pending: null, deps: d.deps });
     expect(seen).toEqual(["check", "create", "upload", "upload", "upload", "design"]);
+  });
+});
+
+describe("orderKey", () => {
+  const body = { eventName: "Builders meetup", request: "Designed in the Swagpay editor. x", designPending: true };
+  let n = 0;
+  const makeId = () => `key-${++n}-0123456789abcdef`;
+  it("makes a key for a new intake", () => {
+    const k = orderKey(null, body, makeId);
+    expect(k.key).toMatch(/^key-\d+-0123456789abcdef$/);
+  });
+  it("reuses the key while the intake is the same, whatever the key order or Turnstile token", () => {
+    const k = orderKey(null, body, makeId);
+    expect(orderKey(k, { designPending: true, request: body.request, eventName: body.eventName, turnstile: "x" }, makeId)).toBe(k);
+  });
+  it("makes a new key when the intake changed", () => {
+    const k = orderKey(null, body, makeId);
+    expect(orderKey(k, { ...body, eventName: "Other" }, makeId).key).not.toBe(k.key);
+  });
+});
+
+describe("sendOrder with an idempotency key", () => {
+  it("sends the key and treats a 200 replay as the created order", async () => {
+    const fake = backend({ create: [json(200, { token: TOKEN, url: `/o/${TOKEN}` })] });
+    const d = deps(fake);
+    const out = await sendOrder({ spec, files, intake: { ...intake, idempotencyKey: "key-1-0123456789abcdef" }, pending: null, deps: d.deps });
+    expect(out.url).toBe(`/o/${TOKEN}`);
+    expect(JSON.parse(fake.calls[0].init.body).idempotencyKey).toBe("key-1-0123456789abcdef");
+  });
+  it("waits as long as Retry-After says while the first create is still running", async () => {
+    const busy = new Response(JSON.stringify({ error: "This order is still being created. Try again in a moment." }), { status: 503, headers: { "retry-after": "2" } });
+    const fake = backend({ create: [busy] });
+    const d = deps(fake);
+    await sendOrder({ spec, files, intake, pending: null, deps: d.deps });
+    expect(d.slept).toEqual([2000]);
   });
 });

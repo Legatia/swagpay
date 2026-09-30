@@ -36,6 +36,17 @@ export function buildIntake(contact, summary) {
   return out;
 }
 
+// The backend replays a create that reuses an idempotency key, so a lost reply never makes a second
+// order. The key follows the intake: the same body keeps its key, a changed body (the host fixed a
+// date after a refused send) gets a new one, because the server rejects a reused key with a
+// different body. The server's comparison ignores key order and the Turnstile token.
+const intakeBody = (intake) => JSON.stringify(Object.keys(intake).filter((k) => k !== "turnstile" && k !== "idempotencyKey").sort().map((k) => [k, intake[k]]));
+
+export function orderKey(previous, intake, makeId = () => crypto.randomUUID()) {
+  const body = intakeBody(intake);
+  return previous?.key && previous.body === body ? previous : { key: makeId(), body };
+}
+
 export function withFileIds(spec, uploaded, url = null) {
   const files = {};
   for (const [key, meta] of Object.entries(spec.files)) {
@@ -109,7 +120,8 @@ async function call(fetchFn, url, init, ms = TIMEOUT_MS) {
   } catch {
     /* not JSON */
   }
-  return { status: res.status, data };
+  const wait = Number(res.headers?.get?.("retry-after"));
+  return { status: res.status, data, retryAfter: Number.isFinite(wait) && wait > 0 ? Math.min(wait, 10) : null };
 }
 
 const retryable = (status) => status === 0 || status >= 500;
@@ -131,10 +143,11 @@ async function createOrder(intake, deps) {
     const turnstile = await deps.nextToken();
     deps.onProgress({ stage: "create" });
     r = await call(deps.fetch, "/api/orders", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...intake, turnstile }) });
-    if (r.status === 201 && r.data?.token) return r.data;
+    // 200 is the server replaying an order this key already created.
+    if ((r.status === 201 || r.status === 200) && r.data?.token) return r.data;
     if (r.status === 403) continue; // single-use token: the next loop gets a fresh one
     if (!retryable(r.status)) throw new SendError(plainError(r.data?.error));
-    if (i < ATTEMPTS) await deps.sleep(BACKOFF_MS * 3 ** (i - 1));
+    if (i < ATTEMPTS) await deps.sleep(r.retryAfter ? r.retryAfter * 1000 : BACKOFF_MS * 3 ** (i - 1));
   }
   throw new SendError(r.status === 403 ? HUMAN : OFFLINE);
 }
