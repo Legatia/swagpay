@@ -87,7 +87,7 @@ const GONE = "That order no longer exists. Send again to start a new one.";
 const NOT_ATTACHED = "Your design couldn't be attached. Send again, or continue on your order page and tell the agent.";
 
 const TIMEOUT_MS = 30_000;
-const UPLOAD_TIMEOUT_MS = 120_000;
+const UPLOAD_TIMEOUT_MS = 180_000;
 
 // Older browsers (Safari before 16) have no AbortSignal.timeout; they just wait.
 function timeoutSignal(ms) {
