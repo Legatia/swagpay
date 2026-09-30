@@ -4,10 +4,12 @@ import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../src/agent/order-agent";
 import { createOrder, getOrderById } from "../src/db";
 import { createEscalation, getEscalation, listEscalations } from "../src/escalations";
+import { NBP_BASE } from "../src/fx";
 import { IntakeSchema } from "../src/intake";
 import { listPaymentRequests } from "../src/payments";
-import { handleTelegram } from "../src/telegram-webhook";
+import { HELP, handleTelegram, parseCostArgs } from "../src/telegram-webhook";
 import type { TelegramClient } from "../src/telegram";
+import { getVendor, markJob, proposeVendorJob, vendorJobFor, type VendorStatus } from "../src/vendors";
 import { completeSpec, insertQuote, newOrderRow } from "./fixtures";
 import { msg, scriptedModel, toolUse } from "./helpers";
 
@@ -34,6 +36,61 @@ const update = (body: unknown, secret = "test-secret") =>
     body: JSON.stringify(body),
   });
 const fromOwner = (text: string) => ({ message: { chat: { id: 42 }, text } });
+
+let vendorSeq = 0;
+async function addVendor(o: { name: string; status: VendorStatus; city?: string; methods?: string[]; email?: string }): Promise<number> {
+  const at = "2099-01-01T10:00:00.000Z";
+  const res = await env.DB.prepare(
+    "INSERT INTO vendors (name, city, country, methods, email, status, source_ref, created_at, updated_at) VALUES (?, ?, 'PL', ?, ?, ?, ?, ?, ?)",
+  ).bind(o.name, o.city ?? "Warsaw", JSON.stringify(o.methods ?? ["screen"]), o.email ?? null, o.status, `tg:${++vendorSeq}`, at, at).run();
+  return res.meta.last_row_id as number;
+}
+
+/** A fake NBP answering every code with `mid`; records the URLs asked for. */
+function nbp(mid: number, seen: string[] = []): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    seen.push(String(input));
+    return Response.json({ rates: [{ mid, effectiveDate: "2026-10-01" }] });
+  }) as typeof fetch;
+}
+const noFetch = (async () => { throw new Error("fetch must not be called"); }) as typeof fetch;
+
+const USAGE = "Usage: /cost <id> <PLN gross, delivery included> [note]";
+
+describe("parseCostArgs", () => {
+  it("reads the amount, then an optional currency and printer in either order, then the note", () => {
+    expect(parseCostArgs(["1200,50"])).toEqual({ amount: 1200.5, currency: "PLN", vendorId: null, note: null });
+    expect(parseCostArgs(["350", "EUR"])).toEqual({ amount: 350, currency: "EUR", vendorId: null, note: null });
+    expect(parseCostArgs(["350", "eur", "v3", "rush"])).toEqual({ amount: 350, currency: "EUR", vendorId: 3, note: "rush" });
+    expect(parseCostArgs(["350", "V3", "gbp", "two", "colours"])).toEqual({ amount: 350, currency: "GBP", vendorId: 3, note: "two colours" });
+    expect(parseCostArgs(["v3", "1000"])).toEqual({ amount: 1000, currency: "PLN", vendorId: 3, note: null });
+    expect(parseCostArgs(["INR", "v12", "20000", "Mumbai"])).toEqual({ amount: 20000, currency: "INR", vendorId: 12, note: "Mumbai" });
+  });
+
+  it("treats a word that isn't a currency or printer as the start of the note", () => {
+    expect(parseCostArgs(["350", "XYZ"])).toEqual({ amount: 350, currency: "PLN", vendorId: null, note: "XYZ" });
+    expect(parseCostArgs(["350", "Drukarnia", "EUR", "v3"])).toEqual({ amount: 350, currency: "PLN", vendorId: null, note: "Drukarnia EUR v3" });
+  });
+
+  it("still catches an amount written with a thousands separator", () => {
+    expect(parseCostArgs(["1", "200,50", "Drukarnia"], 7)).toEqual({ error: "Did you mean 1200,50? Write the amount without spaces, e.g. /cost 7 1200.50" });
+    expect(parseCostArgs(["EUR", "v3", "12", "500"], 7)).toEqual({ error: "Did you mean 12500? Write the amount without spaces, e.g. /cost 7 1200.50" });
+  });
+
+  it("refuses what it can't read safely", () => {
+    expect(parseCostArgs([])).toEqual({ error: USAGE });
+    expect(parseCostArgs(["12x"])).toEqual({ error: USAGE });
+    expect(parseCostArgs(["0"])).toEqual({ error: USAGE });
+    expect(parseCostArgs(["EUR"])).toEqual({ error: USAGE });
+    expect(parseCostArgs(["drukarnia", "350"])).toEqual({ error: USAGE });
+    // A real currency code the owner can't use here must not be read as 350 PLN.
+    const other = "CHF can't be converted here: give the cost in PLN, EUR, GBP, USD or INR. Nothing was recorded.";
+    expect(parseCostArgs(["350", "CHF", "rush"])).toEqual({ error: other });
+    expect(parseCostArgs(["350", "v3", "CHF"])).toEqual({ error: other });
+    expect(parseCostArgs(["350", "EUR", "usd"])).toEqual({ error: "Give one currency and one printer at most. Nothing was recorded." });
+    expect(parseCostArgs(["v3", "350", "v4"])).toEqual({ error: "Give one currency and one printer at most. Nothing was recorded." });
+  });
+});
 
 async function orderWithEscalation() {
   const { order } = await createOrder(env.DB, intake, new Date("2099-01-01T10:00:00Z"));
@@ -299,5 +356,216 @@ describe("Telegram webhook", () => {
       `#${e.id} needs a price: /cost ${e.id} <PLN gross, delivery included> [note]`,
     ]);
     expect((await getEscalation(env.DB, e.id))?.status).toBe("open");
+  });
+
+  it("/cost in EUR converts at the NBP mid rate and proposes the printer's job", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const v = await addVendor({ name: "Drukarnia Euro", status: "screened" });
+    const t = fakeTelegram();
+    const seen: string[] = [];
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 350 EUR v${v} rush job`)), env, { telegram: t.telegram, fetch: nbp(4.2553, seen) });
+    expect(seen).toEqual([`${NBP_BASE}/eur/?format=json`]);
+    expect(t.sent).toEqual([`#${e.id}: 1489.36 PLN (350.00 EUR at 4.2553) recorded for order ${order.id}; printer #${v} Drukarnia Euro.`]);
+    expect(await getEscalation(env.DB, e.id)).toMatchObject({
+      status: "approved",
+      decision_note: `1489.36 PLN; 350.00 EUR at 4.2553 PLN (NBP 2026-10-01); printer #${v} Drukarnia Euro; rush job`,
+    });
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(148936);
+      const inbox = agent.sql<{ text: string }>`SELECT text FROM inbox`.map((r) => r.text).join("\n");
+      expect(inbox).toContain(`Printer cost from the owner (escalation #${e.id}): 1489.36 PLN gross`);
+    });
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({
+      vendor_id: v, status: "proposed", cost_currency: "EUR", cost_cents: 35000, deliver_by: order.deliver_by,
+    });
+  });
+
+  it("/cost in INR without a printer converts and proposes no job", async () => {
+    const { order, e } = await orderWithCostRequest();
+    const t = fakeTelegram();
+    const seen: string[] = [];
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 0.01 INR`)), env, { telegram: t.telegram, fetch: nbp(0.0437) });
+    expect((await getEscalation(env.DB, e.id))?.status).toBe("open");
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 20000 inr`)), env, { telegram: t.telegram, fetch: nbp(0.0437, seen) });
+    expect(seen).toEqual([`${NBP_BASE}/inr/?format=json`]);
+    expect(t.sent).toEqual([
+      "That's less than 0.01 PLN; nothing was recorded.",
+      `#${e.id}: 874.00 PLN (20000.00 INR at 0.0437) recorded for order ${order.id}.`,
+    ]);
+    expect((await getEscalation(env.DB, e.id))?.decision_note).toBe("874.00 PLN; 20000.00 INR at 0.0437 PLN (NBP 2026-10-01)");
+    expect(await vendorJobFor(env.DB, order.id)).toBeNull();
+  });
+
+  it("/cost in PLN with a printer doesn't ask NBP", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const v = await addVendor({ name: "Drukarnia Partner", status: "partner" });
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/cost ${e.id} v${v} 1000`)), env, { telegram: t.telegram, fetch: noFetch });
+    expect(t.sent).toEqual([`#${e.id}: 1000.00 PLN recorded for order ${order.id}; printer #${v} Drukarnia Partner.`]);
+    expect((await getEscalation(env.DB, e.id))?.decision_note).toBe(`1000.00 PLN; printer #${v} Drukarnia Partner`);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(100000);
+    });
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: v, cost_currency: "PLN", cost_cents: 100000 });
+  });
+
+  it("records nothing when the NBP rate can't be had, and says so", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const v = await addVendor({ name: "Drukarnia Down", status: "partner" });
+    const t = fakeTelegram();
+    const down = (async () => new Response("unavailable", { status: 503 })) as typeof fetch;
+    const offline = (async () => { throw new Error("network down"); }) as typeof fetch;
+    const odd = (async () => Response.json({ rates: [] })) as typeof fetch;
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 350 EUR v${v}`)), env, { telegram: t.telegram, fetch: down });
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 280 gbp`)), env, { telegram: t.telegram, fetch: offline });
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 300 USD v${v}`)), env, { telegram: t.telegram, fetch: odd });
+    expect(t.sent).toEqual([
+      "Couldn't get the NBP EUR rate; nothing was recorded. Try again, or send the cost in PLN.",
+      "Couldn't get the NBP GBP rate; nothing was recorded. Try again, or send the cost in PLN.",
+      "Couldn't get the NBP USD rate; nothing was recorded. Try again, or send the cost in PLN.",
+    ]);
+    expect(await getEscalation(env.DB, e.id)).toMatchObject({ status: "open", decision_note: null, delivered_at: null });
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM printer_costs`[0].n).toBe(0);
+    });
+    expect(await vendorJobFor(env.DB, order.id)).toBeNull();
+  });
+
+  it("refuses a printer that isn't screened or a partner, and records nothing", async () => {
+    const { order, e } = await orderWithCostRequest();
+    const candidate = await addVendor({ name: "Unchecked Print", status: "candidate" });
+    const paused = await addVendor({ name: "Resting Print", status: "paused" });
+    const t = fakeTelegram();
+    const deps = { telegram: t.telegram, fetch: noFetch };
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 350 EUR v${candidate}`)), env, deps);
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1000 v${paused}`)), env, deps);
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1000 v999999`)), env, deps);
+    expect(t.sent).toEqual([
+      `Printer #${candidate} isn't screened; nothing was recorded.`,
+      `Printer #${paused} is paused; nothing was recorded.`,
+      "Printer #999999 doesn't exist; nothing was recorded.",
+    ]);
+    expect((await getEscalation(env.DB, e.id))?.status).toBe("open");
+    expect(await vendorJobFor(env.DB, order.id)).toBeNull();
+  });
+
+  it("keeps the cost but not the printer once the order's job is booked", async () => {
+    const { order, stub, e } = await orderWithCostRequest();
+    const first = await addVendor({ name: "First Print", status: "partner" });
+    const second = await addVendor({ name: "Second Print", status: "screened" });
+    await proposeVendorJob(env.DB, { orderId: order.id, vendorId: first, deliverBy: order.deliver_by, currency: "PLN", cents: 90_000 });
+    await markJob(env.DB, order.id, "booked");
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 1000 v${second}`)), env, { telegram: t.telegram, fetch: noFetch });
+    expect(t.sent).toEqual([
+      `#${e.id}: 1000.00 PLN recorded for order ${order.id}; printer NOT changed: the job is already booked with printer #${first}.`,
+    ]);
+    expect((await getEscalation(env.DB, e.id))?.status).toBe("approved");
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(agent.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs`[0].cost_grosze).toBe(100000);
+    });
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: first, status: "booked", cost_cents: 90_000 });
+  });
+
+  it("records the printer's job even when the agent can't be told", async () => {
+    const { order, e } = await orderWithCostRequest();
+    const v = await addVendor({ name: "Drukarnia Late", status: "screened" });
+    const t = fakeTelegram();
+    const unreachable = { idFromName() { throw new Error("agent unreachable"); } } as unknown as Env["OrderAgent"];
+    const down = ({ ...env, OrderAgent: unreachable }) as Env;
+    await handleTelegram(update(fromOwner(`/cost ${e.id} 350 EUR v${v}`)), down, { telegram: t.telegram, fetch: nbp(4.2553) });
+    expect(t.sent).toEqual([
+      `#${e.id} approved (1489.36 PLN (350.00 EUR at 4.2553) recorded for order ${order.id}; printer #${v} Drukarnia Late), but the agent could not be told. Send /resend ${e.id} to retry.`,
+    ]);
+    expect(await vendorJobFor(env.DB, order.id)).toMatchObject({ vendor_id: v, cost_currency: "EUR", cost_cents: 35000 });
+    await handleTelegram(update(fromOwner(`/resend ${e.id}`)), env, t);
+    expect(t.sent[1]).toBe(`#${e.id} re-sent to the agent (approved).`);
+  });
+
+  it("/vendors lists printers partners first, with methods, scores and email", async () => {
+    const city = "Vendorville";
+    const screened = await addVendor({ name: "Alpha Screened", status: "screened", city, methods: ["screen", "dtf"], email: "alpha@example.com" });
+    const partner = await addVendor({ name: "Zulu Partner", status: "partner", city, methods: ["embroidery"] });
+    const candidate = await addVendor({ name: "Mid Candidate", status: "candidate", city });
+    const { order } = await createOrder(env.DB, intake, new Date("2099-01-01T10:00:00Z"));
+    await proposeVendorJob(env.DB, { orderId: order.id, vendorId: partner, deliverBy: order.deliver_by, currency: "PLN", cents: 50_000 });
+    await markJob(env.DB, order.id, "booked");
+    await markJob(env.DB, order.id, "delivered", new Date("2099-10-01T10:00:00Z"));
+    const warsaw = await addVendor({ name: "Warszawa Print", status: "screened" });
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/vendors ${city}`)), env, t);
+    expect(t.sent[0]).toBe([
+      `#${partner} partner · Zulu Partner · Vendorville · embroidery · 1 jobs, 1 on time · no email`,
+      `#${screened} screened · Alpha Screened · Vendorville · screen, dtf · 0 jobs, 0 on time · alpha@example.com`,
+      `#${candidate} candidate · Mid Candidate · Vendorville · screen · 0 jobs, 0 on time · no email`,
+    ].join("\n"));
+    await handleTelegram(update(fromOwner("/vendors warszawa")), env, t);
+    expect(t.sent[1]).toContain(`#${warsaw} screened · Warszawa Print · Warsaw · screen`);
+    expect(t.sent[1]).not.toContain("Vendorville");
+    await handleTelegram(update(fromOwner("/vendors")), env, t);
+    const all = t.sent[2].split("\n");
+    expect(all[0]).toMatch(/^#\d+ partner · /);
+    expect(all.length).toBeLessThanOrEqual(21);
+    expect(t.sent[2]).toContain(`#${partner} partner · Zulu Partner`);
+    await handleTelegram(update(fromOwner("/vendors Atlantis")), env, t);
+    expect(t.sent[3]).toBe("No printers in Atlantis.");
+  });
+
+  it("/vendors shows the first 20 and says there are more", async () => {
+    const city = "Crowdville";
+    for (let i = 0; i < 21; i++) await addVendor({ name: `Print ${String(i).padStart(2, "0")}`, status: i === 20 ? "partner" : "screened", city });
+    const t = fakeTelegram();
+    await handleTelegram(update(fromOwner(`/vendors ${city}`)), env, t);
+    const lines = t.sent[0].split("\n");
+    expect(lines).toHaveLength(21);
+    expect(lines[0]).toContain("partner · Print 20");
+    expect(lines[20]).toBe("(first 20 shown)");
+  });
+
+  it("/vendor sets a status, and registers a payout address only for a partner", async () => {
+    const v = await addVendor({ name: "Payable Print", status: "screened" });
+    const addr = "0x" + "b".repeat(40);
+    const t = fakeTelegram();
+    const say = (text: string) => handleTelegram(update(fromOwner(text)), env, t);
+    await say(`/vendor ${v} pay ${addr} BASE`);
+    expect((await getVendor(env.DB, v))?.payout_address).toBeNull();
+    await say(`/vendor ${v} partner`);
+    await say(`/vendor ${v} pay ${addr} BASE`);
+    expect(await getVendor(env.DB, v)).toMatchObject({ status: "partner", payout_address: addr, payout_chain: "BASE" });
+    await say(`/vendor ${v} pay 0x1234 BASE`);
+    await say(`/vendor ${v} pay ${addr} base!`);
+    await say(`/vendor ${v} pay ${addr}`);
+    await say(`/vendor ${v} pay ${addr} BASE now`);
+    await say(`/vendor ${v} candidate`);
+    await say(`/vendor ${v} pay ${addr} arc-testnet`);
+    expect(await getVendor(env.DB, v)).toMatchObject({ payout_address: addr, payout_chain: "ARC-TESTNET" });
+    await say(`/vendor ${v} paused`);
+    expect(await getVendor(env.DB, v)).toMatchObject({ status: "paused", payout_address: null, payout_chain: null });
+    await say(`/vendor ${v} Screened`);
+    await say("/vendor 999999 partner");
+    await say(`/vendor 999999 pay ${addr} ARC-TESTNET`);
+    const usage = "Usage: /vendor <#> partner|screened|paused, or /vendor <#> pay <0x address> <CHAIN>";
+    expect(t.sent).toEqual([
+      `Printer #${v} must be a partner first: /vendor ${v} partner`,
+      `Printer #${v} is now partner.`,
+      `Printer #${v} is paid at ${addr} on BASE.`,
+      usage,
+      usage,
+      usage,
+      usage,
+      usage,
+      `Printer #${v} is paid at ${addr} on ARC-TESTNET.`,
+      `Printer #${v} is now paused. Its payout address was cleared: after /vendor ${v} partner, register it again with /vendor ${v} pay.`,
+      `Printer #${v} is now screened.`,
+      "Printer #999999 doesn't exist.",
+      "Printer #999999 doesn't exist.",
+    ]);
+  });
+
+  it("help lists the vendor commands and the new /cost syntax", () => {
+    expect(HELP).toContain("/cost <id> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]");
+    expect(HELP).toContain("/vendors [city]");
+    expect(HELP).toContain("/vendor <#> partner|screened|paused");
+    expect(HELP).toContain("/vendor <#> pay <0x address> <CHAIN>");
   });
 });

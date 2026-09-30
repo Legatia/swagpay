@@ -2,12 +2,17 @@ import { getAgentByName } from "agents";
 import { getOrderById, setOrderStatus } from "./db";
 import { decideEscalation, getEscalation, listEscalations, listUndelivered, markDelivered, statusWord as word, type EscalationRow } from "./escalations";
 import { TREASURY_NAME } from "./agent/treasury-agent";
-import { TOKEN_FOR, formatUnits } from "./money";
+import { fetchNbpRate } from "./fx";
+import { TOKEN_FOR, formatCents, formatUnits, isAddress } from "./money";
 import { createPaymentRequest } from "./payments";
 import { warsawTime } from "./quote-text";
 import { acceptedQuote } from "./quotes";
 import { createTelegram, type TelegramClient } from "./telegram";
 import { decideObligation, setObligationStatus } from "./treasury";
+import {
+  cityFromPlace, getVendor, listVendors, proposeVendorJob, setVendorPayout, setVendorStatus, vendorJobFor, vendorScore,
+  type VendorRow, type VendorStatus,
+} from "./vendors";
 
 type Update = {
   message?: { chat?: { id?: number }; text?: string };
@@ -20,9 +25,12 @@ export const HELP = [
   "/approve <id> [note]",
   "/reject <id> [note]",
   "/resend <id> — re-send a decision the agent missed",
-  "/cost <id> <PLN> [note] — printer cost for a cost request",
+  "/cost <id> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note] — printer cost (gross, delivery included) for a cost request",
   "/order <number> — order status",
   "/printed <order> — the printer finished; send the balance request",
+  "/vendors [city] — printers, partners first",
+  "/vendor <#> partner|screened|paused",
+  "/vendor <#> pay <0x address> <CHAIN> — where a partner printer is paid (USDC)",
 ].join("\n");
 
 export function sameSecret(given: string, expected: string): boolean {
@@ -95,14 +103,122 @@ export function parsePln(s: string | undefined): number | null {
   return n > 0 ? n : null;
 }
 
-export async function giveCost(env: Env, id: number, amount: number, note: string | null): Promise<string> {
+export const COST_CURRENCIES = ["PLN", "EUR", "GBP", "USD", "INR"] as const;
+export type CostCurrency = (typeof COST_CURRENCIES)[number];
+export type CostArgs = { amount: number; currency: CostCurrency; vendorId: number | null; note: string | null };
+
+const COST_USAGE = "Usage: /cost <id> <PLN gross, delivery included> [note]";
+const ONE_EACH = "Give one currency and one printer at most. Nothing was recorded.";
+/** ISO 4217 codes: "350 CHF" is refused rather than read as 350 PLN with the note "CHF". */
+const ISO_CURRENCIES = new Set(Intl.supportedValuesOf("currency"));
+
+/**
+ * The words after `/cost <id>`: the amount, with a currency and a printer (`v<#>`) before or after it in either
+ * order, then the note. `id` only fills in the example in the thousands-separator question.
+ */
+export function parseCostArgs(words: string[], id?: number): CostArgs | { error: string } {
+  const got: { currency?: CostCurrency; vendorId?: number } = {};
+  let i = 0;
+  const takeTokens = (): string | null => {
+    for (; i < words.length; i++) {
+      const w = words[i];
+      const printer = /^v(\d{1,9})$/i.exec(w);
+      if ((COST_CURRENCIES as readonly string[]).includes(w.toUpperCase())) {
+        if (got.currency) return ONE_EACH;
+        got.currency = w.toUpperCase() as CostCurrency;
+      } else if (printer) {
+        if (got.vendorId !== undefined) return ONE_EACH;
+        got.vendorId = Number(printer[1]);
+      } else {
+        return /^[A-Z]{3}$/.test(w) && ISO_CURRENCIES.has(w)
+          ? `${w} can't be converted here: give the cost in PLN, EUR, GBP, USD or INR. Nothing was recorded.`
+          : null;
+      }
+    }
+    return null;
+  };
+  const before = takeTokens();
+  if (before) return { error: before };
+  const written = words[i++];
+  const amount = parsePln(written);
+  if (amount === null) return { error: COST_USAGE };
+  // "1 200,50" splits into "1" and "200,50": ask rather than record 1.
+  const next = words[i];
+  if (next !== undefined && /^\d{3}([.,]\d{1,2})?$/.test(next)) {
+    return { error: `Did you mean ${written}${next}? Write the amount without spaces, e.g. /cost ${id ?? "<id>"} 1200.50` };
+  }
+  const after = takeTokens();
+  if (after) return { error: after };
+  return { amount, currency: got.currency ?? "PLN", vendorId: got.vendorId ?? null, note: words.slice(i).join(" ").trim().slice(0, 500) || null };
+}
+
+/**
+ * Records the printer cost for a cost request, in PLN grosze. Another currency is converted at today's NBP mid rate;
+ * when that rate can't be had, nothing is recorded. A printer (screened or partner) gets the order's proposed job.
+ */
+export async function giveCost(
+  env: Env, id: number, amount: number, note: string | null,
+  opts: { currency?: CostCurrency; vendorId?: number | null; fetchImpl?: typeof fetch; now?: Date } = {},
+): Promise<string> {
+  const currency = opts.currency ?? "PLN";
   const e = await getEscalation(env.DB, id);
   if (!e) return `#${id} doesn't exist.`;
   if (e.kind !== "cost") return `#${id} is not a cost request.`;
-  const row = await decideEscalation(env.DB, id, "approved", `${amount.toFixed(2)} PLN${note ? `; ${note}` : ""}`);
-  if (!row) return `#${id} is already ${e.status}.`;
-  if (!(await deliver(env, row))) return `#${id} approved, but the agent could not be told. Send /resend ${id} to retry.`;
-  return `#${id}: ${amount.toFixed(2)} PLN recorded for order ${row.order_id}.`;
+  if (e.status !== "open") return `#${id} is already ${e.status}.`;
+
+  let vendor: VendorRow | null = null;
+  if (opts.vendorId !== undefined && opts.vendorId !== null) {
+    vendor = await getVendor(env.DB, opts.vendorId);
+    if (!vendor) return `Printer #${opts.vendorId} doesn't exist; nothing was recorded.`;
+    if (vendor.status === "paused") return `Printer #${vendor.id} is paused; nothing was recorded.`;
+    if (vendor.status !== "screened" && vendor.status !== "partner") return `Printer #${vendor.id} isn't screened; nothing was recorded.`;
+  }
+
+  const cents = Math.round(amount * 100);
+  let grosze = cents;
+  let conversion: { shown: string; noted: string } | null = null;
+  if (currency !== "PLN") {
+    let rate: { plnPerUnit: number; effectiveDate: string };
+    try {
+      rate = await fetchNbpRate(currency, opts.fetchImpl);
+    } catch (err) {
+      console.error("NBP rate unavailable", currency, err);
+      return `Couldn't get the NBP ${currency} rate; nothing was recorded. Try again, or send the cost in PLN.`;
+    }
+    grosze = Math.round(amount * rate.plnPerUnit * 100);
+    const given = `${formatCents(cents)} ${currency} at ${rate.plnPerUnit}`;
+    conversion = { shown: ` (${given})`, noted: `${given} PLN (NBP ${rate.effectiveDate})` };
+  }
+  if (!(grosze >= 1)) return "That's less than 0.01 PLN; nothing was recorded.";
+  const pln = `${formatCents(grosze)} PLN`;
+
+  // deliver() reads the leading "<pln> PLN"; the rest reaches the order agent as the owner's note.
+  const decisionNote = [pln, conversion?.noted, vendor && `printer #${vendor.id} ${vendor.name}`, note].filter(Boolean).join("; ");
+  const row = await decideEscalation(env.DB, id, "approved", decisionNote, opts.now);
+  if (!row) return `#${id} is already ${(await getEscalation(env.DB, id))?.status ?? "decided"}.`;
+
+  // The job is recorded before the agent is told, so a failed delivery (retried with /resend) doesn't lose it.
+  let printer = "";
+  if (vendor) {
+    try {
+      const order = row.order_id === null ? null : await getOrderById(env.DB, row.order_id);
+      if (!order) throw new Error(`order ${row.order_id} not found`);
+      const job = await proposeVendorJob(env.DB, { orderId: order.id, vendorId: vendor.id, deliverBy: order.deliver_by, currency, cents }, opts.now);
+      if (job) printer = `; printer #${vendor.id} ${vendor.name}`;
+      else {
+        const current = await vendorJobFor(env.DB, order.id);
+        printer = current ? `; printer NOT changed: the job is already ${current.status} with printer #${current.vendor_id}` : "; printer NOT recorded";
+      }
+    } catch (err) {
+      console.error("vendor job not recorded", id, err);
+      printer = `; printer NOT recorded (${err instanceof Error ? err.message : String(err)})`;
+    }
+  }
+  const summary = `${pln}${conversion?.shown ?? ""} recorded for order ${row.order_id}${printer}`;
+  if (!(await deliver(env, row))) {
+    return `#${id} approved${conversion || vendor ? ` (${summary})` : ""}, but the agent could not be told. Send /resend ${id} to retry.`;
+  }
+  return `#${id}: ${summary}.`;
 }
 
 /** Re-sends a decided escalation the agent has not been told about. */
@@ -149,6 +265,59 @@ export async function markPrinted(env: Env, n: number, now: Date = new Date()): 
 
 const parseId = (arg: string | undefined): number | null => (arg !== undefined && /^\d{1,9}$/.test(arg) ? Number(arg) : null);
 
+const VENDOR_LIST_MAX = 20;
+const VENDOR_USAGE = "Usage: /vendor <#> partner|screened|paused, or /vendor <#> pay <0x address> <CHAIN>";
+
+function methodList(v: VendorRow): string {
+  try {
+    const m: unknown = JSON.parse(v.methods);
+    return Array.isArray(m) && m.length > 0 ? m.map(String).join(", ") : "no methods";
+  } catch {
+    return "no methods";
+  }
+}
+
+/** Up to 20 printers, partners first, then screened, candidates and paused; `place` may be a city name or alias. */
+async function vendorList(env: Env, place: string): Promise<string> {
+  const city = place ? (cityFromPlace(place) ?? place) : undefined;
+  const rows: VendorRow[] = [];
+  // One more than shown says whether there are more.
+  for (const status of ["partner", "screened", "candidate", "paused"] as const) {
+    if (rows.length > VENDOR_LIST_MAX) break;
+    rows.push(...(await listVendors(env.DB, { city, statuses: [status], limit: VENDOR_LIST_MAX + 1 - rows.length })));
+  }
+  if (rows.length === 0) return city ? `No printers in ${city}.` : "No printers yet.";
+  const lines = await Promise.all(rows.slice(0, VENDOR_LIST_MAX).map(async (v) => {
+    const score = await vendorScore(env.DB, v.id);
+    return `#${v.id} ${v.status} · ${v.name} · ${v.city} · ${methodList(v)} · ${score.jobs} jobs, ${score.onTime} on time · ${v.email ?? "no email"}`;
+  }));
+  if (rows.length > VENDOR_LIST_MAX) lines.push(city ? `(first ${VENDOR_LIST_MAX} shown)` : `(first ${VENDOR_LIST_MAX} shown; narrow it: /vendors <city>)`);
+  return lines.join("\n");
+}
+
+/** `/vendor <#> partner|screened|paused` or `/vendor <#> pay <0x address> <CHAIN>`. */
+async function vendorCommand(env: Env, args: string[]): Promise<string> {
+  const id = parseId(args[0]);
+  if (id === null || id <= 0) return VENDOR_USAGE;
+  const action = (args[1] ?? "").toLowerCase();
+  if (action === "pay") {
+    // Where the treasury sends this printer's money: nothing ambiguous is accepted.
+    const address = args[2];
+    const chain = (args[3] ?? "").toUpperCase();
+    if (args.length !== 4 || !isAddress(address) || !/^[A-Z][A-Z0-9-]{1,23}$/.test(chain)) return VENDOR_USAGE;
+    const result = await setVendorPayout(env.DB, id, address, chain);
+    if (result === "missing") return `Printer #${id} doesn't exist.`;
+    if (result === "not_partner") return `Printer #${id} must be a partner first: /vendor ${id} partner`;
+    return `Printer #${id} is paid at ${address} on ${chain}.`;
+  }
+  if (action !== "partner" && action !== "screened" && action !== "paused") return VENDOR_USAGE;
+  const status: VendorStatus = action;
+  const before = await getVendor(env.DB, id);
+  if (!before || !(await setVendorStatus(env.DB, id, status))) return `Printer #${id} doesn't exist.`;
+  const cleared = status !== "partner" && before.payout_address !== null;
+  return `Printer #${id} is now ${status}.${cleared ? ` Its payout address was cleared: after /vendor ${id} partner, register it again with /vendor ${id} pay.` : ""}`;
+}
+
 async function openList(env: Env): Promise<string> {
   const [open, undelivered] = await Promise.all([listEscalations(env.DB, { status: "open", limit: 20 }), listUndelivered(env.DB)]);
   if (open.length === 0 && undelivered.length === 0) return "No open escalations.";
@@ -171,7 +340,7 @@ async function orderStatus(env: Env, n: number): Promise<string> {
   ].join("\n");
 }
 
-export async function handleTelegram(request: Request, env: Env, deps: { telegram?: TelegramClient } = {}): Promise<Response> {
+export async function handleTelegram(request: Request, env: Env, deps: { telegram?: TelegramClient; fetch?: typeof fetch } = {}): Promise<Response> {
   const secret = env.TELEGRAM_WEBHOOK_SECRET;
   if (!secret) return new Response("not configured", { status: 404 });
   if (!sameSecret(request.headers.get("x-telegram-bot-api-secret-token") ?? "", secret)) {
@@ -243,20 +412,20 @@ export async function handleTelegram(request: Request, env: Env, deps: { telegra
       }
       case "/cost": {
         const id = parseId(arg);
-        const amount = parsePln(words[2]);
-        if (id === null || id <= 0 || amount === null) {
-          await reply("Usage: /cost <id> <PLN gross, delivery included> [note]");
+        const cost = id !== null && id > 0 ? parseCostArgs(words.slice(2), id) : null;
+        if (id === null || cost === null || "error" in cost) {
+          await reply(cost && "error" in cost ? cost.error : COST_USAGE);
           break;
         }
-        // "1 200,50" splits into "1" and "200,50": ask rather than record 1 PLN.
-        if (words[3] !== undefined && /^\d{3}([.,]\d{1,2})?$/.test(words[3])) {
-          await reply(`Did you mean ${words[2]}${words[3]}? Write the amount without spaces, e.g. /cost ${id} 1200.50`);
-          break;
-        }
-        const costNote = words.slice(3).join(" ").trim().slice(0, 500) || null;
-        await reply(await giveCost(env, id, amount, costNote));
+        await reply(await giveCost(env, id, cost.amount, cost.note, { currency: cost.currency, vendorId: cost.vendorId, fetchImpl: deps.fetch }));
         break;
       }
+      case "/vendors":
+        await reply(await vendorList(env, words.slice(1).join(" ")));
+        break;
+      case "/vendor":
+        await reply(await vendorCommand(env, words.slice(1)));
+        break;
       case "/order": {
         const n = parseId(arg);
         await reply(n !== null && n > 0 ? await orderStatus(env, n) : "Usage: /order <number>");
