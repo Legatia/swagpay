@@ -1,7 +1,7 @@
 // Testnet sandbox UI: banner, testnet pay helper, and the judge's "You are the owner" panel.
 // Loaded as a module on every page; it does nothing unless the host is a sandbox host.
 // Every server-derived string goes in with textContent / createTextNode, never innerHTML.
-import { NO_QUOTE_HINT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint } from "./text.js";
+import { NETWORK_LINE, NO_QUOTE_HINT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint } from "./text.js";
 
 const FAUCET = "https://faucet.circle.com";
 const EXPLORER = "https://explorer.testnet.arc.io";
@@ -136,7 +136,7 @@ function orderPage(token) {
       h("p", {}, h("strong", { text: "Send exactly the amount shown, using the copy button. A different amount isn't matched to your order; if that happens, paste the transaction hash under 'Paid, but it isn't showing'." })),
       h("p", { class: "sbx-faucet" }, h("span", { class: "sbx-faucet-text" })),
       h("p", { class: "sbx-gas", hidden: true, text: PAY_GAS_NOTE }),
-      h("p", { class: "sbx-network", text: "Add the network: RPC https://rpc.testnet.arc.network, chain id 5042002, symbol USDC." }),
+      h("p", { class: "sbx-network", text: NETWORK_LINE }),
       h("p", { class: "sbx-explorer", hidden: true }));
   }
   function syncExplorerLink(helper) {

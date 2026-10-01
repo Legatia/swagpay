@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE } from "../../public/sandbox/text.js";
+import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE } from "../../public/sandbox/text.js";
 
 describe("isSandboxHost", () => {
   it("matches sandbox hosts and local test mode only", () => {
@@ -172,5 +172,12 @@ describe("pay helper token", () => {
   });
   it("explains the USDC gas for EURC payers", () => {
     expect(PAY_GAS_NOTE).toBe("Gas on Arc is paid in USDC, so get a little USDC from the faucet too.");
+  });
+});
+
+describe("network line", () => {
+  it("gives the public testnet RPC, chain id, native currency and explorer", () => {
+    expect(NETWORK_LINE).toBe("Add the network: RPC https://rpc.testnet.arc.io, chain id 5042002, native currency USDC (18 decimals), explorer https://explorer.testnet.arc.io.");
+    expect(NETWORK_LINE).not.toContain("arc.network");
   });
 });

@@ -101,3 +101,5 @@ export function payFaucetText(token) {
 }
 
 export const PAY_GAS_NOTE = "Gas on Arc is paid in USDC, so get a little USDC from the faucet too.";
+
+export const NETWORK_LINE = "Add the network: RPC https://rpc.testnet.arc.io, chain id 5042002, native currency USDC (18 decimals), explorer https://explorer.testnet.arc.io.";
