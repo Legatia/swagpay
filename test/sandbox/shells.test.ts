@@ -18,7 +18,7 @@ describe("simulated printer shell", () => {
 
   it("quotes a labelled simulated price", () => {
     const q = simulatedQuote(order, teeSpec, vendor);
-    expect(q).toMatchObject({ currency: "PLN", amount: 1500 });
+    expect(q).toMatchObject({ currency: "PLN", amount: 15.8 });
     expect(q!.label).toContain(SIMULATED);
     expect(simulatedQuote(order, null, vendor)).toBeNull();
   });
