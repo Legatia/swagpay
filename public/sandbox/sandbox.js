@@ -1,7 +1,7 @@
 // Testnet sandbox UI: banner, testnet pay helper, and the judge's "You are the owner" panel.
 // Loaded as a module on every page; it does nothing unless the host is a sandbox host.
 // Every server-derived string goes in with textContent / createTextNode, never innerHTML.
-import { actionOutcome, actionsFor, isSandboxHost, judgeText, money } from "./text.js";
+import { NO_QUOTE_HINT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money } from "./text.js";
 
 const FAUCET = "https://faucet.circle.com";
 const EXPLORER = "https://explorer.testnet.arc.io";
@@ -232,13 +232,17 @@ function orderPage(token) {
       if (q && Number.isFinite(Number(q.amount))) {
         amount.value = Number(q.amount).toFixed(2);
         if (CURRENCIES.includes(q.currency)) currency.value = q.currency;
-        quoteLabel.textContent = judgeText(q.label) || "Simulated quote.";
+        const label = judgeText(q.label) || "Simulated quote.";
+        quoteLabel.textContent = label.charAt(0).toUpperCase() + label.slice(1);
       } else {
-        quoteLabel.textContent = s ? "No simulated quote for this printer: enter your own." : "";
+        // No quote: don't keep the previous printer's amount next to "enter your own".
+        amount.value = "";
+        currency.value = "PLN";
+        quoteLabel.textContent = NO_QUOTE_HINT;
       }
     };
     vendor.addEventListener("change", prefill);
-    if (suggestions.length) prefill(); else currency.value = "PLN";
+    prefill();
 
     const form = h("form", { novalidate: true },
       suggestions.length ? h("label", {}, "Printer", vendor) : null,
@@ -253,6 +257,11 @@ function orderPage(token) {
       const value = Number(amount.value);
       if (!amount.value.trim() || !Number.isFinite(value) || value <= 0 || Math.abs(value * 100 - Math.round(value * 100)) > 1e-6) {
         showResult(false, "Enter a positive amount with at most two decimals.");
+        return;
+      }
+      const ceiling = costCeiling(currency.value);
+      if (ceiling === null || value > ceiling) {
+        showResult(false, costCeilingMessage(currency.value));
         return;
       }
       const body = { amount: value, currency: currency.value };

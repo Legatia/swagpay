@@ -51,3 +51,18 @@ export function money(cents, currency) {
   const v = (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return `${v} ${currency}`;
 }
+
+// The most a judge may enter as the printer cost, per currency: the simulated printer's cap of about 4 USD (src/sandbox/printer.ts).
+// A bigger cost prices the order beyond the 10 USDC testnet faucet.
+const COST_CEILING = { PLN: 15.8, EUR: 3.7, GBP: 3.13, USD: 4, INR: 343.48 };
+
+export function costCeiling(currency) {
+  return Object.hasOwn(COST_CEILING, currency) ? COST_CEILING[currency] : null;
+}
+
+export function costCeilingMessage(currency) {
+  const max = costCeiling(currency);
+  return `In the sandbox the printer cost is at most ${max === null ? "a few" : max.toFixed(2)} ${currency} (about $4), so the order fits the 10 USDC faucet.`;
+}
+
+export const NO_QUOTE_HINT = "No simulated quote for this delivery place (printer suggestions cover Warsaw, Lisbon, London and Mumbai). Enter a small cost, at most 15.80 PLN.";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionOutcome, actionsFor, isSandboxHost, judgeText, money } from "../../public/sandbox/text.js";
+import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money } from "../../public/sandbox/text.js";
 
 describe("isSandboxHost", () => {
   it("matches sandbox hosts and local test mode only", () => {
@@ -78,5 +78,22 @@ describe("actionOutcome", () => {
 describe("money", () => {
   it("formats cents", () => {
     expect(money(123456, "EUR")).toBe("1,234.56 EUR");
+  });
+});
+
+describe("costCeiling", () => {
+  it("matches the printer cap of about 4 USD in each currency", () => {
+    expect(costCeiling("PLN")).toBe(15.8);
+    expect(costCeiling("EUR")).toBe(3.7);
+    expect(costCeiling("GBP")).toBe(3.13);
+    expect(costCeiling("USD")).toBe(4);
+    expect(costCeiling("INR")).toBe(343.48);
+  });
+  it("is null for an unknown currency", () => {
+    expect(costCeiling("JPY")).toBeNull();
+  });
+  it("words the refusal with the ceiling and the faucet reason", () => {
+    expect(costCeilingMessage("PLN")).toBe("In the sandbox the printer cost is at most 15.80 PLN (about $4), so the order fits the 10 USDC faucet.");
+    expect(costCeilingMessage("USD")).toContain("at most 4.00 USD");
   });
 });
