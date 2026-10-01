@@ -51,6 +51,8 @@ export interface ToolContext extends DecisionLogger {
   printerCost(specKey: string): Promise<number | null>;
   escalateOnce(key: string, kind: "approval" | "agent" | "cost", summary: string, payload: unknown): Promise<{ id: number; status: "open" | "approved" | "rejected"; created: boolean }>;
   rates(currency: Currency): Promise<Rates | null>;
+  /** Quote currencies this deployment accepts; unset means any (production). The sandbox only takes USDC. */
+  allowedCurrencies?: Currency[];
   issueQuote(q: NewQuote, validUntil: Date): Promise<QuoteRow>;
   now(): Date;
 }
@@ -261,6 +263,7 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
 
     send_quote: logged(ctx, "send_quote", SendQuoteInput, async ({ currency, price, message }) => {
       const blocked = (detail: string): Logged => ({ verdict: "block", outcome: "blocked", detail, result: { content: `Not sent. ${detail}`, isError: true } });
+      if (ctx.allowedCurrencies && !ctx.allowedCurrencies.includes(currency)) return blocked("The sandbox only takes USDC: quote in USD.");
       const order = await ctx.orderSummary();
       if (order.status !== "draft" && order.status !== "quoted") return blocked("a quote was already accepted; changes now go to the owner with escalate");
       const spec = await ctx.getSpec();

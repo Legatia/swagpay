@@ -559,6 +559,18 @@ describe("send_quote", () => {
     expect(state.quotes[0]).toMatchObject({ currency: "EUR", plnPerUnit: 4.3, usdPerUnit: 1.075 });
   });
 
+  it("in the sandbox only USD quotes pass; production still quotes EUR", async () => {
+    const sb = await priced();
+    sb.ctx.allowedCurrencies = ["USD"];
+    const eur = await sb.h.send_quote({ ...ask, currency: "EUR", price: 350 });
+    expect(eur.isError).toBe(true);
+    expect(eur.content).toBe("Not sent. The sandbox only takes USDC: quote in USD.");
+    expect(sb.state.quotes).toHaveLength(0);
+    expect((await sb.h.send_quote(ask)).content).toContain("Quote #1 sent: 380.00 USD");
+    const prod = await priced();
+    expect((await prod.h.send_quote({ ...ask, currency: "EUR", price: 350 })).content).toContain("350.00 EUR");
+  });
+
   it("blocks a quote after the deadline", async () => {
     const { h, state } = await priced();
     state.deliverBy = new Date("2099-09-30T10:00:00Z");

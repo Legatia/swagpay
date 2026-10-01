@@ -448,6 +448,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
           const row = this.sql<{ cost_grosze: number }>`SELECT cost_grosze FROM printer_costs WHERE spec_key = ${key}`[0];
           return row ? row.cost_grosze / 100 : null;
         },
+        allowedCurrencies: isSandbox(this.env) ? ["USD"] : undefined,
         rates: async (currency) => {
           const now = new Date();
           const cached = await ratesFor(this.env.DB, currency, now);
