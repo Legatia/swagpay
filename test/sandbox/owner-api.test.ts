@@ -7,6 +7,7 @@ import { createSupplierPayment, latestCashout, queueCashout, recordCashoutFailed
 import { createEscalation, getEscalation } from "../../src/escalations";
 import type { SandboxOwnerState } from "../../src/sandbox/owner-api";
 import { saveOrderSpec } from "../../src/db";
+import { createPaymentRequest, recordTransfer } from "../../src/payments";
 import { createObligation, queuePayout, recordPayoutResult } from "../../src/treasury";
 import { completeSpec, insertQuote, intakeFor, newOrderRow } from "../fixtures";
 
@@ -260,5 +261,38 @@ describe("sandbox owner panel API", () => {
     expect(w[0]).toMatchObject({ name: "Warsaw Print", city: "Warsaw" });
     const gdansk = await openCost("ul. Dluga 1, 80-001 Gdansk");
     expect((await state(gdansk.token)).cost!.suggestions.map((x) => x.name)).toEqual(["Lodz Partner", "Warsaw Print"]);
+  });
+
+  describe("tx hashes on the order API", () => {
+    const hash = (n: number) => `0x${n.toString(16).padStart(64, "0")}`;
+    async function paidOrder() {
+      const { order, token } = await newOrderRow();
+      const agent = await getAgentByName(env.OrderAgent, order.instance);
+      await agent.init(order.id, intakeFor());
+      const quoteId = await insertQuote(env.DB, order.id);
+      const req = await createPaymentRequest(env.DB, { orderId: order.id, quoteId, stage: "deposit", token: "USDC", cents: 25750, dueBy: new Date(Date.now() + 48 * 3_600_000) });
+      // Two partial transfers credited to the request (later block first), one unrelated transfer.
+      const from = "0x2222222222222222222222222222222222222222";
+      await recordTransfer(env.DB, { txHash: hash(0xb2), logIndex: 0, blockNumber: 200, token: "USDC", from, amountUnits: 1 });
+      await recordTransfer(env.DB, { txHash: hash(0xb1), logIndex: 0, blockNumber: 100, token: "USDC", from, amountUnits: req.amount_units - 1 });
+      await env.DB.prepare("UPDATE transfers SET request_id = ? WHERE tx_hash IN (?, ?)").bind(req.id, hash(0xb2), hash(0xb1)).run();
+      await recordTransfer(env.DB, { txHash: hash(0xb3), logIndex: 0, blockNumber: 150, token: "USDC", from, amountUnits: 5 });
+      return { token };
+    }
+    const order = async (token: string, e: Env) => (await handleApi(new Request(`${base}/api/o/${token}`), e)).json<{ payments: Array<Record<string, unknown>> }>();
+
+    it("lists each paid request's credited hashes by block in the sandbox", async () => {
+      const { token } = await paidOrder();
+      const view = await order(token, sandbox);
+      expect(view.payments).toHaveLength(1);
+      expect(view.payments[0].txHashes).toEqual([hash(0xb1), hash(0xb2)]);
+    });
+
+    it("adds no txHashes key in production", async () => {
+      const { token } = await paidOrder();
+      const view = await order(token, env);
+      expect(view.payments).toHaveLength(1);
+      expect("txHashes" in view.payments[0]).toBe(false);
+    });
   });
 });

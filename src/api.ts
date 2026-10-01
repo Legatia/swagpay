@@ -16,6 +16,7 @@ import { loadPolicy, quoteStillValid } from "./policy";
 import { CREATE_KEY, completeCreateKey, intakeHash, lookupCreateKey, releaseCreateKey, reserveCreateKey, type KeyLookup } from "./order-create-keys";
 import { acceptQuoteForOrder, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
 import { markJob } from "./vendors";
+import { isSandbox } from "./sandbox/config";
 import { handleSandboxOwner } from "./sandbox/owner-api";
 import { handleSandboxBank } from "./sandbox/bank";
 
@@ -79,6 +80,17 @@ function publicPayment(p: PaymentRequestRow) {
     id: p.id, stage: p.stage, token: p.token, amount: formatUnits(p.amount_units), paid: formatUnits(p.paid_units),
     due: formatUnits(Math.max(0, p.amount_units - p.paid_units)), status: p.status,
   };
+}
+
+/** Sandbox only: the hashes of the transfers credited to each request, by block, so the page can link them. */
+async function creditedTxHashes(db: D1Database, requestIds: number[]): Promise<Map<number, string[]>> {
+  const byRequest = new Map<number, string[]>(requestIds.map((id) => [id, []]));
+  if (!requestIds.length) return byRequest;
+  const rows = (await db
+    .prepare(`SELECT request_id, tx_hash FROM transfers WHERE request_id IN (${requestIds.map(() => "?").join(",")}) ORDER BY block_number, log_index`)
+    .bind(...requestIds).all<{ request_id: number; tx_hash: string }>()).results;
+  for (const r of rows) byRequest.get(r.request_id)?.push(r.tx_hash);
+  return byRequest;
 }
 
 function payTo(env: Env) {
@@ -174,7 +186,9 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
 
   if (!sub && request.method === "GET") {
     const [view, quote, payments] = await Promise.all([agent.getView(), latestQuote(env.DB, order.id), listPaymentRequests(env.DB, order.id)]);
-    return json(200, { order: publicOrder(order), view, quote: publicQuote(quote), payments: payments.map(publicPayment), payTo: payTo(env) }, NO_STORE);
+    const hashes = isSandbox(env) ? await creditedTxHashes(env.DB, payments.map((p) => p.id)) : null;
+    const shown = payments.map((p) => (hashes ? { ...publicPayment(p), txHashes: hashes.get(p.id) ?? [] } : publicPayment(p)));
+    return json(200, { order: publicOrder(order), view, quote: publicQuote(quote), payments: shown, payTo: payTo(env) }, NO_STORE);
   }
 
   if (sub === "/messages" && request.method === "POST") {
