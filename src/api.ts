@@ -17,6 +17,7 @@ import { CREATE_KEY, completeCreateKey, intakeHash, lookupCreateKey, releaseCrea
 import { acceptQuoteForOrder, expireQuote, getQuote, latestQuote, reopenQuote, supersedeQuote, type QuoteRow } from "./quotes";
 import { markJob } from "./vendors";
 import { handleSandboxOwner } from "./sandbox/owner-api";
+import { handleSandboxBank } from "./sandbox/bank";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -160,6 +161,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     return json(201, { token, url: `/o/${token}` }, NO_STORE);
   }
 
+  if (path === "/api/sandbox/bank" && request.method === "GET") return handleSandboxBank(request, env);
   const so = /^\/api\/o\/([A-Za-z0-9_-]{43})\/sandbox\/owner(?:\/([a-z]{1,20}))?$/.exec(path);
   if (so) return handleSandboxOwner(request, env, so[1], so[2] ?? null);
 
