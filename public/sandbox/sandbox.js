@@ -109,24 +109,31 @@ function orderPage(token) {
   let paidFormOpen = false;
   let lastState = null;
   let paymentId = null;
+  let actionSeq = 0; // counts actions started, so a poll that began before one is dropped
+  let timer = null;
 
   /* Pay helper and panel placement: order.js owns these pages and re-renders them, so look again after changes. */
   function ensure() {
     const payBox = document.getElementById("pay-box");
     if (payBox) {
+      // Only while a payment is due (#pay-due visible), and right under the "Payment" heading.
+      const due = document.getElementById("pay-due");
       let helper = payBox.querySelector(":scope > .sbx-pay");
-      if (!helper) {
-        helper = buildPayHelper();
-        payBox.prepend(helper);
+      if (!due || due.hidden) {
+        helper?.remove();
+      } else {
+        if (!helper) helper = buildPayHelper();
+        const heading = payBox.querySelector(":scope > h2");
+        if (heading ? heading.nextElementSibling !== helper : payBox.firstElementChild !== helper) (heading ? heading.after(helper) : payBox.prepend(helper));
+        syncExplorerLink(helper);
       }
-      syncExplorerLink(helper);
     }
     const statusBox = document.getElementById("status-box");
     if (ready && !stopped && statusBox && statusBox.nextElementSibling !== panel) statusBox.after(panel);
   }
   function buildPayHelper() {
     return h("div", { class: "sbx-pay" },
-      h("p", {}, h("strong", { text: "Send exactly the amount shown, using the copy button. A different amount under 1 USDC can't be matched to your order and is ignored." })),
+      h("p", {}, h("strong", { text: "Send exactly the amount shown, using the copy button. A different amount isn't matched to your order; if that happens, paste the transaction hash under 'Paid, but it isn't showing'." })),
       h("p", { class: "sbx-faucet" }, h("span", { class: "sbx-faucet-text" })),
       h("p", { class: "sbx-gas", hidden: true, text: PAY_GAS_NOTE }),
       h("p", { class: "sbx-network", text: "Add the network: RPC https://rpc.testnet.arc.network, chain id 5042002, symbol USDC." }),
@@ -343,7 +350,8 @@ function orderPage(token) {
     const next = p.nextStep ? `${p.nextStep}${when ? ` at ${when}` : ""}` : "none";
     node.append(h("h3", { text: "Printer (simulated)", tabindex: "-1" }),
       h("p", { text: `Printer: last step ${p.lastStep ?? "none yet"}, next ${next}.` }),
-      h("div", { class: "sbx-buttons" }, button("Skip ahead", () => act("skip", {}), true, "printer-skip")));
+      // Nothing is left to skip after the last step; a stalled step has no next step either, and Skip is what recovers it.
+      p.lastStep === "shipped" ? null : h("div", { class: "sbx-buttons" }, button("Skip ahead", () => act("skip", {}), true, "printer-skip")));
   }
   function formatTime(iso) {
     const d = new Date(iso);
@@ -357,7 +365,7 @@ function orderPage(token) {
   async function fetchState() {
     try {
       const res = await fetch(url, { cache: "no-store", headers: { accept: "application/json" } });
-      if (res.status === 404) { stopped = true; panel.remove(); return null; }
+      if (res.status === 404) { stopped = true; clearInterval(timer); panel.remove(); return null; }
       return res.ok ? await res.json() : null;
     } catch {
       return null; // offline or a bad body: keep what is showing and try again on the next poll
@@ -367,9 +375,10 @@ function orderPage(token) {
   async function load() {
     if (loading || inflight || stopped) return;
     loading = true;
+    const seq = actionSeq;
     try {
       const state = await fetchState();
-      if (state && !inflight) render(state);
+      if (state && !inflight && seq === actionSeq) render(state);
     } finally { loading = false; }
   }
 
@@ -377,6 +386,7 @@ function orderPage(token) {
   async function act(action, body) {
     if (inflight) return;
     inflight = true;
+    actionSeq += 1;
     applyBusy();
     try {
       let status = 0;
@@ -401,7 +411,7 @@ function orderPage(token) {
   }
 
   load();
-  setInterval(() => { if (document.visibilityState === "visible") load(); }, POLL_MS);
+  timer = setInterval(() => { if (document.visibilityState === "visible") load(); }, POLL_MS);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") load(); });
 }
 
