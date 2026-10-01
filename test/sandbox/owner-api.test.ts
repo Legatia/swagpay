@@ -163,7 +163,7 @@ describe("sandbox owner panel API", () => {
     expect(s.pending).toEqual([]);
     expect(s.cost?.escalationId).toBe(cost.id);
     expect(s.cost!.suggestions).toHaveLength(1);
-    expect(s.cost!.suggestions[0]).toMatchObject({ name: "Warsaw Print", city: "Warsaw", quote: { currency: "PLN", amount: 14_000 } });
+    expect(s.cost!.suggestions[0]).toMatchObject({ name: "Warsaw Print", city: "Warsaw", quote: { currency: "PLN", amount: 15.8 } }); // 560 units hit the faucet cap
     expect(s.cost!.suggestions[0].quote!.label).toMatch(/simulated/);
     expect(JSON.stringify(s)).not.toContain("secret@printer.example");
 
