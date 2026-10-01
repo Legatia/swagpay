@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE } from "../../public/sandbox/text.js";
+import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE, PAY_EXACT_TEXT } from "../../public/sandbox/text.js";
 
 describe("isSandboxHost", () => {
   it("matches sandbox hosts and local test mode only", () => {
@@ -179,5 +179,12 @@ describe("network line", () => {
   it("gives the public testnet RPC, chain id, native currency and explorer", () => {
     expect(NETWORK_LINE).toBe("Add the network: RPC https://rpc.testnet.arc.io, chain id 5042002, native currency USDC (18 decimals), explorer https://explorer.testnet.arc.io.");
     expect(NETWORK_LINE).not.toContain("arc.network");
+  });
+});
+
+describe("wrong-amount copy", () => {
+  it("points a wrong-amount payer to the transaction hash form on the page", () => {
+    expect(PAY_EXACT_TEXT).toBe("Send exactly the amount shown, using the copy button. If you sent a different amount, paste your transaction hash under 'Paid, but it isn't showing' below and it will be matched.");
+    expect(PAY_EXACT_TEXT).not.toMatch(/ignored|under 1 USDC/);
   });
 });

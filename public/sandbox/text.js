@@ -103,3 +103,6 @@ export function payFaucetText(token) {
 export const PAY_GAS_NOTE = "Gas on Arc is paid in USDC, so get a little USDC from the faucet too.";
 
 export const NETWORK_LINE = "Add the network: RPC https://rpc.testnet.arc.io, chain id 5042002, native currency USDC (18 decimals), explorer https://explorer.testnet.arc.io.";
+
+// The order page's own claim form (details#claim-details) matches a payment by transaction hash; its summary reads "Paid, but it isn't showing after a few minutes?".
+export const PAY_EXACT_TEXT = "Send exactly the amount shown, using the copy button. If you sent a different amount, paste your transaction hash under 'Paid, but it isn't showing' below and it will be matched.";

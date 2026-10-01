@@ -10,9 +10,9 @@ html.sbx-on .side { top: calc(var(--sbx-h) + 16px); }
 .sbx-banner-text strong { font-weight: 700; }
 .sbx-tip { font-size: 0.75rem; }
 .sbx-banner-links { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
-.sbx-banner a, .sbx-banner button.sbx-linkish { color: #1a4f9e; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
-.sbx-banner button.sbx-linkish { background: none; border: 0; padding: 0; margin: 0; font: inherit; font-weight: 600; cursor: pointer; border-radius: 2px; }
-.sbx-banner a:focus-visible, .sbx-banner button.sbx-linkish:focus-visible { outline: 2px solid #171a38; outline-offset: 2px; }
+.sbx-banner a, .sbx-banner button.sbx-linkish, .sbx-pay button.sbx-linkish { color: #1a4f9e; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.sbx-banner button.sbx-linkish, .sbx-pay button.sbx-linkish { background: none; border: 0; padding: 0; margin: 0; font: inherit; font-weight: 600; cursor: pointer; border-radius: 2px; }
+.sbx-banner a:focus-visible, .sbx-banner button.sbx-linkish:focus-visible, .sbx-pay button.sbx-linkish:focus-visible { outline: 2px solid #171a38; outline-offset: 2px; }
 @media (max-width: 480px) { .sbx-banner { padding-left: 12px; padding-right: 12px; font-size: 0.75rem; gap: 0 12px; } .sbx-tip { font-size: 0.6875rem; } }
 
 /* Pay helper, at the top of #pay-box. */

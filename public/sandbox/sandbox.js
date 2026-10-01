@@ -133,13 +133,23 @@ function orderPage(token) {
   }
   function buildPayHelper() {
     return h("div", { class: "sbx-pay" },
-      h("p", {}, h("strong", { text: "Send exactly the amount shown, using the copy button. A different amount isn't matched to your order; if that happens, paste the transaction hash under 'Paid, but it isn't showing'." })),
+      h("p", {}, h("strong", { text: PAY_EXACT_TEXT })),
+      h("p", { class: "sbx-claim", hidden: true }, h("button", { type: "button", class: "sbx-linkish", text: "Open the transaction hash form", onclick: openClaimForm })),
       h("p", { class: "sbx-faucet" }, h("span", { class: "sbx-faucet-text" })),
       h("p", { class: "sbx-gas", hidden: true, text: PAY_GAS_NOTE }),
       h("p", { class: "sbx-network", text: NETWORK_LINE }),
       h("p", { class: "sbx-explorer", hidden: true }));
   }
+  // The claim form belongs to order.js: only open it and move focus to the hash field.
+  function openClaimForm() {
+    const details = document.getElementById("claim-details");
+    if (details) details.open = true;
+    const tx = document.getElementById("tx");
+    tx?.scrollIntoView({ block: "center" });
+    tx?.focus();
+  }
   function syncExplorerLink(helper) {
+    helper.querySelector(".sbx-claim").hidden = !(document.getElementById("claim-details") && document.getElementById("tx"));
     // The token follows the order page's #pay-unit; the faucet link is built once.
     const token = payToken(document.getElementById("pay-unit")?.textContent);
     const faucetLine = helper.querySelector(".sbx-faucet");
