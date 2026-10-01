@@ -142,6 +142,12 @@ export async function suggestVendors(db: D1Database, city: string, methods: stri
   return rankVendors(db, vendors, methods, limit);
 }
 
+/** Partner and screened vendors in any city, ranked like suggestVendors. */
+export async function suggestAnyVendors(db: D1Database, methods: string[], limit = 3): Promise<Suggestion[]> {
+  const vendors = (await db.prepare("SELECT * FROM vendors WHERE status IN ('partner', 'screened')").all<VendorRow>()).results;
+  return rankVendors(db, vendors, methods, limit);
+}
+
 /** Screened or partner vendors outside `city`, ranked like suggestVendors, for large orders. */
 export async function suggestFarVendors(db: D1Database, city: string, methods: string[], limit = 2): Promise<Suggestion[]> {
   const vendors = (await db.prepare("SELECT * FROM vendors WHERE city != ? AND status IN ('partner', 'screened')").bind(city).all<VendorRow>()).results;

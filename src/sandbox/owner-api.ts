@@ -4,12 +4,13 @@ import { latestCashout, supplierPaymentForOrder } from "../back-office";
 import { cancelSupplierPayment, cashOut, decideAsOwner, markSupplierPaid, retryCashoutWithdrawal } from "../owner-actions";
 import { getOrderByToken, type OrderRow } from "../db";
 import type { EscalationRow } from "../escalations";
-import { suggestVendors, cityFromPlace } from "../vendors";
+import { suggestAnyVendors, suggestVendors, cityFromPlace } from "../vendors";
 import { giveCost, COST_CURRENCIES, type CostCurrency } from "../telegram-webhook";
 import type { OrderSpec } from "../order-spec";
 import { warsawDate } from "../time";
 import { getAgentByName } from "agents";
 import { isSandbox } from "./config";
+import { plnPer } from "../fx";
 import { simulatedQuote } from "./printer";
 
 export interface SandboxOwnerState {
@@ -17,7 +18,7 @@ export interface SandboxOwnerState {
   /** Open escalations that concern this order: its own, plus orderless treasury ones whose payload points at this order's
    *  obligation or cash-out. `why` is the summary (it already says which rule stopped for a human). */
   pending: Array<{ id: number; kind: string; why: string; actions: Array<"approve" | "reject"> }>;
-  /** The open cost request, with simulated quotes for the suggested printers (delivery city, screened/partner, up to 3). */
+  /** The open cost request, with simulated quotes for the suggested printers (delivery city, else anywhere; screened/partner, up to 3). */
   cost: { escalationId: number; suggestions: Array<{ vendorId: number; name: string; city: string; quote: { currency: string; amount: number; label: string } | null }> } | null;
   /** The printer payment the owner makes by hand, with the dashboard's state label and allowed actions. */
   payment: { id: number; currency: string; amountCents: number; label: string; actions: Array<"cashout" | "retry" | "paid" | "cancel"> } | null;
@@ -70,7 +71,8 @@ async function ownerState(env: Env, order: OrderRow): Promise<SandboxOwnerState>
     const spec = parseSpec(order);
     const city = cityFromPlace(order.delivery_place);
     const methods = [...new Set((spec?.items ?? []).map((i) => i.method).filter((m): m is string => !!m))];
-    const found = city ? await suggestVendors(env.DB, city, methods, 3) : [];
+    let found = city ? await suggestVendors(env.DB, city, methods, 3) : [];
+    if (!found.length) found = await suggestAnyVendors(env.DB, methods, 3); // unknown city or none there: the best printers anywhere
     cost = {
       escalationId: costRow.id,
       suggestions: found.map(({ vendor }) => ({ vendorId: vendor.id, name: vendor.name, city: vendor.city, quote: simulatedQuote(order, spec, vendor) })),
@@ -138,6 +140,10 @@ export async function handleSandboxOwner(request: Request, env: Env, token: stri
       if (vendorId !== undefined && vendorId !== null && !(typeof vendorId === "number" && Number.isInteger(vendorId) && vendorId > 0)) return bad("vendorId must be a printer number.");
       const open = await env.DB.prepare("SELECT id FROM escalations WHERE order_id = ? AND kind = 'cost' AND status = 'open' ORDER BY id DESC LIMIT 1").bind(order.id).first<{ id: number }>();
       if (!open) return bad("No open cost request.");
+      const maxUsd = Number((env as unknown as { SANDBOX_MAX_COST_USD?: string }).SANDBOX_MAX_COST_USD) || 5;
+      const [perUnit, perUsd] = await Promise.all([plnPer(env.DB, body.currency as string), plnPer(env.DB, "USD")]);
+      if (perUnit === null || perUsd === null) return bad(`No fresh NBP rate for ${perUnit === null ? body.currency : "USD"}; try again later.`);
+      if ((amount * perUnit) / perUsd > maxUsd) return bad(`The sandbox caps the printer cost at $${maxUsd} (testnet faucet).`);
       const message = await giveCost(env, open.id, amount, str(body.note, 500), { currency: body.currency as CostCurrency, vendorId: (vendorId as number | null | undefined) ?? undefined });
       const after = await env.DB.prepare("SELECT status FROM escalations WHERE id = ?").bind(open.id).first<{ status: string }>();
       return result({ ok: after?.status !== "open", message });

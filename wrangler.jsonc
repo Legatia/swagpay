@@ -54,6 +54,7 @@
       "durable_objects": { "bindings": [{ "name": "OrderAgent", "class_name": "OrderAgent" }, { "name": "TreasuryAgent", "class_name": "TreasuryAgent" }] },
       "vars": {
         "SANDBOX": "1",
+        "SANDBOX_MAX_COST_USD": "5",
         "MODEL_PROVIDER": "gemini",
         "GEMINI_MODEL": "gemini-3.8-flash",
         "MODEL": "claude-sonnet-5-5",

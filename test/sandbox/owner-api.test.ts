@@ -28,6 +28,21 @@ async function readyToCashOut() {
   return { order, token, sp, ob };
 }
 
+const seedRates = async () => {
+  const at = new Date().toISOString();
+  await env.DB.prepare("INSERT OR REPLACE INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('EUR', 4.3, '2099-09-30', ?), ('USD', 4, '2099-09-30', ?)").bind(at, at).run();
+};
+
+async function openCost(place?: string) {
+  const { order, token } = await newOrderRow();
+  if (place) await env.DB.prepare("UPDATE orders SET delivery_place = ? WHERE id = ?").bind(place, order.id).run();
+  await saveOrderSpec(env.DB, order.id, completeSpec);
+  const cost = await createEscalation(env.DB, { orderId: order.id, kind: "cost", summary: "Printer cost needed", payload: {} });
+  return { order, token, cost };
+}
+const addVendor = (name: string, city: string, status: string, ref: string) =>
+  env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, source_ref, created_at, updated_at) VALUES (?, ?, 'PL', '[\"screen\",\"diecut\"]', ?, ?, 'x', 'x')").bind(name, city, status, ref).run();
+
 describe("sandbox owner panel API", () => {
   it("answers 404 in production and for an unknown token", async () => {
     const { token } = await newOrderRow();
@@ -168,10 +183,11 @@ describe("sandbox owner panel API", () => {
     expect(JSON.stringify(s)).not.toContain("secret@printer.example");
 
     const vendorId = s.cost!.suggestions[0].vendorId;
-    const res = await post(token, "cost", { amount: 1000, currency: "PLN", vendorId, note: "ok" });
+    await seedRates();
+    const res = await post(token, "cost", { amount: 15, currency: "PLN", vendorId, note: "ok" });
     expect(res.status).toBe(200);
     const body = await res.json<{ ok: boolean; message: string }>();
-    expect(body.message).toMatch(new RegExp(`^#${cost.id}: 1000\\.00 PLN recorded for order ${order.id}`));
+    expect(body.message).toMatch(new RegExp(`^#${cost.id}: 15\\.00 PLN recorded for order ${order.id}`));
     expect((await getEscalation(env.DB, cost.id))?.status).toBe("approved");
     expect((await state(token)).cost).toBeNull();
   });
@@ -190,5 +206,59 @@ describe("sandbox owner panel API", () => {
     // An hour later the counter has emptied.
     await env.DB.prepare("UPDATE sandbox_owner_calls SET at = ? WHERE order_id = ?").bind(new Date(Date.now() - 3_700_000).toISOString(), a.order.id).run();
     expect((await post(a.token, "skip")).status).toBe(200);
+  });
+
+  it("cost: the server caps the printer cost in USD (default $5) using the NBP rate", async () => {
+    const { token } = await openCost();
+    await seedRates();
+    const over = await post(token, "cost", { amount: 30, currency: "PLN" });
+    expect(over.status).toBe(400);
+    expect(await over.json()).toEqual({ ok: false, message: "The sandbox caps the printer cost at $5 (testnet faucet)." });
+    const eurOver = await post(token, "cost", { amount: 5, currency: "EUR" }); // 21.5 PLN = $5.375
+    expect(eurOver.status).toBe(400);
+    const ok = await post(token, "cost", { amount: 15, currency: "PLN" }); // $3.75
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ ok: true });
+  });
+
+  it("cost: the ceiling comes from SANDBOX_MAX_COST_USD", async () => {
+    const { token } = await openCost();
+    await seedRates();
+    const res = await post(token, "cost", { amount: 15, currency: "PLN" }, { ...sandbox, SANDBOX_MAX_COST_USD: "3" } as unknown as Env);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ message: "The sandbox caps the printer cost at $3 (testnet faucet)." });
+  });
+
+  it("cost: a missing or stale rate is 400", async () => {
+    const { token } = await openCost();
+    await env.DB.prepare("DELETE FROM fx_rates").run();
+    const res = await post(token, "cost", { amount: 15, currency: "PLN" }); // PLN needs the USD rate
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, message: "No fresh NBP rate for USD; try again later." });
+    await env.DB.prepare("INSERT INTO fx_rates (code, pln_per_unit, effective_date, fetched_at) VALUES ('EUR', 4.3, '2099-09-30', '2000-01-01T00:00:00.000Z'), ('USD', 4, '2099-09-30', ?)").bind(new Date().toISOString()).run();
+    const eur = await post(token, "cost", { amount: 1, currency: "EUR" });
+    expect(eur.status).toBe(400);
+    expect(await eur.json()).toMatchObject({ message: "No fresh NBP rate for EUR; try again later." });
+  });
+
+  it("suggestions fall back to printers anywhere when the delivery city is unknown", async () => {
+    await env.DB.prepare("UPDATE vendors SET status = 'paused'").run();
+    const { token } = await openCost("Somewhere, Atlantis");
+    await addVendor("Warsaw Print", "Warsaw", "screened", "any-1");
+    await addVendor("Candidate Print", "Krakow", "candidate", "any-2");
+    const s = await state(token);
+    expect(s.cost!.suggestions.map((x) => x.name)).toEqual(["Warsaw Print"]);
+    expect(s.cost!.suggestions[0].quote).not.toBeNull();
+  });
+
+  it("suggestions put the delivery city's printers first and fall back when it has none", async () => {
+    await env.DB.prepare("UPDATE vendors SET status = 'paused'").run();
+    await addVendor("Lodz Partner", "Lodz", "partner", "any-3");
+    await addVendor("Warsaw Print", "Warsaw", "screened", "any-4");
+    const warsaw = await openCost("Kolektyw3, ul. Prosta 1, 00-838 Warsaw");
+    const w = (await state(warsaw.token)).cost!.suggestions;
+    expect(w[0]).toMatchObject({ name: "Warsaw Print", city: "Warsaw" });
+    const gdansk = await openCost("ul. Dluga 1, 80-001 Gdansk");
+    expect((await state(gdansk.token)).cost!.suggestions.map((x) => x.name)).toEqual(["Lodz Partner", "Warsaw Print"]);
   });
 });
