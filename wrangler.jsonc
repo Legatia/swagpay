@@ -48,7 +48,7 @@
       "routes": [{ "pattern": "sandbox.swagpay.me", "custom_domain": true }],
       "triggers": { "crons": ["* * * * *"] },
       "d1_databases": [
-        { "binding": "DB", "database_name": "swagpay-sandbox", "database_id": "SANDBOX_D1_ID", "migrations_dir": "migrations" }
+        { "binding": "DB", "database_name": "swagpay-sandbox", "database_id": "4935c634-672c-4dd0-8d6d-55cc0c549734", "migrations_dir": "migrations" }
       ],
       "r2_buckets": [{ "binding": "ARTWORK", "bucket_name": "swagpay-sandbox-artwork", "jurisdiction": "eu" }],
       "durable_objects": { "bindings": [{ "name": "OrderAgent", "class_name": "OrderAgent" }, { "name": "TreasuryAgent", "class_name": "TreasuryAgent" }] },
@@ -64,7 +64,7 @@
         "TURNSTILE_SITE_KEY": "0x4AAAAAAFJklR1Bu4zO6hP5",
         "ACCESS_TEAM_DOMAIN": "https://falling-shape-11d9.cloudflareaccess.com",
         "ACCESS_AUD": "83b69731a99ebd14d410fcf7f5a6670913a5be1a2f00f93516bab5ccc574f8eb",
-        "RECEIVING_ADDRESS": "",
+        "RECEIVING_ADDRESS": "0xe245d6AA90Db9b797eE3cBCCF566e187F71bEddB",
         "ARC_CHAIN_ID": "5042002",
         "USDC_ADDRESS": "0x3600000000000000000000000000000000000000",
         "EURC_ADDRESS": "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
@@ -75,7 +75,7 @@
         "CASHOUT_FX_BUFFER": "0.02",
         "KRAKEN_GBP_ENABLED": "0",
         "FAR_PRINTER_MIN_UNITS": "100",
-        "RESERVE_ADDRESS": "",
+        "RESERVE_ADDRESS": "0xC5E8c939bC43B93E9451DD5EDC63a2342539d5D0",
         "TREASURY_PER_TX_USDC": "500",
         "TREASURY_DAILY_USDC": "1500",
         "TREASURY_RESERVE_MIN_BPS": "1000",
