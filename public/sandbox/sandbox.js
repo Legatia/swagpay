@@ -1,7 +1,7 @@
 // Testnet sandbox UI: banner, testnet pay helper, and the judge's "You are the owner" panel.
 // Loaded as a module on every page; it does nothing unless the host is a sandbox host.
 // Every server-derived string goes in with textContent / createTextNode, never innerHTML.
-import { NETWORK_LINE, NO_QUOTE_HINT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint } from "./text.js";
+import { NETWORK_LINE, NO_QUOTE_HINT, PAY_EXACT_TEXT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint } from "./text.js";
 
 const FAUCET = "https://faucet.circle.com";
 const EXPLORER = "https://explorer.testnet.arc.io";
