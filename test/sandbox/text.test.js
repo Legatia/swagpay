@@ -25,12 +25,12 @@ describe("judgeText", () => {
   // Real strings from the backend (src/treasury-api.ts, src/owner-actions.ts, src/agent/treasury-tools.ts).
   it("rewrites a cash-out notice that ends in the admin link", () => {
     const s = "250.00 EUR withdrawn to your EUR account for order 4 (cash-out #2, ref KR-9). Pay the printer, then press Paid: https://app.swagpay.me/admin/orders/4";
-    expect(judgeText(s)).toBe("250.00 EUR withdrawn to your EUR account for order 4 (cash-out #2, ref KR-9). Pay the printer, then press Paid.");
+    expect(judgeText(s)).toBe("250.00 EUR withdrawn to your EUR account for order 4 (cash-out #2, ref KR-9). Pay the printer, then press Mark paid.");
   });
   it("rewrites the Kraken app and the failed cash-out wording", () => {
     const s = "Cash-out #3 for order 4 failed: timeout. Its USDC was sold: use Retry withdrawal, or withdraw in the Kraken app and press Paid: https://app.swagpay.me/admin/orders/4";
     const out = judgeText(s);
-    expect(out).toBe("Cash-out #3 for order 4 failed: timeout. Its USDC was sold: use Retry withdrawal, or withdraw in the mock bank and press Paid.");
+    expect(out).toBe("Cash-out #3 for order 4 failed: timeout. Its USDC was sold: use Retry withdrawal, or withdraw in the mock bank and press Mark paid.");
     expect(judgeText("The treasury hasn't sent this printer cost to Kraken yet.")).toBe("The treasury hasn't sent this printer cost to the mock bank yet.");
   });
   it("rewrites the spending-limit escalation without CLI instructions", () => {
@@ -54,6 +54,39 @@ describe("judgeText", () => {
       expect(o).toBe(o.trim());
     }
     expect(outs[0]).toBe("Approve here.");
+  });
+});
+
+// Real notices from the backend (src/watcher.ts, src/owner-actions.ts, src/telegram-webhook.ts) with the owner-only instructions.
+describe("judgeText: production instructions", () => {
+  it("rewrites the deposit notice that says to book the printer", () => {
+    expect(judgeText("Order 4: deposit paid (4.12 USDC, tx 0xabc). Book the printer: cost 15.80 PLN gross (quote #7). Printer cost obligation #3: 4.10 USDC to the payout account."))
+      .toBe("Order 4: deposit paid (4.12 USDC, tx 0xabc). Printer cost: 15.80 PLN gross (quote #7). Printer cost obligation #3: 4.10 USDC to the payout account.");
+  });
+  it("rewrites the late deposit notice", () => {
+    expect(judgeText("Order 4: deposit paid LATE (due 10:00 Warsaw time) (4.12 USDC, tx 0xabc). Check printing is still possible, then book the printer: cost 15.80 PLN gross (quote #7)."))
+      .toBe("Order 4: deposit paid LATE (due 10:00 Warsaw time) (4.12 USDC, tx 0xabc). Check printing is still possible, then pay the printer (simulated) and press Mark paid; cost 15.80 PLN gross (quote #7).");
+    expect(judgeText("Approve if printing is still possible: the treasury agent then moves the printer's money and you book the printer (cost 15.80 PLN gross (quote #7))."))
+      .toBe("Approve if printing is still possible: the treasury agent then moves the printer's money and you pay the printer (simulated) and press Mark paid (cost 15.80 PLN gross (quote #7)).");
+  });
+  it("drops the send-the-job instruction", () => {
+    expect(judgeText("Order 4: deposit paid 4.12 USDC. Printer #7 Tee Works (screened) is paid by the treasury: #2 (4.10 USDC) now. Send the job to the printer with the files from the order page."))
+      .toBe("Order 4: deposit paid 4.12 USDC. Printer #7 Tee Works (screened) is paid by the treasury: #2 (4.10 USDC) now.");
+  });
+  it("drops the /cost command and the v<#> hint", () => {
+    expect(judgeText("Order 4 is already accepted with printer #7; nothing was recorded. Send /cost without v<#> to record the cost only."))
+      .toBe("Order 4 is already accepted with printer #7; nothing was recorded.");
+    expect(judgeText("Cost 15.80 PLN recorded; printer #7 kept; add v<#> to change it.")).toBe("Cost 15.80 PLN recorded; printer #7 kept.");
+  });
+  it("says the mock bank sells and withdraws, and Mark paid", () => {
+    expect(judgeText("Cash-out queued: 3.70 EUR to your EUR account. The wallet runner sells and withdraws it."))
+      .toBe("Cash-out queued: 3.70 EUR to your EUR account. The mock bank sells and withdraws it.");
+    expect(judgeText("Order 4: deposit paid (4.12 USDC, tx 0xabc). The treasury agent can't move it (settled): pay from the wallet by hand."))
+      .toBe("Order 4: deposit paid (4.12 USDC, tx 0xabc). The treasury agent can't move it (settled): pay the printer yourself (simulated) and press Mark paid.");
+  });
+  it("never leaves production wording behind", () => {
+    const out = judgeText("Book the printer: cost 1.98 PLN gross (quote #1). Send the job to the printer with the files from the order page. Then press Paid: https://app.swagpay.me/admin/orders/4");
+    expect(out).not.toMatch(/book the printer|send the job|press paid|\/cost|v<#>|wallet runner|by hand/i);
   });
 });
 

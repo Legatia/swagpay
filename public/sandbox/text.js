@@ -18,6 +18,17 @@ export function judgeText(s) {
     .replace(new RegExp(`(?:\\s+(?:or\\s+)?(?:at|on|via|in))?\\s*:?\\s*${ADMIN_LINK}\\s*$`, "i"), ".")
     .replace(new RegExp(`\\s+or\\s+(?:at|on|via)\\s+${ADMIN_LINK}`, "gi"), "")
     .replace(new RegExp(`(?:\\s+(?:at|on|via))?\\s*:?\\s*${ADMIN_LINK}`, "gi"), "")
+    // Owner-only instructions: the judge books and pays the printer in the panel, not by email, Telegram or the wallet.
+    .replace(/\s*Send the job to the printer with the files from the order page\.?/gi, "")
+    .replace(/\s*Send \/cost without v<#>[^.]*\.?/gi, "")
+    .replace(/;\s*add v<#> to change it/gi, "")
+    .replace(/\bBook the printer: cost\b/g, "Printer cost:")
+    .replace(/\bBook the printer:/g, "Printer cost:")
+    .replace(/\bthen book the printer:/gi, "then pay the printer (simulated) and press Mark paid;")
+    .replace(/\byou book the printer\b/gi, "you pay the printer (simulated) and press Mark paid")
+    .replace(/\bpress Paid\b/g, "press Mark paid")
+    .replace(/\bThe wallet runner sells and withdraws it/g, "The mock bank sells and withdraws it")
+    .replace(/\bpay from the wallet by hand/gi, "pay the printer yourself (simulated) and press Mark paid")
     // The owner raises the wallet limit with the Circle CLI; judges just approve.
     .replace(/Raise the limit with `circle wallet limit` \(OTP\) and approve/gi, "Approve")
     .replace(/\b(in|on|via) Telegram\b/gi, "here")
