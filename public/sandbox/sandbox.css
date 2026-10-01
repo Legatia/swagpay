@@ -1,0 +1,56 @@
+/* Testnet sandbox UI: banner, pay helper, owner panel, "How it works" dialog. Loaded only on sandbox hosts. */
+:root { --sbx-h: 44px; }
+
+/* The banner is fixed, so the page makes room for it (the height is measured by sandbox.js when it wraps). */
+html.sbx-on { padding-top: var(--sbx-h); }
+html.sbx-on .side { top: calc(var(--sbx-h) + 16px); }
+
+.sbx-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 100; min-height: 44px; box-sizing: border-box; padding: 4px 16px; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2px 16px; background: #e2ecfa; color: #171a38; border-bottom: 1px solid #b9cdea; font-family: var(--font-body, "Figtree", system-ui, sans-serif); font-size: 0.8125rem; line-height: 1.25; }
+.sbx-banner-text { display: grid; gap: 1px; min-width: 0; text-align: center; }
+.sbx-banner-text strong { font-weight: 700; }
+.sbx-tip { font-size: 0.75rem; }
+.sbx-banner-links { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+.sbx-banner a, .sbx-banner button.sbx-linkish { color: #1a4f9e; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.sbx-banner button.sbx-linkish { background: none; border: 0; padding: 0; margin: 0; font: inherit; font-weight: 600; cursor: pointer; border-radius: 2px; }
+.sbx-banner a:focus-visible, .sbx-banner button.sbx-linkish:focus-visible { outline: 2px solid #171a38; outline-offset: 2px; }
+@media (max-width: 480px) { .sbx-banner { padding-left: 12px; padding-right: 12px; font-size: 0.75rem; gap: 0 12px; } .sbx-tip { font-size: 0.6875rem; } }
+
+/* Pay helper, at the top of #pay-box. */
+.sbx-pay { display: grid; gap: 8px; padding: 12px 14px; border-radius: 8px; background: var(--payment-bubble, #e2ecfa); color: var(--text, #171a38); font-size: 0.9rem; min-width: 0; overflow-wrap: anywhere; }
+.sbx-pay p { margin: 0; }
+.sbx-pay strong { font-weight: 700; }
+
+/* Owner panel, matching .sheet. */
+.sbx-owner { border-left: 4px solid var(--brand-usdc, #2466c4); gap: 16px; }
+.sbx-owner h2 { font-size: 1.4rem; }
+.sbx-owner .sbx-sub { margin: 0; color: var(--text-muted, #4a4f72); }
+.sbx-section { display: grid; gap: 10px; min-width: 0; padding-top: 14px; border-top: 1px solid var(--line, #d9dcea); }
+.sbx-section:empty { display: none; }
+.sbx-section h3 { margin: 0; font-family: var(--font-display, "Figtree", system-ui, sans-serif); font-size: 1.05rem; letter-spacing: -0.01em; }
+.sbx-section p { margin: 0; overflow-wrap: anywhere; }
+.sbx-owner form { display: grid; gap: 10px; min-width: 0; }
+.sbx-owner form label { font-size: 0.9rem; }
+.sbx-owner select { font: inherit; padding: 10px; border: 1px solid var(--line, #d9dcea); background: var(--page, #f5f6f9); color: var(--text, #171a38); border-radius: 8px; width: 100%; min-width: 0; }
+.sbx-owner select:focus-visible { outline: 2px solid var(--focus, #d7266f); outline-offset: 2px; }
+.sbx-amount-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 7.5rem); gap: 10px; }
+.sbx-quote-label { color: var(--text-muted, #4a4f72); font-size: 0.85rem; min-height: 1.2em; }
+.sbx-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.sbx-buttons button.sbx-secondary, .sbx-owner button.sbx-secondary { background: transparent; color: var(--text, #171a38); border: 1px solid var(--line, #d9dcea); }
+.sbx-item { display: grid; gap: 8px; }
+.sbx-item + .sbx-item { padding-top: 10px; border-top: 1px dashed var(--line, #d9dcea); }
+.sbx-ref { font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace); font-size: 0.85rem; overflow-wrap: anywhere; }
+.sbx-empty { color: var(--text-muted, #4a4f72); }
+.sbx-result { margin: 0; min-height: 1.5em; font-weight: 600; overflow-wrap: anywhere; }
+.sbx-result:empty { display: none; }
+.sbx-result.ok { color: var(--success, #1f7a4d); }
+.sbx-result.err { color: var(--error, #b91e5a); }
+.sbx-owner button:disabled { opacity: 0.6; cursor: default; }
+
+/* "How it works" dialog. */
+.sbx-dialog { max-width: min(520px, calc(100vw - 32px)); width: 100%; box-sizing: border-box; padding: 20px; border: 1px solid var(--line, #d9dcea); border-radius: 12px; background: var(--surface, #fff); color: var(--text, #171a38); font-family: var(--font-body, "Figtree", system-ui, sans-serif); }
+.sbx-dialog::backdrop { background: rgba(23, 26, 56, 0.5); }
+.sbx-dialog h2 { margin: 0 0 10px; font-size: 1.3rem; font-family: var(--font-display, "Figtree", system-ui, sans-serif); letter-spacing: -0.02em; }
+.sbx-dialog ol, .sbx-dialog ul { margin: 0 0 12px; padding-left: 1.3rem; display: grid; gap: 6px; }
+.sbx-dialog form { margin: 0; }
+.sbx-dialog button { padding: 10px 16px; border: 0; border-radius: 8px; background: var(--action, #d7266f); color: var(--action-text, #fff); font: inherit; font-weight: 600; cursor: pointer; }
+.sbx-dialog button:focus-visible { outline: 2px solid var(--focus, #d7266f); outline-offset: 2px; }
