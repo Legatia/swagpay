@@ -45,6 +45,9 @@ describe("bankPass", () => {
   it("uses a labelled fallback rate when NBP rates are missing", async () => {
     const out = await bankPass(env, cashout({ fiat: "GBP", clientOrderId: "co-g" }), now);
     expect(out[0]).toMatchObject({ stage: "sold", soldUnits: "127.635000" }); // 1.27 × 1.005
+    const res = await handleSandboxBank(new Request("https://x/api/sandbox/bank"), { ...env, SANDBOX: "1" } as unknown as Env);
+    const body = await res.json<{ cashouts: { steps: { step: string; rateSource: string | null }[] }[] }>();
+    expect(body.cashouts[0].steps.map((s) => [s.step, s.rateSource])).toEqual([["sold", "fallback"], ["withdrawn", null]]);
   });
 });
 
@@ -63,9 +66,10 @@ describe("handleSandboxBank", () => {
     await bankPass(env, cashout(), now);
     await bankPass(env, cashout({ id: 10, clientOrderId: "co-10" }), new Date(now.getTime() + 60_000));
     const res = await handleSandboxBank(new Request("https://x/api/sandbox/bank"), { ...env, SANDBOX: "1" } as unknown as Env);
-    const body = await res.json<{ cashouts: { clientOrderId: string; steps: { step: string; accountMasked: string | null }[] }[] }>();
+    const body = await res.json<{ cashouts: { clientOrderId: string; steps: { step: string; accountMasked: string | null; rateSource: string | null }[] }[] }>();
     expect(body.cashouts.map((c) => c.clientOrderId)).toEqual(["co-10", "co-9"]);
     expect(body.cashouts[0].steps.map((s) => s.step)).toEqual(["sold", "withdrawn"]);
+    expect(body.cashouts[0].steps.map((s) => s.rateSource)).toEqual(["nbp", null]);
     expect(body.cashouts[0].steps[1].accountMasked).toBe("owner's EUR account ••••4242");
   });
 });

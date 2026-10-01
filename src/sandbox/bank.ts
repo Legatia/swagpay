@@ -10,7 +10,7 @@ export type BankResult =
   | { status: "failed"; error: string };
 
 const SPREAD = 0.005;
-// Used only when NBP rates are missing or stale (EUR/GBP in USD).
+// Used only when NBP rates are missing or stale (EUR/GBP in USD); the ledger shows it as a fallback rate (rateSource).
 const FALLBACK_USD_PER: Record<"EUR" | "GBP", number> = { EUR: 1.08, GBP: 1.27 };
 const ownerAccount = (fiat: "EUR" | "GBP") => `owner's ${fiat} account ••••4242`;
 
@@ -46,7 +46,7 @@ export async function bankPass(env: Env, c: BankCashout, now: Date = new Date())
   return out;
 }
 
-interface LedgerStep { step: string; fiatCents: number | null; usdcUnits: number | null; rate: number | null; ref: string | null; accountMasked: string | null; txHash: string | null; at: string }
+interface LedgerStep { step: string; fiatCents: number | null; usdcUnits: number | null; rate: number | null; ref: string | null; accountMasked: string | null; txHash: string | null; at: string; rateSource: "nbp" | "fallback" | null }
 
 /** GET /api/sandbox/bank: the mock bank's public ledger (sandbox only). */
 export async function handleSandboxBank(request: Request, env: Env): Promise<Response> {
@@ -58,7 +58,9 @@ export async function handleSandboxBank(request: Request, env: Env): Promise<Res
   const byId = new Map<string, { id: number; clientOrderId: string; fiat: string | null; amount: string | null; steps: LedgerStep[] }>();
   for (const r of rows) {
     const entry = byId.get(r.client_order_id) ?? { id: r.cashout_id, clientOrderId: r.client_order_id, fiat: r.fiat, amount: r.fiat_cents === null ? null : (r.fiat_cents / 100).toFixed(2), steps: [] };
-    entry.steps.push({ step: r.step, fiatCents: r.fiat_cents, usdcUnits: r.usdc_units, rate: r.rate, ref: r.ref, accountMasked: r.account_masked, txHash: r.tx_hash, at: r.created_at });
+    const fallback = r.step === "sold" && r.rate !== null && (r.fiat === "EUR" || r.fiat === "GBP") && Math.abs(r.rate - FALLBACK_USD_PER[r.fiat] * (1 + SPREAD)) < 1e-9;
+    const rateSource = r.step === "sold" ? (fallback ? "fallback" : "nbp") : null;
+    entry.steps.push({ step: r.step, fiatCents: r.fiat_cents, usdcUnits: r.usdc_units, rate: r.rate, ref: r.ref, accountMasked: r.account_masked, txHash: r.tx_hash, at: r.created_at, rateSource });
     byId.set(r.client_order_id, entry);
   }
   const order: Record<string, number> = { sold: 0, withdrawn: 1 };
