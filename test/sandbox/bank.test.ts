@@ -1,6 +1,9 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { createSupplierPayment } from "../../src/back-office";
+import { createObligation, queuePayout, recordPayoutResult } from "../../src/treasury";
 import { bankPass, handleSandboxBank, type BankCashout } from "../../src/sandbox/bank";
+import { insertQuote, newOrderRow } from "../fixtures";
 
 const now = new Date("2099-10-01T10:00:00Z");
 const cashout = (o: Partial<BankCashout> = {}): BankCashout => ({ id: 9, fiat: "EUR", amount: "100.00", clientOrderId: "co-9", status: "queued", createdAt: now.toISOString(), ...o });
@@ -48,6 +51,45 @@ describe("bankPass", () => {
     const res = await handleSandboxBank(new Request("https://x/api/sandbox/bank"), { ...env, SANDBOX: "1" } as unknown as Env);
     const body = await res.json<{ cashouts: { steps: { step: string; rateSource: string | null }[] }[] }>();
     expect(body.cashouts[0].steps.map((s) => [s.step, s.rateSource])).toEqual([["sold", "fallback"], ["withdrawn", null]]);
+  });
+});
+
+const HASH = `0x${"ab".repeat(32)}`;
+
+// The cash-out's order, its supplier payment and cash-out row, and (optionally) the treasury's payout to the mock bank.
+async function seededCashout(payout: { status: "sent" | "failed"; ref: string } | null) {
+  const { order } = await newOrderRow();
+  const quoteId = await insertQuote(env.DB, order.id);
+  const ob = await createObligation(env.DB, { orderId: order.id, kind: "printer_cost", token: "USDC", amountUnits: 4_000_000, destination: "0x3333333333333333333333333333333333333333", chain: "ARC", dueAt: new Date(), sourceRef: `printer_cost:quote:${quoteId}` });
+  if (payout) await recordPayoutResult(env.DB, (await queuePayout(env.DB, ob))!.id, payout);
+  const sp = await createSupplierPayment(env.DB, { orderId: order.id, vendorId: null, currency: "EUR", amountCents: 10_000 });
+  const res = await env.DB.prepare("INSERT INTO cashouts (supplier_payment_id, fiat, fiat_cents, client_order_id, status, created_at, updated_at) VALUES (?, 'EUR', 10000, ?, 'queued', 'x', 'x') RETURNING id").bind(sp.id, `co-seed-${order.id}`).first<{ id: number }>();
+  return cashout({ id: res!.id, clientOrderId: `co-seed-${order.id}` });
+}
+const soldHash = (clientOrderId: string) =>
+  env.DB.prepare("SELECT tx_hash FROM sandbox_bank_ledger WHERE client_order_id = ? AND step = 'sold'").bind(clientOrderId).first<{ tx_hash: string | null }>();
+
+describe("bankPass tx_hash", () => {
+  it("is null when the order has no sent payout", async () => {
+    await rates(4.27, 3.95);
+    const c = await seededCashout(null);
+    await bankPass(env, c, now);
+    expect((await soldHash(c.clientOrderId))!.tx_hash).toBeNull();
+  });
+  it("records the treasury's payout hash on the sold row", async () => {
+    await rates(4.27, 3.95);
+    const c = await seededCashout({ status: "sent", ref: HASH });
+    await bankPass(env, c, now);
+    expect((await soldHash(c.clientOrderId))!.tx_hash).toBe(HASH);
+    const res = await handleSandboxBank(new Request("https://x/api/sandbox/bank"), { ...env, SANDBOX: "1" } as unknown as Env);
+    const body = await res.json<{ cashouts: { clientOrderId: string; steps: { step: string; txHash: string | null }[] }[] }>();
+    expect(body.cashouts.find((x) => x.clientOrderId === c.clientOrderId)!.steps.map((s) => [s.step, s.txHash])).toEqual([["sold", HASH], ["withdrawn", null]]);
+  });
+  it("ignores a payout ref that is not a transaction hash", async () => {
+    await rates(4.27, 3.95);
+    const c = await seededCashout({ status: "sent", ref: "c" });
+    await bankPass(env, c, now);
+    expect((await soldHash(c.clientOrderId))!.tx_hash).toBeNull();
   });
 });
 

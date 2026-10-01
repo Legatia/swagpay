@@ -28,7 +28,7 @@ const cell = (label, cls, ...kids) => h("td", { "data-label": label, class: cls 
 function refCell(s) {
   const kids = [s.ref ? h("span", { text: String(s.ref) }) : "none"];
   if (typeof s.txHash === "string" && TX_HASH.test(s.txHash)) {
-    kids.push(" ", h("a", { href: `${EXPLORER}/tx/${s.txHash}`, target: "_blank", rel: "noopener noreferrer", text: "tx" }));
+    kids.push(" ", h("a", { href: `${EXPLORER}/tx/${s.txHash}`, target: "_blank", rel: "noopener noreferrer", text: "USDC received from the treasury (explorer)" }));
   }
   return cell("Reference", "ref", ...kids);
 }

@@ -12,6 +12,7 @@ export type BankResult =
 const SPREAD = 0.005;
 // Used only when NBP rates are missing or stale (EUR/GBP in USD); the ledger shows it as a fallback rate (rateSource).
 const FALLBACK_USD_PER: Record<"EUR" | "GBP", number> = { EUR: 1.08, GBP: 1.27 };
+const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 const ownerAccount = (fiat: "EUR" | "GBP") => `owner's ${fiat} account ••••4242`;
 
 async function usdPer(env: Env, fiat: "EUR" | "GBP", now: Date): Promise<number> {
@@ -34,8 +35,17 @@ export async function bankPass(env: Env, c: BankCashout, now: Date = new Date())
   if (c.status === "queued") {
     const rate = (await usdPer(env, c.fiat, now)) * (1 + SPREAD);
     const units = Math.ceil(Number(c.amount) * rate * 1_000_000 - 1e-6);
-    await env.DB.prepare("INSERT OR IGNORE INTO sandbox_bank_ledger (cashout_id, client_order_id, step, fiat, fiat_cents, usdc_units, rate, ref, created_at) VALUES (?, ?, 'sold', ?, ?, ?, ?, ?, ?)")
-      .bind(c.id, c.clientOrderId, c.fiat, fiatCents, units, rate, `SIM-SELL-${c.id}`, at).run();
+    // The treasury's on-chain USDC payout for this order's printer cost: the USDC the mock bank "received". Null when none is recorded.
+    const sent = await env.DB.prepare(
+      `SELECT p.result_ref AS hash FROM cashouts c
+         JOIN supplier_payments sp ON sp.id = c.supplier_payment_id
+         JOIN obligations o ON o.order_id = sp.order_id AND o.kind = 'printer_cost' AND o.vendor_id IS NULL
+         JOIN payouts p ON p.obligation_id = o.id AND p.status = 'sent'
+        WHERE c.id = ? ORDER BY p.id DESC LIMIT 1`,
+    ).bind(c.id).first<{ hash: string | null }>();
+    const txHash = sent?.hash && TX_HASH.test(sent.hash) ? sent.hash : null;
+    await env.DB.prepare("INSERT OR IGNORE INTO sandbox_bank_ledger (cashout_id, client_order_id, step, fiat, fiat_cents, usdc_units, rate, ref, tx_hash, created_at) VALUES (?, ?, 'sold', ?, ?, ?, ?, ?, ?, ?)")
+      .bind(c.id, c.clientOrderId, c.fiat, fiatCents, units, rate, `SIM-SELL-${c.id}`, txHash, at).run();
     const sold = await read("sold");
     out.push({ stage: "sold", orderRef: sold!.ref, soldUnits: (sold!.usdc_units! / 1_000_000).toFixed(6) });
   }
