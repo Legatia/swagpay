@@ -66,3 +66,16 @@ export function costCeilingMessage(currency) {
 }
 
 export const NO_QUOTE_HINT = "No simulated quote for this delivery place (printer suggestions cover Warsaw, Lisbon, London and Mumbai). Enter a small cost, at most 15.80 PLN.";
+
+// One line of next-step guidance for the printer payment, from the payment's label, its offered actions and the cash-out.
+export function paymentHint(payment, cashout) {
+  const label = String(payment?.label ?? "").toLowerCase();
+  const actions = Array.isArray(payment?.actions) ? payment.actions : [];
+  if (actions.includes("retry") || label.startsWith("withdrawal failed") || cashout?.status === "failed") return "Press Retry.";
+  if (actions.includes("cashout")) return "Next: press Cash out. The mock bank sells the treasury's USDC and withdraws it to your account in about a minute.";
+  if (label.startsWith("waiting for the treasury")) return "The treasury is sending the printer cost to the mock bank; Cash out appears in a minute or two.";
+  if (label.startsWith("cashing out")) return "The mock bank is selling and withdrawing.";
+  if (label.startsWith("ready to pay")) return "The money is in your account. Pay the printer (simulated) and press Mark paid: the simulated printer then takes the job.";
+  if (label.startsWith("the treasury won't move it")) return "Pay the printer yourself (simulated) and press Mark paid.";
+  return "";
+}

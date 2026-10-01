@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money } from "../../public/sandbox/text.js";
+import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint } from "../../public/sandbox/text.js";
 
 describe("isSandboxHost", () => {
   it("matches sandbox hosts and local test mode only", () => {
@@ -95,5 +95,31 @@ describe("costCeiling", () => {
   it("words the refusal with the ceiling and the faucet reason", () => {
     expect(costCeilingMessage("PLN")).toBe("In the sandbox the printer cost is at most 15.80 PLN (about $4), so the order fits the 10 USDC faucet.");
     expect(costCeilingMessage("USD")).toContain("at most 4.00 USD");
+  });
+});
+
+describe("paymentHint", () => {
+  const hint = (label, actions, cashout = null) => paymentHint({ label, actions }, cashout);
+  it("tells the judge to press Cash out when it is offered", () => {
+    expect(hint("ready to cash out", ["cashout", "paid"])).toBe("Next: press Cash out. The mock bank sells the treasury's USDC and withdraws it to your account in about a minute.");
+  });
+  it("explains the wait for the treasury", () => {
+    expect(hint("waiting for the treasury (open)", ["paid"])).toBe("The treasury is sending the printer cost to the mock bank; Cash out appears in a minute or two.");
+  });
+  it("explains a cash-out in progress", () => {
+    expect(hint("cashing out (queued)", ["paid"], { status: "queued" })).toBe("The mock bank is selling and withdrawing.");
+  });
+  it("tells the judge to pay the printer once the money is in", () => {
+    expect(hint("ready to pay", ["paid"])).toBe("The money is in your account. Pay the printer (simulated) and press Mark paid: the simulated printer then takes the job.");
+  });
+  it("points to Retry after a failed withdrawal", () => {
+    expect(hint("withdrawal failed", ["retry", "paid"], { status: "failed" })).toBe("Press Retry.");
+  });
+  it("covers a payment the treasury won't move", () => {
+    expect(hint("the treasury won't move it: pay from your own funds", ["paid"])).toBe("Pay the printer yourself (simulated) and press Mark paid.");
+  });
+  it("says nothing once paid or cancelled", () => {
+    expect(hint("paid (card)", [])).toBe("");
+    expect(hint("cancelled", [])).toBe("");
   });
 });

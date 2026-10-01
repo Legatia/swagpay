@@ -1,7 +1,7 @@
 // Testnet sandbox UI: banner, testnet pay helper, and the judge's "You are the owner" panel.
 // Loaded as a module on every page; it does nothing unless the host is a sandbox host.
 // Every server-derived string goes in with textContent / createTextNode, never innerHTML.
-import { NO_QUOTE_HINT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money } from "./text.js";
+import { NO_QUOTE_HINT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint } from "./text.js";
 
 const FAUCET = "https://faucet.circle.com";
 const EXPLORER = "https://explorer.testnet.arc.io";
@@ -62,7 +62,7 @@ function buildDialog() {
     h("ol", {},
       h("li", { text: "Design your swag with the agent and see a preview." }),
       h("li", { text: "Pay the deposit in testnet USDC on Arc." }),
-      h("li", { text: "You act as the owner: give the printer cost and approve things in the owner panel." }),
+      h("li", { text: "You act as the owner: give the printer cost, approve what the agents ask, press Cash out, then pay the printer (simulated) and press Mark paid." }),
       h("li", { text: "The printer is simulated: its steps move on by themselves, or press Skip ahead." }),
       h("li", { text: "Pay the balance, then confirm it was delivered." })),
     h("ul", {},
@@ -170,7 +170,7 @@ function orderPage(token) {
     setSection("cost", state.cost, buildCost);
     setSection("pending", pending.length ? pending : null, buildPending);
     if (state.payment && paymentId !== state.payment.id) { paymentId = state.payment.id; paidFormOpen = false; }
-    setSection("payment", state.payment ? { ...state.payment, paidFormOpen } : null, buildPayment);
+    setSection("payment", state.payment ? { ...state.payment, paidFormOpen, hint: paymentHint(state.payment, state.cashout) } : null, buildPayment);
     setSection("cashout", state.cashout, buildCashout);
     const p = state.printer;
     setSection("printer", p && (p.lastStep || p.nextStep || p.nextAt) ? p : null, buildPrinter);
@@ -290,6 +290,7 @@ function orderPage(token) {
     if (Number.isFinite(Number(payment.amountCents)) && payment.currency) {
       node.append(h("p", { text: `Amount: ${money(Number(payment.amountCents), String(payment.currency))}` }));
     }
+    if (payment.hint) node.append(h("p", { class: "sbx-hint", text: payment.hint }));
     const actions = (Array.isArray(payment.actions) ? payment.actions : []).filter((a) => PAYMENT_BUTTONS[a]);
     const buttons = h("div", { class: "sbx-buttons" });
     for (const a of actions) {
