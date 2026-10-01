@@ -1,10 +1,12 @@
 import { getAgentByName } from "agents";
 import { TREASURY_NAME } from "./agent/treasury-agent";
 import { createRpc } from "./arc";
+import { listUndelivered } from "./escalations";
 import { refreshRates } from "./fx";
 import { cleanupSandbox } from "./sandbox/cleanup";
 import { isSandbox } from "./sandbox/config";
 import { runSandboxRunner } from "./sandbox/runner";
+import { resend } from "./telegram-webhook";
 import { runWatcher } from "./watcher";
 
 /**
@@ -13,7 +15,7 @@ import { runWatcher } from "./watcher";
  */
 export const CRON = "* * * * *";
 
-export type Job = "watcher" | "fx" | "treasury" | "sandbox-runner" | "sandbox-cleanup";
+export type Job = "watcher" | "fx" | "treasury" | "sandbox-runner" | "sandbox-resend" | "sandbox-cleanup";
 
 /** The jobs due at this scheduled minute (UTC): the watcher every minute, FX rates at :17, the treasury review at 07:00. */
 export function jobsDue(at: Date, env?: Env): Job[] {
@@ -21,10 +23,25 @@ export function jobsDue(at: Date, env?: Env): Job[] {
   if (at.getUTCMinutes() === 17) jobs.push("fx");
   if (at.getUTCHours() === 7 && at.getUTCMinutes() === 0) jobs.push("treasury");
   if (env && isSandbox(env)) {
-    jobs.push("sandbox-runner");
+    jobs.push("sandbox-runner", "sandbox-resend");
     if (at.getUTCMinutes() === 37) jobs.push("sandbox-cleanup");
   }
   return jobs;
+}
+
+/** Sandbox: re-sends every decided escalation the agent has not heard (the owner's /resend path). Logs failures; never throws. */
+export async function resendDecisions(env: Env): Promise<void> {
+  try {
+    for (const e of await listUndelivered(env.DB)) {
+      try {
+        await resend(env, e.id);
+      } catch (err) {
+        console.error("sandbox resend failed", e.id, err);
+      }
+    }
+  } catch (err) {
+    console.error("sandbox resend failed", err);
+  }
 }
 
 async function runJob(job: Job, env: Env): Promise<void> {
@@ -35,6 +52,8 @@ async function runJob(job: Job, env: Env): Promise<void> {
     await refreshRates(env.DB);
   } else if (job === "sandbox-runner") {
     await runSandboxRunner(env);
+  } else if (job === "sandbox-resend") {
+    await resendDecisions(env);
   } else if (job === "sandbox-cleanup") {
     await cleanupSandbox(env);
   } else {
