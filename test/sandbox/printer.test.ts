@@ -12,7 +12,7 @@ describe("simulatedQuote", () => {
   it("floors a single tee so the order isn't dust", () => {
     const q = simulatedQuote(order, tees(1), vendor("PL"))!;
     expect(q.currency).toBe("PLN");
-    expect(q.amount).toBe(1.98); // $0.50 at 3.95 PLN/USD
+    expect(q.amount).toBe(2.96); // $0.75 at 3.95 PLN/USD
   });
   it("caps big orders so a full order fits the faucet", () => {
     expect(simulatedQuote(order, tees(500), vendor("PL"))!.amount).toBe(15.8); // $4.00
@@ -32,8 +32,8 @@ describe("simulatedQuote", () => {
   });
   it("prices stickers from the published 5x5 cm table", () => {
     const spec: OrderSpec = { items: [{ kind: "sticker", description: "logo", quantity: 500 }], artwork: [] };
-    // 96 + 60 = 156 PLN → 1.56 PLN = $0.39 → floored to $0.50
-    expect(simulatedQuote(order, spec, vendor("PL"))!.amount).toBe(1.98);
+    // 96 + 60 = 156 PLN → 1.56 PLN = $0.39 → floored to $0.75
+    expect(simulatedQuote(order, spec, vendor("PL"))!.amount).toBe(2.96);
   });
   it("is always labelled simulated and scaled", () => {
     const q = simulatedQuote(order, tees(10), vendor("PL"))!;

@@ -25,7 +25,7 @@ const OTHER_PLN = 150;
 // Approximate NBP mid rates (PLN per unit); the sandbox's quote is labelled approximate anyway.
 const PLN_PER: Record<"PLN" | "EUR" | "GBP" | "USD" | "INR", number> = { PLN: 1, EUR: 4.27, GBP: 5.05, USD: 3.95, INR: 0.046 };
 const SCALE = 0.01;
-const FLOOR_USD = 0.5;
+const FLOOR_USD = 0.75;
 const CAP_USD = 4;
 
 function currencyFor(vendor: VendorRow | null): keyof typeof PLN_PER {
