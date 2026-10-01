@@ -210,34 +210,48 @@ export class OrderAgent extends Agent<Env, OrderState> {
     await this.schedule(stepDelaySeconds("accepted"), "sandboxPrinterStep", { step: "accepted" });
   }
 
-  /** Schedule callback: one simulated printer step. Adds a labelled thread line (no model turn); `printed` runs the owner's /printed. */
+  /** Schedule callback: one simulated printer step. A step runs once: it is claimed (sandbox_last_step) before any await, so a skip
+   *  racing the scheduled callback, or a repeat, does nothing. A failure releases the claim and rethrows, so a retry or a skip can run it again. */
   async sandboxPrinterStep(payload: { step: PrinterStep }): Promise<void> {
     this.sandboxOnly();
     this.ensureTables();
     const orderId = this.orderId();
     const { step } = payload;
     if (!PRINTER_STEPS.includes(step)) throw new Error(`unknown printer step ${String(step)}`);
-    const order = await getOrderById(this.env.DB, orderId);
-    if (!order) return;
-    const job = await vendorJobFor(this.env.DB, orderId);
-    const vendor = job ? await getVendor(this.env.DB, job.vendor_id) : null;
-    this.addThread("system", stepMessage(step, order, vendor));
-    if (step === "printed") await markPrinted(this.env, orderId); // a no-op message when the order is not at deposit_paid
+    const previous = this.meta("sandbox_last_step");
+    if (PRINTER_STEPS.indexOf(step) <= PRINTER_STEPS.indexOf(previous as PrinterStep)) return;
     this.setMeta("sandbox_last_step", step);
-    const next = nextStep(step);
-    if (next) await this.schedule(stepDelaySeconds(next), "sandboxPrinterStep", { step: next });
+    try {
+      const order = await getOrderById(this.env.DB, orderId);
+      if (!order) return;
+      const job = await vendorJobFor(this.env.DB, orderId);
+      const vendor = job ? await getVendor(this.env.DB, job.vendor_id) : null;
+      if (step === "printed") await markPrinted(this.env, orderId); // a no-op message when the order is not at deposit_paid
+      this.addThread("system", stepMessage(step, order, vendor));
+      const next = nextStep(step);
+      if (next) await this.schedule(stepDelaySeconds(next), "sandboxPrinterStep", { step: next });
+    } catch (err) {
+      if (previous === null) this.sql`DELETE FROM meta WHERE key = 'sandbox_last_step'`;
+      else this.setMeta("sandbox_last_step", previous);
+      throw err;
+    }
   }
 
-  /** Sandbox: run the pending printer step now. */
-  async sandboxSkip(): Promise<string> {
+  /** Sandbox: run the pending printer step now; its schedule is cancelled only once the step has succeeded. */
+  async sandboxSkip(): Promise<{ ok: boolean; message: string }> {
     this.sandboxOnly();
     this.ensureTables();
     this.orderId();
     const pending = this.pendingPrinterStep();
-    if (!pending) return "Nothing to skip.";
+    if (!pending) return { ok: false, message: "Nothing to skip." };
+    try {
+      await this.sandboxPrinterStep({ step: pending.step });
+    } catch (err) {
+      console.error("sandbox skip failed", err);
+      return { ok: false, message: "Skipping failed; the step will run on its own shortly." };
+    }
     await this.cancelSchedule(pending.id);
-    await this.sandboxPrinterStep({ step: pending.step });
-    return `Skipped ahead: the printer's "${pending.step}" step ran now.`;
+    return { ok: true, message: `Skipped ahead: the printer's "${pending.step}" step ran now.` };
   }
 
   /** Sandbox: the simulated printer's progress, for the owner panel. */

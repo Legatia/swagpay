@@ -170,11 +170,9 @@ export async function handleSandboxOwner(request: Request, env: Env, token: stri
     }
     case "skip":
       try {
-        const message = await (await getAgentByName(env.OrderAgent, order.instance)).sandboxSkip();
-        return result({ ok: message !== "Nothing to skip.", message });
-      } catch (err) {
-        console.error("sandbox skip failed", err);
-        return result({ ok: false, message: "Nothing to skip." });
+        return result(await (await getAgentByName(env.OrderAgent, order.instance)).sandboxSkip());
+      } catch {
+        return result({ ok: false, message: "Nothing to skip." }); // an order the agent never saw
       }
     default:
       return bad("Unknown action.");

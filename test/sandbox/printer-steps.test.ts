@@ -70,14 +70,67 @@ describe("simulated printer steps", () => {
   it("sandboxSkip runs the pending step now and cancels its schedule", async () => {
     const { stub } = await orderAgent();
     await runInDurableObject(stub, async (agent: OrderAgent) => {
-      expect(await agent.sandboxSkip()).toBe("Nothing to skip.");
+      expect(await agent.sandboxSkip()).toEqual({ ok: false, message: "Nothing to skip." });
       await agent.sandboxStartPrinter();
       const before = schedules(agent)[0];
-      const message = await agent.sandboxSkip();
+      const { ok, message } = await agent.sandboxSkip();
+      expect(ok).toBe(true);
       expect(message).toContain("accepted");
       expect(agent.getSchedules({ id: before.id })).toHaveLength(0);
       expect(agent.sandboxPrinterState()).toMatchObject({ lastStep: "accepted", nextStep: "proof" });
       expect(thread(agent).some((t) => t.includes(SIMULATED))).toBe(true);
+    });
+  });
+
+  it("running the same step twice adds one thread line and one next schedule", async () => {
+    const { stub } = await orderAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.sandboxPrinterStep({ step: "accepted" });
+      await agent.sandboxPrinterStep({ step: "accepted" });
+      expect(thread(agent).filter((t) => t.includes("accepted the job"))).toHaveLength(1);
+      expect(schedules(agent)).toHaveLength(1);
+    });
+  });
+
+  /** An env whose D1 refuses the balance request insert, so markPrinted throws. */
+  const failingDb = {
+    ...sandbox,
+    DB: {
+      prepare: (q: string) => {
+        if (q.includes("INSERT INTO payment_requests")) throw new Error("D1 down");
+        return env.DB.prepare(q);
+      },
+      batch: (s: D1PreparedStatement[]) => env.DB.batch(s),
+    },
+  } as unknown as Env;
+
+  it("a failed step rolls its claim back and a later run succeeds", async () => {
+    const { order, stub } = await orderAgent({ paid: true });
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.sandboxPrinterStep({ step: "accepted" });
+      (agent as unknown as { env: Env }).env = failingDb;
+      await expect(agent.sandboxPrinterStep({ step: "printed" })).rejects.toThrow("D1 down");
+      expect(agent.sandboxPrinterState().lastStep).toBe("accepted");
+      expect(thread(agent).some((t) => t.includes("finished printing"))).toBe(false);
+      (agent as unknown as { env: Env }).env = sandbox;
+      await agent.sandboxPrinterStep({ step: "printed" });
+      expect(agent.sandboxPrinterState().lastStep).toBe("printed");
+      expect(thread(agent).filter((t) => t.includes("finished printing"))).toHaveLength(1);
+    });
+    expect((await getOrderById(env.DB, order.id))?.status).toBe("balance_pending");
+  });
+
+  it("a skip whose step fails keeps the schedule", async () => {
+    const { stub } = await orderAgent({ paid: true });
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.sandboxPrinterStep({ step: "proof" });
+      (agent as unknown as { env: Env }).env = failingDb;
+      const before = schedules(agent);
+      expect(before.map((s) => s.payload)).toEqual([{ step: "printed" }]);
+      expect(await agent.sandboxSkip()).toEqual({ ok: false, message: "Skipping failed; the step will run on its own shortly." });
+      expect(schedules(agent).map((s) => s.id)).toEqual(before.map((s) => s.id));
+      expect(agent.sandboxPrinterState()).toMatchObject({ lastStep: "proof", nextStep: "printed" });
+      (agent as unknown as { env: Env }).env = sandbox;
     });
   });
 
@@ -128,6 +181,15 @@ describe("watcher hook", () => {
     const { stub, req } = await deposit(9101);
     await runWatcher(sandbox, { rpc: rpc([log(req.amount_units, 9101)], 5042002), telegram: silent });
     await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent).map((s) => s.payload)).toEqual([{ step: "accepted" }]); });
+  });
+
+  it("a second watcher pass does not add a second schedule", async () => {
+    const { stub, req } = await deposit(9103);
+    const r = rpc([log(req.amount_units, 9103)], 5042002);
+    await runWatcher(sandbox, { rpc: r, telegram: silent });
+    await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('last_block', '4000')").run();
+    await runWatcher(sandbox, { rpc: r, telegram: silent });
+    await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent)).toHaveLength(1); });
   });
 
   it("does not in production", async () => {
