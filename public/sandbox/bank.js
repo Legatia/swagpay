@@ -4,6 +4,8 @@ import { isSandboxHost, money } from "./text.js";
 
 const EXPLORER = "https://explorer.testnet.arc.io";
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+// The mock bank charges no fee (bankPass reports feeCents 0), so the ledger states it as a fixed simulated fee.
+const FEE_CENTS = 0;
 const RATE_SOURCE = { nbp: "NBP rate", fallback: "fallback rate (NBP unavailable)" };
 
 function h(tag, props = {}, ...kids) {
@@ -50,7 +52,7 @@ function stepRow(c, s) {
   return h("tr", {},
     cell("Step", "step", s.step === "withdrawn" ? "Withdrawn" : String(s.step)),
     cell("Amount", "", amount),
-    cell("Details", "", s.accountMasked ? `To ${s.accountMasked}` : ""),
+    cell("Details", "", [s.accountMasked ? `To ${s.accountMasked}` : "", s.step === "withdrawn" ? `Fee: ${money(FEE_CENTS, c.fiat ?? "")} (simulated)` : ""].filter(Boolean).join(". ")),
     refCell(s),
     cell("Time", "", when(s.at)));
 }
@@ -62,8 +64,8 @@ function cashoutSheet(c) {
     ...["Step", "Amount", "Details", "Reference", "Time"].map((t) => h("th", { scope: "col", text: t }))));
   const body = h("tbody", {}, ...steps.map((s) => stepRow(c, s)));
   const sheet = h("article", { class: "sheet bank-cashout" },
-    h("h2", { text: `Order ${c.clientOrderId}` }),
-    h("p", { class: "bank-meta", text: amount ? `Cash-out of ${amount} (simulated)` : "Cash-out (simulated)" }),
+    h("h2", { text: `Cash-out #${c.id}` }),
+    h("p", { class: "bank-meta", text: `${amount ? `Cash-out of ${amount} (simulated)` : "Cash-out (simulated)"}. Client order id: ${c.clientOrderId}` }),
     h("table", { class: "bank-table" }, head, body));
   if (steps.length && !steps.some((s) => s.step === "withdrawn")) {
     sheet.append(h("p", { class: "bank-note", text: "Sold. The withdrawal to the owner's account hasn't happened yet." }));
