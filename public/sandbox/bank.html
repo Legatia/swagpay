@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <title>Mock bank (sandbox) · Swagpay</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="icon" type="image/svg+xml" href="/mark.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700&family=IBM+Plex+Mono:wght@400&display=swap">
+  <link rel="stylesheet" href="/app.css">
+  <style>
+    .bank-head h1 { font-size: clamp(1.8rem, 6vw, 2.6rem); overflow-wrap: anywhere; }
+    .bank-head p { margin: 8px 0 0; }
+    .bank-cashout h2 { font-size: 1.15rem; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+    .bank-cashout .bank-meta { margin: 0; color: var(--text-muted); overflow-wrap: anywhere; }
+    .bank-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 0.9rem; }
+    .bank-table th, .bank-table td { text-align: left; vertical-align: top; padding: 8px 8px 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+    .bank-table thead th { border-top: 0; font-family: var(--font-mono); font-size: 0.7rem; font-weight: 400; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
+    .bank-table .ref { font-family: var(--font-mono); font-size: 0.82rem; }
+    .bank-note { margin: 0; font-size: 0.875rem; color: var(--text-muted); }
+    .bank-state { margin: 0; color: var(--text-muted); }
+    @media (max-width: 640px) {
+      .bank-table, .bank-table tbody, .bank-table tr, .bank-table td { display: block; width: 100%; }
+      .bank-table thead { display: none; }
+      .bank-table tr { padding: 8px 0; border-top: 1px solid var(--line); }
+      .bank-table td { border: 0; padding: 2px 0; }
+      .bank-table td::before { content: attr(data-label) ": "; color: var(--text-muted); }
+      .bank-table td.step { font-weight: 700; }
+      .bank-table td.step::before { content: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <picture class="site-logo"><source media="(prefers-color-scheme: dark)" srcset="/logo-on-dark.svg"><img src="/logo.svg" alt="Swagpay" width="190" height="42"></picture>
+  <header class="bank-head">
+    <span class="label">Sandbox</span>
+    <h1>Mock bank (sandbox)</h1>
+    <p>This bank plays Kraken's part: it receives the treasury's USDC, sells it at the NBP rate with a 0.5% spread, and withdraws to the owner's own account. Nothing here is real money.</p>
+    <p class="small muted"><a href="https://explorer.testnet.arc.io" target="_blank" rel="noopener noreferrer">Arc testnet explorer</a></p>
+  </header>
+  <section id="ledger" aria-live="polite" class="bank-list">
+    <p class="bank-state" id="bank-state">Loading the ledger…</p>
+  </section>
+</main>
+<script type="module" src="/sandbox/sandbox.js"></script>
+<script type="module" src="/sandbox/bank.js"></script>
+</body>
+</html>
