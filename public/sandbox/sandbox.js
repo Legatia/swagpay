@@ -9,7 +9,8 @@ const POLL_MS = 5000;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const CURRENCIES = ["PLN", "EUR", "GBP", "USD", "INR"];
 const METHODS = [["card", "Card"], ["blik", "BLIK"], ["transfer", "Bank transfer"]];
-const PAYMENT_BUTTONS = { cashout: "Cash out", retry: "Retry", paid: "Mark paid…", cancel: "Cancel" };
+// No "cancel": it would cancel the printer payment, and the simulated printer only starts from Mark paid, so the order would be stranded.
+const PAYMENT_BUTTONS = { cashout: "Cash out", retry: "Retry", paid: "Mark paid…" };
 const GENERIC_NOTICE = "Update from the system.";
 
 function h(tag, props = {}, ...kids) {
@@ -295,7 +296,7 @@ function orderPage(token) {
       if (a === "paid") {
         buttons.append(button(PAYMENT_BUTTONS.paid, () => { paidFormOpen = true; sigs.payment = null; render(lastState); document.getElementById("sbx-method")?.focus(); }, true, "payment-paid"));
       } else {
-        buttons.append(button(PAYMENT_BUTTONS[a], () => act(a, {}), a === "cancel", `payment-${a}`));
+        buttons.append(button(PAYMENT_BUTTONS[a], () => act(a, {}), false, `payment-${a}`));
       }
     }
     if (actions.length) node.append(buttons);
