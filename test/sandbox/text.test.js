@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE, PAY_EXACT_TEXT } from "../../public/sandbox/text.js";
+import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE, PAY_EXACT_TEXT, seenLines } from "../../public/sandbox/text.js";
 
 describe("isSandboxHost", () => {
   it("matches sandbox hosts and local test mode only", () => {
@@ -186,5 +186,18 @@ describe("wrong-amount copy", () => {
   it("points a wrong-amount payer to the transaction hash form on the page", () => {
     expect(PAY_EXACT_TEXT).toBe("Send exactly the amount shown, using the copy button. If you sent a different amount, paste your transaction hash under 'Paid, but it isn't showing' below and it will be matched.");
     expect(PAY_EXACT_TEXT).not.toMatch(/ignored|under 1 USDC/);
+  });
+});
+
+describe("seenLines", () => {
+  const hash = `0x${"ab".repeat(32)}`;
+  it("lists each credited transfer with an explorer link", () => {
+    const lines = seenLines([{ id: 1, stage: "deposit", token: "USDC", amount: "4.12", txHashes: [hash] }, { id: 2, stage: "balance", token: "USDC", amount: "1.90", txHashes: [] }]);
+    expect(lines).toEqual([{ label: "Deposit payment seen on Arc testnet: 4.12 USDC", short: "0xabababab…ababab", href: `https://explorer.testnet.arc.io/tx/${hash}` }]);
+  });
+  it("ignores missing or malformed hashes (production has no txHashes key)", () => {
+    expect(seenLines([{ stage: "deposit", token: "USDC", amount: "1", txHashes: ["0x123", "javascript:alert(1)"] }])).toEqual([]);
+    expect(seenLines([{ stage: "deposit", token: "USDC", amount: "1" }])).toEqual([]);
+    expect(seenLines(undefined)).toEqual([]);
   });
 });

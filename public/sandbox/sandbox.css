@@ -58,3 +58,8 @@ html.sbx-on .side { top: calc(var(--sbx-h) + 16px); }
 .sbx-dialog button { padding: 10px 16px; border: 0; border-radius: 8px; background: var(--action, #d7266f); color: var(--action-text, #fff); font: inherit; font-weight: 600; cursor: pointer; }
 .sbx-dialog button:focus-visible { outline: 2px solid var(--focus, #d7266f); outline-offset: 2px; }
 .sbx-pay button.sbx-linkish { white-space: normal; text-align: left; }
+
+/* "Payment seen": the transfers the watcher credited, with explorer links. */
+.sbx-seen { margin: 12px 0 0; padding: 10px 12px; border-left: 3px solid #1f8f5f; background: var(--payment-bubble, #e2ecfa); border-radius: 8px; }
+.sbx-seen p { margin: 0; overflow-wrap: anywhere; }
+.sbx-seen p + p { margin-top: 4px; }

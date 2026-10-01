@@ -1,7 +1,7 @@
 // Testnet sandbox UI: banner, testnet pay helper, and the judge's "You are the owner" panel.
 // Loaded as a module on every page; it does nothing unless the host is a sandbox host.
 // Every server-derived string goes in with textContent / createTextNode, never innerHTML.
-import { NETWORK_LINE, NO_QUOTE_HINT, PAY_EXACT_TEXT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint } from "./text.js";
+import { NETWORK_LINE, NO_QUOTE_HINT, PAY_EXACT_TEXT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint, seenLines } from "./text.js";
 
 const FAUCET = "https://faucet.circle.com";
 const EXPLORER = "https://explorer.testnet.arc.io";
@@ -111,6 +111,8 @@ function orderPage(token) {
   let paymentId = null;
   let actionSeq = 0; // counts actions started, so a poll that began before one is dropped
   let timer = null;
+  let seen = []; // "payment seen" lines from the order API's sandbox-only txHashes
+  let seenKey = "";
 
   /* Pay helper and panel placement: order.js owns these pages and re-renders them, so look again after changes. */
   function ensure() {
@@ -126,6 +128,17 @@ function orderPage(token) {
         const heading = payBox.querySelector(":scope > h2");
         if (heading ? heading.nextElementSibling !== helper : payBox.firstElementChild !== helper) (heading ? heading.after(helper) : payBox.prepend(helper));
         syncExplorerLink(helper);
+      }
+      // "Payment seen" stays after the payment is complete, so it lives outside the helper. Rebuilt only
+      // when the list changes, so the page's MutationObserver doesn't loop.
+      let seenBox = payBox.querySelector(":scope > .sbx-seen");
+      if (!seen.length) {
+        seenBox?.remove();
+      } else if (!seenBox || seenBox.dataset.key !== seenKey) {
+        const fresh = h("div", { class: "sbx-seen", role: "status" }, ...seen.map((l) => h("p", {}, `${l.label}. `, extLink(l.href, l.short))));
+        fresh.dataset.key = seenKey;
+        if (seenBox) seenBox.replaceWith(fresh);
+        else payBox.append(fresh);
       }
     }
     const statusBox = document.getElementById("status-box");
@@ -382,6 +395,17 @@ function orderPage(token) {
     }
   }
 
+  // The order itself, for the transfers the watcher credited (sandbox only). Failures keep what's showing.
+  async function fetchSeen() {
+    try {
+      const res = await fetch(`/api/o/${token}`, { cache: "no-store", headers: { accept: "application/json" } });
+      if (!res.ok) return;
+      const lines = seenLines((await res.json())?.payments);
+      const key = JSON.stringify(lines);
+      if (key !== seenKey) { seen = lines; seenKey = key; ensure(); }
+    } catch { /* offline or a bad body: try again on the next poll */ }
+  }
+
   async function load() {
     if (loading || inflight || stopped) return;
     loading = true;
@@ -389,6 +413,7 @@ function orderPage(token) {
     try {
       const state = await fetchState();
       if (state && !inflight && seq === actionSeq) render(state);
+      if (!stopped) fetchSeen();
     } finally { loading = false; }
   }
 

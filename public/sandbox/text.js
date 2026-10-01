@@ -106,3 +106,22 @@ export const NETWORK_LINE = "Add the network: RPC https://rpc.testnet.arc.io, ch
 
 // The order page's own claim form (details#claim-details) matches a payment by transaction hash; its summary reads "Paid, but it isn't showing after a few minutes?".
 export const PAY_EXACT_TEXT = "Send exactly the amount shown, using the copy button. If you sent a different amount, paste your transaction hash under 'Paid, but it isn't showing' below and it will be matched.";
+
+// "Payment seen" lines for the pay card: one per transfer the watcher credited to a payment request
+// (the order API's sandbox-only `txHashes`). Only well-formed hashes become explorer links.
+const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+const STAGE_LABEL = { deposit: "Deposit", balance: "Balance" };
+export function seenLines(payments) {
+  const out = [];
+  for (const p of Array.isArray(payments) ? payments : []) {
+    for (const hash of Array.isArray(p?.txHashes) ? p.txHashes : []) {
+      if (typeof hash !== "string" || !TX_HASH.test(hash)) continue;
+      out.push({
+        label: `${STAGE_LABEL[p.stage] ?? "Payment"} payment seen on Arc testnet: ${p.amount} ${p.token}`,
+        short: `${hash.slice(0, 10)}…${hash.slice(-6)}`,
+        href: `https://explorer.testnet.arc.io/tx/${hash}`,
+      });
+    }
+  }
+  return out;
+}
