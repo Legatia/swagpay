@@ -1,6 +1,6 @@
 // Mock bank ledger page. Data from GET /api/sandbox/bank.
 // Every server-derived string (client order ids, refs, masked accounts) goes in with textContent, never innerHTML.
-import { money } from "./text.js";
+import { isSandboxHost, money } from "./text.js";
 
 const EXPLORER = "https://explorer.testnet.arc.io";
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -74,6 +74,8 @@ function cashoutSheet(c) {
 async function load() {
   const root = document.getElementById("ledger");
   const message = (text) => root.replaceChildren(h("p", { class: "bank-state", text }));
+  // The ledger API only exists on sandbox hosts: elsewhere say so and don't call it.
+  if (!isSandboxHost(location)) return message("The mock bank is part of the testnet sandbox at sandbox.swagpay.me.");
   let data;
   try {
     const res = await fetch("/api/sandbox/bank", { cache: "no-store", headers: { accept: "application/json" } });
