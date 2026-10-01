@@ -31,6 +31,9 @@ const json = (status: number, body: unknown, headers: HeadersInit = NO_STORE) =>
 const notFound = () => json(404, { error: "not found" });
 const bad = (message: string) => json(400, { ok: false, message });
 
+/** Production makes these acknowledge-only (escalationButtons). */
+const noticeKind = (kind: string) => kind === "payment" || kind === "system";
+
 const parseSpec = (o: OrderRow): OrderSpec | null => {
   try { return o.spec_json ? (JSON.parse(o.spec_json) as OrderSpec) : null; } catch { return null; }
 };
@@ -77,7 +80,7 @@ async function ownerState(env: Env, order: OrderRow): Promise<SandboxOwnerState>
   const st = row ? toPayState(row) : null;
   return {
     order: { id: order.id, status: order.status },
-    pending: pending.map((e) => ({ id: e.id, kind: e.kind, why: e.summary, actions: ["approve", "reject"] })),
+    pending: pending.map((e) => ({ id: e.id, kind: e.kind, why: e.summary, actions: noticeKind(e.kind) ? ["approve"] : ["approve", "reject"] })),
     cost,
     payment: row && st ? { id: row.payment.id, currency: row.payment.currency, amountCents: row.payment.amount_cents, label: st.label, actions: st.actions } : null,
     cashout: row?.cashout
@@ -87,16 +90,15 @@ async function ownerState(env: Env, order: OrderRow): Promise<SandboxOwnerState>
   };
 }
 
-/** One row per POST in sandbox_owner_calls; the 31st within an hour is refused. Refused POSTs count too. */
+/** One row per accepted POST in sandbox_owner_calls; the 31st within an hour is refused and writes nothing. Domain refusals count. */
 async function overRateLimit(env: Env, orderId: number): Promise<boolean> {
   const now = Date.now();
   const cutoff = new Date(now - 3_600_000).toISOString();
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM sandbox_owner_calls WHERE order_id = ? AND at < ?").bind(orderId, cutoff),
-    env.DB.prepare("INSERT INTO sandbox_owner_calls (order_id, at) VALUES (?, ?)").bind(orderId, new Date(now).toISOString()),
-  ]);
+  await env.DB.prepare("DELETE FROM sandbox_owner_calls WHERE order_id = ? AND at < ?").bind(orderId, cutoff).run();
   const n = (await env.DB.prepare("SELECT COUNT(*) AS n FROM sandbox_owner_calls WHERE order_id = ?").bind(orderId).first<{ n: number }>())?.n ?? 0;
-  return n > OWNER_POSTS_PER_HOUR;
+  if (n >= OWNER_POSTS_PER_HOUR) return true;
+  await env.DB.prepare("INSERT INTO sandbox_owner_calls (order_id, at) VALUES (?, ?)").bind(orderId, new Date(now).toISOString()).run();
+  return false;
 }
 
 const str = (v: unknown, max: number): string | null => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
@@ -144,7 +146,9 @@ export async function handleSandboxOwner(request: Request, env: Env, token: stri
       const id = body.escalationId;
       if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) return bad("escalationId must be a number.");
       if (body.decision !== "approve" && body.decision !== "reject") return bad("decision must be approve or reject.");
-      if (!(await pendingFor(env, order.id)).some((e) => e.id === id)) return notFound();
+      const esc = (await pendingFor(env, order.id)).find((e) => e.id === id);
+      if (!esc) return notFound();
+      if (body.decision === "reject" && noticeKind(esc.kind)) return bad("This is a notice: acknowledge it.");
       return result(await decideAsOwner(env, id, body.decision, str(body.note, 500), who));
     }
     case "cashout": {

@@ -91,6 +91,8 @@ export class OrderAgent extends Agent<Env, OrderState> {
   }
 
   protected telegram(): TelegramClient {
+    // The sandbox never messages the owner, not even for work queued before it was switched on.
+    if (isSandbox(this.env)) return { async send() { return null; }, async answerCallback() {} };
     return this.telegramOverride ?? createTelegram(this.env.TELEGRAM_BOT_TOKEN);
   }
 
@@ -207,6 +209,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.ensureTables();
     this.orderId();
     if (this.pendingPrinterStep() || this.meta("sandbox_last_step")) return;
+    this.setMeta("sandbox_started", "1");
     await this.schedule(stepDelaySeconds("accepted"), "sandboxPrinterStep", { step: "accepted" });
   }
 
@@ -243,15 +246,19 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.ensureTables();
     this.orderId();
     const pending = this.pendingPrinterStep();
-    if (!pending) return { ok: false, message: "Nothing to skip." };
+    const last = this.meta("sandbox_last_step") as PrinterStep | null;
+    // Nothing pending but not finished: the retries gave up on a step, so skip runs the one after it.
+    const stalled = !pending && last !== "shipped" ? (last ? nextStep(last) : this.meta("sandbox_started") ? "accepted" : null) : null;
+    const step = pending?.step ?? stalled;
+    if (!step) return { ok: false, message: "Nothing to skip." };
     try {
-      await this.sandboxPrinterStep({ step: pending.step });
+      await this.sandboxPrinterStep({ step });
     } catch (err) {
       console.error("sandbox skip failed", err);
       return { ok: false, message: "Skipping failed; the step will run on its own shortly." };
     }
-    await this.cancelSchedule(pending.id);
-    return { ok: true, message: `Skipped ahead: the printer's "${pending.step}" step ran now.` };
+    if (pending) await this.cancelSchedule(pending.id);
+    return { ok: true, message: `Skipped ahead: the printer's "${step}" step ran now.` };
   }
 
   /** Sandbox: the simulated printer's progress, for the owner panel. */

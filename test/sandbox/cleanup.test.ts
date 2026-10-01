@@ -30,7 +30,7 @@ async function fullOrder(ageHours: number) {
   await env.DB.prepare("INSERT INTO sandbox_owner_calls (order_id, at) VALUES (?, ?)").bind(order.id, now).run();
   await createEscalation(env.DB, { orderId: order.id, kind: "system", summary: "x", payload: {} });
   // Artwork in R2, recorded in the agent.
-  const key = `artwork/cleanup-${order.id}`;
+  const key = `artwork/${order.instance}/cleanup`;
   await env.ARTWORK.put(key, "bytes");
   const stub = await getAgentByName(env.OrderAgent, order.instance);
   await stub.init(order.id, intakeFor());
@@ -64,6 +64,19 @@ describe("sandbox cleanup", () => {
     expect((await gone(fresh)).every((n) => n === 1)).toBe(true);
     expect(await env.ARTWORK.get(old.key)).toBeNull();
     expect(await env.ARTWORK.get(fresh.key)).not.toBeNull();
+  });
+
+  it("deletes artwork/ and conv/ objects of the order by prefix, and only its own", async () => {
+    const old = await fullOrder(49);
+    const fresh = await fullOrder(47);
+    const keys = (o: typeof old) => [`artwork/${o.order.instance}/y`, `conv/${o.order.instance}/x`];
+    for (const k of [...keys(old), ...keys(fresh)]) await env.ARTWORK.put(k, "b");
+    // More than one page of list results.
+    for (let i = 0; i < 1005; i++) await env.ARTWORK.put(`conv/${old.order.instance}/bulk-${i}`, "b");
+    await cleanupSandbox(sandbox, NOW);
+    expect((await env.ARTWORK.list({ prefix: `conv/${old.order.instance}/` })).objects).toHaveLength(0);
+    expect((await env.ARTWORK.list({ prefix: `artwork/${old.order.instance}/` })).objects).toHaveLength(0);
+    for (const k of keys(fresh)) expect(await env.ARTWORK.get(k)).not.toBeNull();
   });
 
   it("does nothing outside the sandbox", async () => {

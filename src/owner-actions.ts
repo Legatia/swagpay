@@ -1,4 +1,7 @@
 import { cashoutAmount, getCashout, getSupplierPayment, latestCashout, logAdminAction, queueCashout, retryWithdrawal, setSupplierPaymentStatus, type PayMethod } from "./back-office";
+import { getAgentByName } from "agents";
+import { getOrderById } from "./db";
+import { isSandbox } from "./sandbox/config";
 import { getEscalation } from "./escalations";
 import { plnPer } from "./fx";
 import { decide } from "./telegram-webhook";
@@ -52,6 +55,15 @@ export async function markSupplierPaid(env: Env, spId: number, p: { method: stri
   });
   if (!ok) return refuse(`This payment is already ${sp.status}.`);
   await logAdminAction(env.DB, { email: who, action: "paid", target: `supplier_payment:${sp.id}`, detail: { method } });
+  if (isSandbox(env)) {
+    // The simulated printer takes the job once the owner has paid it. Never fails the Paid.
+    try {
+      const order = await getOrderById(env.DB, sp.order_id);
+      if (order) await (await getAgentByName(env.OrderAgent, order.instance)).sandboxStartPrinter();
+    } catch (err) {
+      console.error("could not start the simulated printer", err);
+    }
+  }
   return { ok: true, message: `Printer payment for order ${sp.order_id} marked paid (${method}).` };
 }
 

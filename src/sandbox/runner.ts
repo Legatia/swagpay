@@ -17,8 +17,17 @@ export async function runSandboxRunner(env: Env, deps: { chain?: ChainClient; no
   const call = (path: string, init: RequestInit = {}) =>
     handleTreasuryApi(new Request(`https://sandbox.internal${path}`, { ...init, headers: { ...auth, "content-type": "application/json" } }), env);
 
-  const { payouts } = await (await call("/api/treasury/payouts")).json<{ payouts: QueuedPayout[] }>();
+  const get = async <T>(path: string): Promise<T> => {
+    const res = await call(path);
+    if (!res.ok) throw new Error(`treasury api ${path}: HTTP ${res.status}`);
+    return res.json<T>();
+  };
+
   let chain = deps.chain;
+  // A failed list does not stop the other pass; the first failure is thrown at the end so the cron run shows it.
+  let failure: unknown = null;
+  let payouts: QueuedPayout[] = [];
+  try { payouts = (await get<{ payouts: QueuedPayout[] }>("/api/treasury/payouts")).payouts; } catch (err) { failure = err; }
   for (const p of payouts) {
     const report = (body: unknown) => call(`/api/treasury/payouts/${p.id}/result`, { method: "POST", body: JSON.stringify(body) });
     if (p.method !== "transfer" || p.chain !== "ARC" || p.token !== "USDC") { await report({ status: "failed", error: "sandbox: only ARC transfers" }); continue; }
@@ -39,11 +48,13 @@ export async function runSandboxRunner(env: Env, deps: { chain?: ChainClient; no
     }
   }
 
-  const { cashouts } = await (await call("/api/treasury/cashouts")).json<{ cashouts: BankCashout[] }>();
+  let cashouts: BankCashout[] = [];
+  try { cashouts = (await get<{ cashouts: BankCashout[] }>("/api/treasury/cashouts")).cashouts; } catch (err) { failure ??= err; }
   for (const c of cashouts) {
     for (const r of await bankPass(env, c, now)) {
       const res = await call(`/api/treasury/cashouts/${c.id}/result`, { method: "POST", body: JSON.stringify(r) });
       if (!res.ok) break;
     }
   }
+  if (failure) throw failure;
 }

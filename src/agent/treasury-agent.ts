@@ -1,3 +1,4 @@
+import { isSandbox } from "../sandbox/config";
 import { Agent } from "agents";
 import { createRpc, type RpcClient } from "../arc";
 import { createEscalation } from "../escalations";
@@ -75,6 +76,8 @@ export class TreasuryAgent extends Agent<Env, Record<string, never>> {
   }
 
   protected telegram(): TelegramClient {
+    // The sandbox never messages the owner, not even for work queued before it was switched on.
+    if (isSandbox(this.env)) return { async send() { return null; }, async answerCallback() {} };
     return this.telegramOverride ?? createTelegram(this.env.TELEGRAM_BOT_TOKEN);
   }
 

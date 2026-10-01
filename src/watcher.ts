@@ -6,7 +6,6 @@ import { createEscalation, type EscalationRow } from "./escalations";
 import { formatCents, formatUnits, isAddress, type Token } from "./money";
 import { applyClaims, depositPaid, getPaymentRequest, listUnnotified, markNotified, recordTransfer, type NewTransfer, type PaymentRequestRow, type TransferOutcome, type TransferRow } from "./payments";
 import { DEFAULT_POLICY, loadPolicy } from "./policy";
-import { isSandbox } from "./sandbox/config";
 import { warsawTime } from "./quote-text";
 import { getQuote, type QuoteRow } from "./quotes";
 import { createTelegram, notifyOwner, type TelegramClient } from "./telegram";
@@ -221,14 +220,6 @@ async function onMatched(env: Env, telegram: TelegramClient, o: { transfer: Tran
     // Booked however the printer is paid; before the owner's notices, which a retry would repeat.
     if (job) await markJob(env.DB, order.id, "booked");
     if (milestones) await announceMilestones(env, telegram, { order, request: r, transfer: t, paid, late, milestones });
-  }
-  if (completedDeposit && isSandbox(env)) {
-    // The simulated printer takes the job. Never holds back the notices or a retry.
-    try {
-      await agent.sandboxStartPrinter();
-    } catch (err) {
-      console.error("could not start the simulated printer", err);
-    }
   }
   if (completedDeposit && !milestones) {
     const cost = quote ? `cost ${formatCents(quote.cost_pln_grosze)} PLN gross (quote #${quote.id})` : `quote #${r.quote_id} is missing; check the cost by hand`;

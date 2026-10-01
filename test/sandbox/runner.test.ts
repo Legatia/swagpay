@@ -25,6 +25,11 @@ beforeEach(async () => {
 });
 
 describe("sandbox runner", () => {
+  it("throws when a treasury GET is refused, after still running the other pass", async () => {
+    const bad = { ...sandbox, TREASURY_RUNNER_TOKEN: "" } as unknown as Env;
+    await expect(runSandboxRunner(bad, { chain: fakeChain().chain })).rejects.toThrow("treasury api /api/treasury/payouts: HTTP 404");
+  });
+
   it("sends a queued ARC payout once and reports it sent", async () => {
     const p = await queued();
     const { chain, sent } = fakeChain();

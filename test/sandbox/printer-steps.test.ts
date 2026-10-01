@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import type { OrderAgent } from "../../src/agent/order-agent";
 import { TRANSFER_TOPIC, USDC_SYSTEM_EMITTER, addressTopic, type RawLog, type RpcClient } from "../../src/arc";
 import { handleApi } from "../../src/api";
+import { createSupplierPayment } from "../../src/back-office";
+import { markSupplierPaid } from "../../src/owner-actions";
 import { getOrderById, setOrderStatus } from "../../src/db";
 import { createPaymentRequest } from "../../src/payments";
 import { SIMULATED, stepDelaySeconds } from "../../src/sandbox/printer";
@@ -134,6 +136,29 @@ describe("simulated printer steps", () => {
     });
   });
 
+  it("skip runs the next step when a step's schedule is gone without completing", async () => {
+    const { stub } = await orderAgent();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.sandboxStartPrinter();
+      await agent.cancelSchedule(schedules(agent)[0].id); // the SDK gave up
+      expect(await agent.sandboxSkip()).toMatchObject({ ok: true });
+      expect(agent.sandboxPrinterState()).toMatchObject({ lastStep: "accepted", nextStep: "proof" });
+      await agent.cancelSchedule(schedules(agent)[0].id);
+      expect(await agent.sandboxSkip()).toMatchObject({ ok: true });
+      expect(agent.sandboxPrinterState().lastStep).toBe("proof");
+    });
+  });
+
+  it("the sandbox agent's telegram client sends nothing, even with an override", async () => {
+    const { stub } = await orderAgent();
+    let called = 0;
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.telegramOverride = { async send() { called++; return 1; }, async answerCallback() { called++; } };
+      expect(await (agent as unknown as { telegram(): TelegramClient }).telegram().send("1", "hi")).toBeNull();
+    });
+    expect(called).toBe(0);
+  });
+
   it("every sandbox method refuses outside the sandbox", async () => {
     const { stub } = await orderAgent({ sandboxAgent: false });
     await runInDurableObject(stub, async (agent: OrderAgent) => {
@@ -159,7 +184,33 @@ describe("simulated printer steps", () => {
   });
 });
 
-describe("watcher hook", () => {
+describe("markSupplierPaid starts the printer", () => {
+  const paid = { method: "blik", reference: null, date: "2099-10-02", confirm: true };
+  const payment = async (orderId: number) => createSupplierPayment(env.DB, { orderId, vendorId: null, currency: "PLN", amountCents: 100_000 });
+
+  it("a sandbox Paid schedules the accepted step", async () => {
+    const { order, stub } = await orderAgent();
+    const sp = await payment(order.id);
+    expect(await markSupplierPaid(sandbox, sp.id, paid, "sandbox")).toMatchObject({ ok: true });
+    await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent).map((x) => x.payload)).toEqual([{ step: "accepted" }]); });
+  });
+
+  it("a production Paid does not", async () => {
+    const { order, stub } = await orderAgent();
+    const sp = await payment(order.id);
+    expect(await markSupplierPaid(env, sp.id, paid, "owner@example.com")).toMatchObject({ ok: true });
+    await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent)).toHaveLength(0); });
+  });
+
+  it("a refused Paid does not", async () => {
+    const { order, stub } = await orderAgent();
+    const sp = await payment(order.id);
+    expect(await markSupplierPaid(sandbox, sp.id, { ...paid, method: "cash" }, "sandbox")).toMatchObject({ ok: false });
+    await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent)).toHaveLength(0); });
+  });
+});
+
+describe("watcher (no printer hook)", () => {
   const TO = env.RECEIVING_ADDRESS;
   const log = (units: number, n: number): RawLog => ({
     address: USDC_SYSTEM_EMITTER, topics: [TRANSFER_TOPIC, addressTopic("0x2222222222222222222222222222222222222222"), addressTopic(TO)],
@@ -177,22 +228,13 @@ describe("watcher hook", () => {
     return { stub, req };
   }
 
-  it("starts the printer after a completed deposit in the sandbox", async () => {
+  it("a completed deposit alone schedules no printer step, in the sandbox too", async () => {
     const { stub, req } = await deposit(9101);
     await runWatcher(sandbox, { rpc: rpc([log(req.amount_units, 9101)], 5042002), telegram: silent });
-    await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent).map((s) => s.payload)).toEqual([{ step: "accepted" }]); });
+    await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent)).toHaveLength(0); });
   });
 
-  it("a second watcher pass does not add a second schedule", async () => {
-    const { stub, req } = await deposit(9103);
-    const r = rpc([log(req.amount_units, 9103)], 5042002);
-    await runWatcher(sandbox, { rpc: r, telegram: silent });
-    await env.DB.prepare("INSERT OR REPLACE INTO watcher_state (key, value) VALUES ('last_block', '4000')").run();
-    await runWatcher(sandbox, { rpc: r, telegram: silent });
-    await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent)).toHaveLength(1); });
-  });
-
-  it("does not in production", async () => {
+  it("a production deposit schedules none either", async () => {
     const { stub, req } = await deposit(9102);
     await runWatcher(env, { rpc: rpc([log(req.amount_units, 9102)], Number(env.ARC_CHAIN_ID)), telegram: silent });
     await runInDurableObject(stub, async (agent: OrderAgent) => { expect(schedules(agent)).toHaveLength(0); });

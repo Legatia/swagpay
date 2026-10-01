@@ -112,6 +112,17 @@ describe("sandbox owner panel API", () => {
     expect((await state(a.token)).pending).toEqual([]);
   });
 
+  it("a payment notice offers only approve, and rejecting it is refused", async () => {
+    const a = await newOrderRow();
+    await (await getAgentByName(env.OrderAgent, a.order.instance)).init(a.order.id, intakeFor());
+    const n = await createEscalation(env.DB, { orderId: a.order.id, kind: "payment", summary: "Paid", payload: {} });
+    expect((await state(a.token)).pending).toEqual([{ id: n.id, kind: "payment", why: "Paid", actions: ["approve"] }]);
+    const res = await post(a.token, "decide", { escalationId: n.id, decision: "reject" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, message: "This is a notice: acknowledge it." });
+    expect((await getEscalation(env.DB, n.id))?.status).toBe("open");
+  });
+
   it("pending includes orderless treasury escalations pointing at this order's obligation or cash-out, only while open", async () => {
     const a = await readyToCashOut();
     const b = await readyToCashOut();
@@ -173,6 +184,8 @@ describe("sandbox owner panel API", () => {
     expect(limited.status).toBe(429);
     expect(limited.headers.get("retry-after")).toBeTruthy();
     expect((await get(a.token)).status).toBe(200);
+    for (let i = 0; i < 3; i++) expect((await post(a.token, "skip")).status).toBe(429);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM sandbox_owner_calls WHERE order_id = ?").bind(a.order.id).first<{ n: number }>())!.n).toBe(30);
     expect((await post(b.token, "skip")).status).toBe(200);
     // An hour later the counter has emptied.
     await env.DB.prepare("UPDATE sandbox_owner_calls SET at = ? WHERE order_id = ?").bind(new Date(Date.now() - 3_700_000).toISOString(), a.order.id).run();
