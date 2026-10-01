@@ -89,15 +89,17 @@ function orderPage(token) {
   const panel = h("section", { class: "sheet sbx-owner", id: "sbx-owner", "aria-label": "You are the owner" });
   const sections = {};
   const sigs = {};
-  const header = [h("h2", { text: "You are the owner" }),
+  const header = [h("h2", { text: "You are the owner", tabindex: "-1" }),
     h("p", { class: "sbx-sub", text: "In the real system this is the owner's back office. Here you press the buttons." })];
   panel.append(...header);
   for (const key of ["cost", "pending", "payment", "cashout", "printer", "empty"]) {
     sections[key] = h("div", { class: "sbx-section", "data-sbx": key });
     panel.append(sections[key]);
   }
-  const result = h("p", { class: "sbx-result", role: "status", "aria-live": "polite" });
-  panel.append(result);
+  // Two live regions, both always in the tree: successes are announced politely, errors as alerts.
+  const resultOk = h("p", { class: "sbx-result ok", role: "status" });
+  const resultErr = h("p", { class: "sbx-result err", role: "alert" });
+  panel.append(resultOk, resultErr);
 
   let inflight = false;
   let loading = false;
@@ -160,6 +162,7 @@ function orderPage(token) {
   }
 
   function render(state) {
+    const snap = focusSnapshot();
     lastState = state;
     ready = true;
     const pending = Array.isArray(state.pending) ? state.pending : [];
@@ -174,34 +177,54 @@ function orderPage(token) {
     setSection("empty", nothing ? { nothing } : null, (node) => node.append(h("p", { class: "sbx-empty", text: "Nothing needs the owner right now. The agents carry on." })));
     applyBusy();
     ensure();
+    restoreFocus(snap);
   }
 
   function applyBusy() {
-    panel.querySelectorAll("button, select, input").forEach((el) => { el.disabled = inflight; });
+    // aria-disabled, not disabled: a disabled control would drop keyboard focus. The handlers ignore clicks while busy.
+    panel.querySelectorAll("button").forEach((el) => {
+      if (inflight) el.setAttribute("aria-disabled", "true"); else el.removeAttribute("aria-disabled");
+    });
     panel.setAttribute("aria-busy", inflight ? "true" : "false");
   }
 
   function showResult(ok, message) {
-    result.textContent = message;
-    result.className = `sbx-result ${ok ? "ok" : "err"}`;
+    const rest = message.replace(/^done\b[.:!]?\s*/i, ""); // the server often starts with "Done" itself
+    resultOk.textContent = ok ? (rest ? `Done: ${rest}` : "Done.") : "";
+    resultErr.textContent = ok ? "" : `Not done: ${message}`;
   }
 
-  function button(label, onclick, secondary = false) {
-    return h("button", { type: "button", class: secondary ? "sbx-secondary" : "", text: label, onclick });
+  function button(label, onclick, secondary = false, key = label) {
+    return h("button", { type: "button", class: secondary ? "sbx-secondary" : "", "data-key": key, text: label, onclick: () => { if (!inflight) onclick(); } });
+  }
+
+  /* Focus: a rebuild removes the focused control, so remember it by key and put focus back (or on the section heading). */
+  function focusSnapshot() {
+    const a = document.activeElement;
+    if (!a || !panel.contains(a) || a === panel) return null;
+    const section = Object.keys(sections).find((k) => sections[k].contains(a)) ?? null;
+    return { key: a.dataset?.key ?? null, section };
+  }
+  function restoreFocus(snap) {
+    if (!snap || (document.activeElement && panel.contains(document.activeElement) && document.activeElement !== panel)) return;
+    let target = snap.key ? panel.querySelector(`[data-key="${CSS.escape(snap.key)}"]`) : null;
+    if (!target && snap.section) target = sections[snap.section].querySelector("h3");
+    if (!target) target = panel.querySelector("h2");
+    target?.focus({ preventScroll: false });
   }
 
   /* cost */
   function buildCost(node, cost) {
     const suggestions = Array.isArray(cost.suggestions) ? cost.suggestions : [];
-    node.append(h("h3", { text: "Printer cost needed" }));
-    const vendor = h("select", { id: "sbx-vendor" });
+    node.append(h("h3", { text: "Printer cost needed", tabindex: "-1" }));
+    const vendor = h("select", { id: "sbx-vendor", "data-key": "cost-vendor" });
     suggestions.forEach((s, i) => vendor.append(h("option", { value: String(s.vendorId), text: [s.name, s.city].filter(Boolean).join(", ") || `Printer ${i + 1}` })));
-    const amount = h("input", { id: "sbx-amount", type: "number", inputmode: "decimal", min: "0.01", step: "0.01", required: true });
-    const currency = h("select", { id: "sbx-currency" });
+    const amount = h("input", { id: "sbx-amount", "data-key": "cost-amount", type: "number", inputmode: "decimal", min: "0.01", step: "0.01", required: true });
+    const currency = h("select", { id: "sbx-currency", "data-key": "cost-currency" });
     CURRENCIES.forEach((c) => currency.append(h("option", { value: c, text: c })));
     const quoteLabel = h("span", { class: "sbx-quote-label" });
-    const note = h("input", { id: "sbx-note", type: "text", maxlength: "500", autocomplete: "off" });
-    const submit = h("button", { type: "submit", text: "Send cost" });
+    const note = h("input", { id: "sbx-note", "data-key": "cost-note", type: "text", maxlength: "500", autocomplete: "off" });
+    const submit = h("button", { type: "submit", "data-key": "cost-submit", text: "Send cost" });
 
     const prefill = () => {
       const s = suggestions.find((x) => String(x.vendorId) === vendor.value);
@@ -242,18 +265,18 @@ function orderPage(token) {
 
   /* pending: escalations and notices */
   function buildPending(node, items) {
-    node.append(h("h3", { text: "Waiting for you" }));
+    node.append(h("h3", { text: "Waiting for you", tabindex: "-1" }));
     for (const item of items) {
       const why = judgeText(item.why) || GENERIC_NOTICE;
       const buttons = h("div", { class: "sbx-buttons" });
-      actionsFor(item).forEach((a, i) => buttons.append(button(a.label, () => act("decide", { escalationId: item.id, decision: a.decision }), i > 0)));
+      actionsFor(item).forEach((a, i) => buttons.append(button(a.label, () => act("decide", { escalationId: item.id, decision: a.decision }), i > 0, `pending-${item.id}-${a.decision}`)));
       node.append(h("div", { class: "sbx-item" }, h("p", { text: why }), buttons));
     }
   }
 
   /* payment */
   function buildPayment(node, payment) {
-    node.append(h("h3", { text: `Printer payment: ${judgeText(payment.label) || "pending"}` }));
+    node.append(h("h3", { text: `Printer payment: ${judgeText(payment.label) || "pending"}`, tabindex: "-1" }));
     if (Number.isFinite(Number(payment.amountCents)) && payment.currency) {
       node.append(h("p", { text: `Amount: ${money(Number(payment.amountCents), String(payment.currency))}` }));
     }
@@ -261,24 +284,24 @@ function orderPage(token) {
     const buttons = h("div", { class: "sbx-buttons" });
     for (const a of actions) {
       if (a === "paid") {
-        buttons.append(button(PAYMENT_BUTTONS.paid, () => { paidFormOpen = true; sigs.payment = null; render(lastState); }, true));
+        buttons.append(button(PAYMENT_BUTTONS.paid, () => { paidFormOpen = true; sigs.payment = null; render(lastState); document.getElementById("sbx-method")?.focus(); }, true, "payment-paid"));
       } else {
-        buttons.append(button(PAYMENT_BUTTONS[a], () => act(a, {}), a === "cancel"));
+        buttons.append(button(PAYMENT_BUTTONS[a], () => act(a, {}), a === "cancel", `payment-${a}`));
       }
     }
     if (actions.length) node.append(buttons);
     if (payment.paidFormOpen && actions.includes("paid")) node.append(buildPaidForm());
   }
   function buildPaidForm() {
-    const method = h("select", { id: "sbx-method" });
+    const method = h("select", { id: "sbx-method", "data-key": "paid-method" });
     METHODS.forEach(([value, label]) => method.append(h("option", { value, text: `${label} (simulated)` })));
-    const reference = h("input", { id: "sbx-reference", type: "text", maxlength: "100", autocomplete: "off" });
+    const reference = h("input", { id: "sbx-reference", "data-key": "paid-reference", type: "text", maxlength: "100", autocomplete: "off" });
     const form = h("form", {},
       h("label", {}, "How did you pay the printer? (simulated)", method),
       h("label", {}, "Reference (optional)", reference),
       h("div", { class: "sbx-buttons" },
-        h("button", { type: "submit", text: "Mark paid (simulated)" }),
-        button("Back", () => { paidFormOpen = false; sigs.payment = null; render(lastState); }, true)));
+        h("button", { type: "submit", "data-key": "paid-submit", text: "Mark paid (simulated)" }),
+        button("Back", () => { paidFormOpen = false; sigs.payment = null; render(lastState); panel.querySelector('[data-key="payment-paid"]')?.focus(); }, true, "paid-back")));
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       const body = { method: method.value };
@@ -290,7 +313,7 @@ function orderPage(token) {
 
   /* cash-out */
   function buildCashout(node, c) {
-    node.append(h("h3", { text: "Cash-out" }));
+    node.append(h("h3", { text: "Cash-out", tabindex: "-1" }));
     const amount = [c.amount, c.fiat].filter(Boolean).join(" ");
     node.append(h("p", { text: `Status: ${c.status ?? "unknown"}${amount ? `, ${amount}` : ""}` }));
     if (c.withdrawalRef) node.append(h("p", {}, "Withdrawal reference: ", h("span", { class: "sbx-ref", text: String(c.withdrawalRef) })));
@@ -301,9 +324,9 @@ function orderPage(token) {
   function buildPrinter(node, p) {
     const when = p.nextAt ? formatTime(p.nextAt) : "";
     const next = p.nextStep ? `${p.nextStep}${when ? ` at ${when}` : ""}` : "none";
-    node.append(h("h3", { text: "Printer (simulated)" }),
+    node.append(h("h3", { text: "Printer (simulated)", tabindex: "-1" }),
       h("p", { text: `Printer: last step ${p.lastStep ?? "none yet"}, next ${next}.` }),
-      h("div", { class: "sbx-buttons" }, button("Skip ahead", () => act("skip", {}), true)));
+      h("div", { class: "sbx-buttons" }, button("Skip ahead", () => act("skip", {}), true, "printer-skip")));
   }
   function formatTime(iso) {
     const d = new Date(iso);

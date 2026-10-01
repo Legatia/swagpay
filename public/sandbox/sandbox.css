@@ -41,10 +41,12 @@ html.sbx-on .side { top: calc(var(--sbx-h) + 16px); }
 .sbx-ref { font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace); font-size: 0.85rem; overflow-wrap: anywhere; }
 .sbx-empty { color: var(--text-muted, #4a4f72); }
 .sbx-result { margin: 0; min-height: 1.5em; font-weight: 600; overflow-wrap: anywhere; }
-.sbx-result:empty { display: none; }
+.sbx-result:empty { position: absolute; width: 1px; height: 1px; min-height: 0; margin: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; } /* stays in the accessibility tree */
 .sbx-result.ok { color: var(--success, #1f7a4d); }
 .sbx-result.err { color: var(--error, #b91e5a); }
-.sbx-owner button:disabled { opacity: 0.6; cursor: default; }
+.sbx-owner button[aria-disabled="true"] { opacity: 0.6; cursor: default; }
+.sbx-owner h2:focus, .sbx-section h3:focus { outline: none; }
+.sbx-owner h2:focus-visible, .sbx-section h3:focus-visible { outline: 2px solid var(--focus, #d7266f); outline-offset: 2px; }
 
 /* "How it works" dialog. */
 .sbx-dialog { max-width: min(520px, calc(100vw - 32px)); width: 100%; box-sizing: border-box; padding: 20px; border: 1px solid var(--line, #d9dcea); border-radius: 12px; background: var(--surface, #fff); color: var(--text, #171a38); font-family: var(--font-body, "Figtree", system-ui, sans-serif); }
