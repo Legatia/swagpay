@@ -79,3 +79,14 @@ export function paymentHint(payment, cashout) {
   if (label.startsWith("the treasury won't move it")) return "Pay the printer yourself (simulated) and press Mark paid.";
   return "";
 }
+
+// The pay helper follows the token the order page asks for (#pay-unit): EURC for a EUR quote, USDC otherwise.
+export function payToken(raw) {
+  return String(raw ?? "").trim().toUpperCase() === "EURC" ? "EURC" : "USDC";
+}
+
+export function payFaucetText(token) {
+  return `Pay with testnet ${token} on Arc Testnet (chain 5042002). Get up to 10 ${token} a day at `;
+}
+
+export const PAY_GAS_NOTE = "Gas on Arc is paid in USDC, so get a little USDC from the faucet too.";

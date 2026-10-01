@@ -1,7 +1,7 @@
 // Testnet sandbox UI: banner, testnet pay helper, and the judge's "You are the owner" panel.
 // Loaded as a module on every page; it does nothing unless the host is a sandbox host.
 // Every server-derived string goes in with textContent / createTextNode, never innerHTML.
-import { NO_QUOTE_HINT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint } from "./text.js";
+import { NO_QUOTE_HINT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint } from "./text.js";
 
 const FAUCET = "https://faucet.circle.com";
 const EXPLORER = "https://explorer.testnet.arc.io";
@@ -127,14 +127,20 @@ function orderPage(token) {
   function buildPayHelper() {
     return h("div", { class: "sbx-pay" },
       h("p", {}, h("strong", { text: "Send exactly the amount shown, using the copy button. A different amount under 1 USDC can't be matched to your order and is ignored." })),
-      h("p", { text: "Pay with testnet USDC on Arc Testnet (chain 5042002). Get up to 10 USDC a day at " }),
+      h("p", { class: "sbx-faucet" }, h("span", { class: "sbx-faucet-text" })),
+      h("p", { class: "sbx-gas", hidden: true, text: PAY_GAS_NOTE }),
       h("p", { class: "sbx-network", text: "Add the network: RPC https://rpc.testnet.arc.network, chain id 5042002, symbol USDC." }),
       h("p", { class: "sbx-explorer", hidden: true }));
   }
   function syncExplorerLink(helper) {
-    // The faucet link lives in the second line; build it once.
-    const faucetLine = helper.children[1];
+    // The token follows the order page's #pay-unit; the faucet link is built once.
+    const token = payToken(document.getElementById("pay-unit")?.textContent);
+    const faucetLine = helper.querySelector(".sbx-faucet");
+    const text = payFaucetText(token);
+    const textNode = faucetLine.querySelector(".sbx-faucet-text");
+    if (textNode.textContent !== text) textNode.textContent = text;
     if (!faucetLine.querySelector("a")) faucetLine.append(extLink(FAUCET, "faucet.circle.com"), ".");
+    helper.querySelector(".sbx-gas").hidden = token !== "EURC";
     const holder = helper.querySelector(".sbx-explorer");
     const addr = (document.getElementById("pay-address")?.textContent ?? "").trim();
     const href = ADDRESS.test(addr) ? `${EXPLORER}/address/${addr}` : "";

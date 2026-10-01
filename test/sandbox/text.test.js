@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint } from "../../public/sandbox/text.js";
+import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE } from "../../public/sandbox/text.js";
 
 describe("isSandboxHost", () => {
   it("matches sandbox hosts and local test mode only", () => {
@@ -121,5 +121,23 @@ describe("paymentHint", () => {
   it("says nothing once paid or cancelled", () => {
     expect(hint("paid (card)", [])).toBe("");
     expect(hint("cancelled", [])).toBe("");
+  });
+});
+
+describe("pay helper token", () => {
+  it("reads USDC or EURC from the pay unit and defaults to USDC", () => {
+    expect(payToken("EURC")).toBe("EURC");
+    expect(payToken(" eurc ")).toBe("EURC");
+    expect(payToken("USDC")).toBe("USDC");
+    expect(payToken("")).toBe("USDC");
+    expect(payToken(undefined)).toBe("USDC");
+    expect(payToken("<script>")).toBe("USDC");
+  });
+  it("names that token in the faucet line", () => {
+    expect(payFaucetText("EURC")).toBe("Pay with testnet EURC on Arc Testnet (chain 5042002). Get up to 10 EURC a day at ");
+    expect(payFaucetText("USDC")).toBe("Pay with testnet USDC on Arc Testnet (chain 5042002). Get up to 10 USDC a day at ");
+  });
+  it("explains the USDC gas for EURC payers", () => {
+    expect(PAY_GAS_NOTE).toBe("Gas on Arc is paid in USDC, so get a little USDC from the faucet too.");
   });
 });
