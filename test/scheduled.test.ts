@@ -38,7 +38,7 @@ describe("scheduled jobs", () => {
     await (await getAgentByName(env.OrderAgent, order.instance)).init(order.id, intakeFor());
     const decided = await createEscalation(env.DB, { orderId: order.id, kind: "approval", summary: "Approve: banner", payload: {} });
     const open = await createEscalation(env.DB, { orderId: order.id, kind: "approval", summary: "Approve: flag", payload: {} });
-    await decideEscalation(env.DB, decided.id, "approved", null);
+    await decideEscalation(env.DB, decided.id, "approved", null, new Date(Date.now() - 2 * 60_000));
     expect((await getEscalation(env.DB, decided.id))?.delivered_at).toBeNull();
     await resendDecisions(env);
     expect((await getEscalation(env.DB, decided.id))?.delivered_at).toBeTruthy();
@@ -48,10 +48,31 @@ describe("scheduled jobs", () => {
   it("sandbox re-delivery logs a failure and never throws", async () => {
     const { order } = await createOrder(env.DB, intakeFor(), new Date("2099-10-01T10:00:00Z"));
     const e = await createEscalation(env.DB, { orderId: order.id, kind: "approval", summary: "Approve: banner", payload: {} });
-    await decideEscalation(env.DB, e.id, "approved", null);
+    await decideEscalation(env.DB, e.id, "approved", null, new Date(Date.now() - 2 * 60_000));
     const unreachable = { idFromName() { throw new Error("agent unreachable"); } } as unknown as Env["OrderAgent"];
     await expect(resendDecisions({ ...env, OrderAgent: unreachable } as Env)).resolves.toBeUndefined();
     const broken = { ...env, DB: { prepare() { throw new Error("db down"); } } } as unknown as Env;
     await expect(resendDecisions(broken)).resolves.toBeUndefined();
+  });
+
+  it("sandbox re-delivery backs off: only power-of-two minute ages inside six hours", async () => {
+    const { order } = await createOrder(env.DB, intakeFor(), new Date("2099-10-01T10:00:00Z"));
+    await (await getAgentByName(env.OrderAgent, order.instance)).init(order.id, intakeFor());
+    const now = new Date();
+    const at = async (ageMs: number) => {
+      const e = await createEscalation(env.DB, { orderId: order.id, kind: "approval", summary: "Approve: x", payload: {} });
+      await decideEscalation(env.DB, e.id, "approved", null, new Date(now.getTime() - ageMs));
+      return e.id;
+    };
+    const fresh = await at(30_000);
+    const two = await at(2 * 60_000 + 5_000);
+    const three = await at(3 * 60_000 + 5_000);
+    const old = await at(7 * 3_600_000);
+    await resendDecisions(env, now);
+    const delivered = async (id: number) => !!(await getEscalation(env.DB, id))?.delivered_at;
+    expect(await delivered(two)).toBe(true);
+    expect(await delivered(fresh)).toBe(false);
+    expect(await delivered(three)).toBe(false);
+    expect(await delivered(old)).toBe(false);
   });
 });

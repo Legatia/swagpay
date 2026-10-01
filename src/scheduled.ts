@@ -1,7 +1,6 @@
 import { getAgentByName } from "agents";
 import { TREASURY_NAME } from "./agent/treasury-agent";
 import { createRpc } from "./arc";
-import { listUndelivered } from "./escalations";
 import { refreshRates } from "./fx";
 import { cleanupSandbox } from "./sandbox/cleanup";
 import { isSandbox } from "./sandbox/config";
@@ -29,10 +28,23 @@ export function jobsDue(at: Date, env?: Env): Job[] {
   return jobs;
 }
 
-/** Sandbox: re-sends every decided escalation the agent has not heard (the owner's /resend path). Logs failures; never throws. */
-export async function resendDecisions(env: Env): Promise<void> {
+const RESEND_WINDOW_MS = 6 * 3_600_000;
+const RESEND_MAX_PER_RUN = 20;
+const isPowerOfTwo = (n: number) => n >= 1 && (n & (n - 1)) === 0;
+
+/**
+ * Sandbox: re-sends decided escalations the agent has not heard (the owner's /resend path). A decision is tried once its age in whole
+ * minutes is a power of two (1, 2, 4 ... 256), so a failing one backs off and is left alone after about 4.3 hours; a fresh decision
+ * (under a minute) is left to decide()'s own delivery. Logs failures; never throws.
+ */
+export async function resendDecisions(env: Env, now: Date = new Date()): Promise<void> {
   try {
-    for (const e of await listUndelivered(env.DB)) {
+    const rows = (await env.DB
+      .prepare("SELECT id, decided_at FROM escalations WHERE status != 'open' AND delivered_at IS NULL AND decided_at BETWEEN ? AND ? ORDER BY decided_at ASC")
+      .bind(new Date(now.getTime() - RESEND_WINDOW_MS).toISOString(), new Date(now.getTime() - 60_000).toISOString())
+      .all<{ id: number; decided_at: string }>()).results;
+    const due = rows.filter((r) => isPowerOfTwo(Math.floor((now.getTime() - Date.parse(r.decided_at)) / 60_000))).slice(0, RESEND_MAX_PER_RUN);
+    for (const e of due) {
       try {
         await resend(env, e.id);
       } catch (err) {
