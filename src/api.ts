@@ -20,6 +20,7 @@ import { isSandbox } from "./sandbox/config";
 import { handleSandboxOwner } from "./sandbox/owner-api";
 import { handleSandboxBank } from "./sandbox/bank";
 import { handleSandboxDiscover } from "./sandbox/discover-route";
+import { clientKey, clientOrdersToday, countClientOrder, envNumber } from "./limits";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -150,6 +151,11 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     if ((await countOrdersSince(env.DB, new Date(now.getTime() - 86_400_000))) >= cap) {
       return fail(429, "Swagpay is taking as many new orders as it can today. Please try again tomorrow.");
     }
+    const day = now.toISOString().slice(0, 10);
+    const client = await clientKey(env, request.headers.get("cf-connecting-ip"), day);
+    if (client && (await clientOrdersToday(env.DB, client, day)) >= envNumber(env, "ORDERS_PER_CLIENT_PER_DAY", 5)) {
+      return fail(429, "You've started the most orders allowed today. Continue one of them, or come back tomorrow.");
+    }
     // Only a create that passed every check claims its key, so a refused one can be corrected and retried.
     if (createKey && !(await reserveCreateKey(env.DB, createKey.key, createKey.hash, now))) {
       return answerSeenKey(await lookupCreateKey(env.DB, createKey.key, createKey.hash, now)) ?? fail(503, "Please try again.");
@@ -169,6 +175,13 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
       if (createKey) await releaseCreateKey(env.DB, createKey.key);
       await deleteOrder(env.DB, order.id);
       throw err;
+    }
+    if (client) {
+      try {
+        await countClientOrder(env.DB, client, day);
+      } catch (err) {
+        console.error("client order count failed", err);
+      }
     }
     if (createKey) await completeCreateKey(env.DB, createKey.key, order.id, token);
     return json(201, { token, url: `/o/${token}` }, NO_STORE);

@@ -2,6 +2,7 @@
 // and the daily limit apply) and returns its counts. It needs no captcha, so it also warms up cities before a demo.
 import { discoverPrinters, discoveryBlocked } from "../discovery/discover";
 import { CITY_PATTERN, cityKey } from "../discovery/names";
+import { takeModelCall } from "../limits";
 import { isSandbox } from "./config";
 
 const json = (status: number, body: unknown) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
@@ -17,5 +18,5 @@ export async function handleSandboxDiscover(request: Request, env: Env): Promise
   const now = new Date();
   const skipped = await discoveryBlocked(env, cityKey(city), null, now);
   if (skipped) return json(200, { skipped });
-  return json(200, await discoverPrinters(env, { city, orderId: null }, { fetch: (u, i) => fetch(u, i), now }));
+  return json(200, await discoverPrinters(env, { city, orderId: null }, { fetch: (u, i) => fetch(u, i), now, allowModelCall: () => takeModelCall(env) }));
 }

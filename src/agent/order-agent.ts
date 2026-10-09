@@ -6,6 +6,7 @@ import { REPLY_EXPIRY_SECONDS, expireQuoteRequests, replyPlan, replyToQuoteReque
 import { pickedPrinterLines, recordAsked } from "../quote-requests";
 import { FIND_PRINTERS_PER_ORDER, findPrinters } from "../discovery/discover";
 import type { FetchLike } from "../discovery/page";
+import { SANDBOX_BUDGET_TEXT, envNumber, sandboxBudgetLeft, takeModelCall } from "../limits";
 import { markPrinted } from "../telegram-webhook";
 import { createEscalation, type EscalationKind } from "../escalations";
 import { ratesFor, refreshRates } from "../fx";
@@ -35,6 +36,12 @@ export const MAX_MESSAGE_CHARS = 4000;
 class BudgetExhaustedError extends Error {
   constructor(readonly calls: number) {
     super("per-order model call budget spent");
+  }
+}
+
+class SandboxBudgetError extends Error {
+  constructor() {
+    super("sandbox daily model budget spent");
   }
 }
 
@@ -317,6 +324,23 @@ export class OrderAgent extends Agent<Env, OrderState> {
     await this.trigger();
   }
 
+  /** Per-order caps: MAX_MODEL_CALLS_PER_ORDER and MAX_HOST_MESSAGES_PER_ORDER override the defaults (the sandbox sets lower ones). */
+  private maxModelCalls(): number {
+    return envNumber(this.env, "MAX_MODEL_CALLS_PER_ORDER", MAX_MODEL_CALLS);
+  }
+
+  private maxHostMessages(): number {
+    return envNumber(this.env, "MAX_HOST_MESSAGES_PER_ORDER", MAX_HOST_MESSAGES);
+  }
+
+  /** Tells the host, once a day, that the sandbox's model budget is spent. */
+  private sandboxBudgetNotice(): void {
+    const day = new Date().toISOString().slice(0, 10);
+    if (this.meta("budget_notice_day") === day) return;
+    this.addThread("system", SANDBOX_BUDGET_TEXT);
+    this.setMeta("budget_notice_day", day);
+  }
+
   private orderId(): number {
     const id = this.state.orderId;
     if (id === null) throw new Error("order not initialised");
@@ -369,7 +393,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.orderId();
     if (text.length > MAX_MESSAGE_CHARS) throw new Error("message too long");
     const sent = this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM thread WHERE sender = 'host'`[0].n;
-    if (sent >= MAX_HOST_MESSAGES) throw new Error("message limit reached");
+    if (sent >= this.maxHostMessages()) throw new Error("message limit reached");
     this.addInbox({ kind: "host", text });
     const entry = this.addThread("host", text);
     await this.trigger();
@@ -430,11 +454,27 @@ export class OrderAgent extends Agent<Env, OrderState> {
       await this.systemEscalation(orderId, "per-order model call budget spent");
     };
     const calls = Number(this.meta("model_calls") ?? "0");
-    if (calls >= MAX_MODEL_CALLS) {
+    if (calls >= this.maxModelCalls()) {
       await budgetSpent(calls);
       if (pending.length > 0) this.sql`DELETE FROM inbox WHERE id <= ${pending.at(-1)!.id}`;
       this.setMeta("turn_pending", "0");
       return null;
+    }
+    // The sandbox's daily budget is spent: the messages stay in the inbox for the next turn after the reset. The turn is claimed while
+    // the budget is read, so an overlapping turn still returns early; nothing awaits between here and the claim below.
+    if (isSandbox(this.env)) {
+      this.turnRunning = true;
+      let left: boolean;
+      try {
+        left = await sandboxBudgetLeft(this.env);
+      } finally {
+        this.turnRunning = false;
+      }
+      if (!left) {
+        this.sandboxBudgetNotice();
+        this.setMeta("turn_pending", "0");
+        return null;
+      }
     }
 
     // Build the policy and handlers before draining, so a bad config loses nothing.
@@ -493,7 +533,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
           this.setMeta("find_printers_calls", String(calls + 1));
           const methods = [...new Set(this.readSpec().items.map((i) => i.method).filter((m): m is string => !!m))];
           const fetchImpl: FetchLike = this.discoveryFetchOverride ?? ((u, i) => fetch(u, i));
-          return findPrinters(this.env, { orderId, city, country, methods }, { fetch: fetchImpl, now: new Date() });
+          return findPrinters(this.env, { orderId, city, country, methods }, { fetch: fetchImpl, now: new Date(), allowModelCall: () => takeModelCall(this.env) });
         },
         pickedPrinters: (vendorIds) => pickedPrinterLines(this.env.DB, vendorIds),
         askPrinters: (escalationId, vendorIds) => this.askPrinters(escalationId, vendorIds),
@@ -565,7 +605,8 @@ export class OrderAgent extends Agent<Env, OrderState> {
       const model: ModelClient = {
         create: async (req) => {
           const n = Number(this.meta("model_calls") ?? "0");
-          if (n >= MAX_MODEL_CALLS) throw new BudgetExhaustedError(n);
+          if (n >= this.maxModelCalls()) throw new BudgetExhaustedError(n);
+          if (!(await takeModelCall(this.env))) throw new SandboxBudgetError();
           this.setMeta("model_calls", String(n + 1));
           return real.create(req);
         },
@@ -589,6 +630,9 @@ export class OrderAgent extends Agent<Env, OrderState> {
     } catch (err) {
       if (err instanceof BudgetExhaustedError) {
         await budgetSpent(err.calls);
+      } else if (err instanceof SandboxBudgetError) {
+        this.sandboxBudgetNotice();
+        await log({ orderId, tool: "agent_run", reason: "sandbox daily model budget spent", input: null, verdict: "none", outcome: "error" });
       } else {
         this.addThread("system", "Something went wrong on our side. Your message is saved and the agent will pick it up.");
         await log({
