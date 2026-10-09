@@ -3,6 +3,8 @@ import { DEFAULT_POLICY } from "../src/policy";
 import { EMPTY_SPEC, itemsKey, type OrderSpec } from "../src/order-spec";
 import { completeSpec } from "./fixtures";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile, type ToolContext } from "../src/agent/tools";
+import { SYSTEM_PROMPT } from "../src/agent/prompt";
+import type { FindResult } from "../src/discovery/discover";
 import { previewsIn } from "../src/agent/previews";
 import type { NewDecision } from "../src/db";
 import { toBase64 } from "../src/ids";
@@ -12,7 +14,10 @@ function fakeCtx(files: ArtworkFile[] = []) {
   const state = { spec: structuredClone(EMPTY_SPEC) as OrderSpec, posted: [] as string[], decisions: [] as Omit<NewDecision, "orderId">[], escalations: [] as { key: string; kind: string; summary: string }[], costs: new Map<string, number>(), printers: null as string[] | null,
     rates: { USD: { plnPerUnit: 4, usdPerUnit: 1 }, EUR: { plnPerUnit: 4.3, usdPerUnit: 1.075 } } as Record<string, { plnPerUnit: number; usdPerUnit: number } | null>,
     quotes: [] as (NewQuote & { validUntil: Date })[], status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"),
-    withdrawn: null as number | null, withdrawCalls: [] as string[] };
+    withdrawn: null as number | null, withdrawCalls: [] as string[],
+    findResult: null as FindResult | { refused: string } | null, findCalls: [] as string[][],
+    picked: { lines: ["v45 Druk Gdańsk (Gdańsk; screen; 0 jobs, 0 on time; found by the agent)"], refused: [] as string[] },
+    asked: [] as Array<{ escalationId: number; ids: number[] }>, askRefused: [] as string[], sandbox: false };
   const statuses = new Map<string, "open" | "approved" | "rejected">();
   const previews = new Map<string, number>();
   const state2 = { loads: 0 };
@@ -34,6 +39,15 @@ function fakeCtx(files: ArtworkFile[] = []) {
       return { id: state.escalations.length, status: "open", created: true };
     },
     async suggestPrinters() { return state.printers; },
+    async findPrinters(city, country) {
+      state.findCalls.push([city, country]);
+      return state.findResult ?? { inCity: [], elsewhere: [], searched: null, skipped: null };
+    },
+    async pickedPrinters() { return state.picked; },
+    async askPrinters(escalationId, ids) {
+      state.asked.push({ escalationId, ids });
+      return { asked: state.askRefused.length ? [] : ids, refused: state.askRefused, sandbox: state.sandbox };
+    },
     async orderSummary() { return { number: 7, status: state.status, deliverBy: state.deliverBy, deliveryPlace: "Kolektyw3" }; },
     async printerCost(key) { return state.costs.get(key) ?? null; },
     async rates(c) { return state.rates[c] ?? null; },
@@ -59,7 +73,7 @@ const BANNER_KEY = `approval:${BANNER_REASON} [1 × 2 m banner]`;
 
 describe("tool definitions", () => {
   it("defines the intake tools with object schemas that require a reason", () => {
-    expect(TOOL_DEFINITIONS.map((t) => t.name)).toEqual(["ask_host", "update_order", "check_artwork", "escalate", "request_printer_cost", "send_quote"]);
+    expect(TOOL_DEFINITIONS.map((t) => t.name)).toEqual(["ask_host", "update_order", "check_artwork", "escalate", "find_printers", "request_printer_cost", "send_quote"]);
     for (const t of TOOL_DEFINITIONS) {
       expect(t.input_schema.type).toBe("object");
       expect(t.input_schema.required).toContain("reason");
@@ -100,6 +114,9 @@ describe("ask_host", () => {
       async logDecision(d) { state.decisions.push(d); },
       async escalateOnce() { return { id: 1, status: "open" as const, created: true }; },
       async suggestPrinters() { return null; },
+      async findPrinters() { return { inCity: [], elsewhere: [], searched: null, skipped: null }; },
+      async pickedPrinters() { return { lines: [], refused: [] }; },
+      async askPrinters() { return { asked: [], refused: [], sandbox: false }; },
       async orderSummary() { return { number: 7, status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"), deliveryPlace: "Kolektyw3" }; },
       async printerCost() { return null; },
       async rates() { return null; },
@@ -112,6 +129,112 @@ describe("ask_host", () => {
     expect(r.content).toContain("Tool failed");
     expect(state.decisions).toHaveLength(1);
     expect(state.decisions[0]).toMatchObject({ tool: "ask_host", reason: "greeting the host", outcome: "error", detail: "db down" });
+  });
+});
+
+describe("find_printers", () => {
+  const ask = { city: "Gdańsk", country: "pl", reason: "find printers for the delivery city" };
+
+  it("is blocked until an item has a print method", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = { items: [{ kind: "tshirt", description: "tee", quantity: 10 }], artwork: [] };
+    const r = await h.find_printers(ask);
+    expect(r.isError).toBe(true);
+    expect(r.content).toBe("Not searched. no item has a print method yet; choose the methods with update_order first");
+    expect(state.findCalls).toEqual([]);
+  });
+
+  it("lists printers in the city, then elsewhere, with what they cover", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec); // screen + diecut
+    state.findResult = {
+      inCity: [{ id: 45, name: "PRINTMAX sp. z o.o.", city: "Gdańsk", methods: ["screen", "diecut"], covers: true, jobs: 0, onTime: 0, foundToday: true }],
+      elsewhere: [{ id: 12, name: "Reflect", city: "Poznań", methods: ["screen"], covers: false, jobs: 2, onTime: 2, foundToday: false }],
+      searched: { found: 6, verified: 4, status: "done" }, skipped: null,
+    };
+    const r = await h.find_printers(ask);
+    expect(r.content).toBe([
+      "In Gdańsk:",
+      "printer #45 PRINTMAX sp. z o.o. (Gdańsk; screen, diecut; covers all; 0 jobs, 0 on time; found today)",
+      "Elsewhere in Poland (courier delivery):",
+      "printer #12 Reflect (Poznań; screen; covers 1 of 2; 2 jobs, 2 on time)",
+      "Searched for new printers in Gdańsk: found 6, verified 4.",
+      "Pick up to 3 printers that cover the order's methods and call request_printer_cost with their numbers in printerIds.",
+    ].join("\n"));
+    expect(state.findCalls).toEqual([["Gdańsk", "PL"]]);
+    expect(state.decisions.at(-1)).toMatchObject({ tool: "find_printers", verdict: "none", outcome: "done", detail: "searched: found 6, verified 4" });
+  });
+
+  it("says why it didn't search, and to ask the owner when nothing is known", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    state.findResult = { inCity: [], elsewhere: [], searched: null, skipped: "searching for new printers only works in Poland" };
+    const r = await h.find_printers({ ...ask, city: "Leeds", country: "GB" });
+    expect(r.content).toBe("Did not search for new printers: searching for new printers only works in Poland.\nNo verified printer found. Call request_printer_cost without printerIds; the owner will find one.");
+    state.findResult = { inCity: [], elsewhere: [], searched: { found: 2, verified: 0, status: "rate_limited" }, skipped: null };
+    expect((await h.find_printers(ask)).content).toContain("Searched for new printers in Gdańsk: found 2, verified 0 (the tax register didn't answer; unverified printers are checked again tonight).");
+  });
+
+  it("refuses a city that isn't letters, spaces or hyphens, and passes on a refusal", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    expect((await h.find_printers({ ...ask, city: "Gdańsk<script>" })).content).toMatch(/^Invalid input\. city:/);
+    expect((await h.find_printers({ ...ask, country: "POL" })).content).toMatch(/^Invalid input\. country:/);
+    state.findResult = { refused: "find_printers was already used 5 times for this order" };
+    const r = await h.find_printers(ask);
+    expect(r.isError).toBe(true);
+    expect(r.content).toBe("Not searched. find_printers was already used 5 times for this order");
+  });
+});
+
+describe("request_printer_cost with printerIds", () => {
+  it("puts the agent's picks in the cost request and asks them (sandbox)", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    state.sandbox = true;
+    const r = await h.request_printer_cost({ printerIds: [45, 12], reason: "two verified printers cover the order" });
+    expect(state.escalations).toHaveLength(1);
+    expect(state.escalations[0].summary).toContain("\nAgent's picks:\nv45 Druk Gdańsk (Gdańsk; screen; 0 jobs, 0 on time; found by the agent)\nReply /cost");
+    expect(state.asked).toEqual([{ escalationId: 1, ids: [45, 12] }]);
+    expect(r.content).toBe("Asked printers #45, #12 for quotes (cost request #1). Their replies arrive together as one event; tell the host you are getting prices.");
+    expect(state.decisions.at(-1)).toMatchObject({ verdict: "escalate", outcome: "escalated", detail: "#1: #45, #12" });
+  });
+
+  it("asks the owner to get the quotes in production", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    const r = await h.request_printer_cost({ printerIds: [45], reason: "one printer covers the order" });
+    expect(r.content).toBe("Asked the owner to get quotes from printers #45 (cost request #1). The cost arrives as an event; tell the host you are getting the price.");
+  });
+
+  it("refuses unverified picks before any cost request exists, and a refused ask", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    state.picked = { lines: [], refused: ["printer #9 isn't verified"] };
+    const r = await h.request_printer_cost({ printerIds: [9], reason: "asking" });
+    expect(r).toEqual({ content: "Not asked. printer #9 isn't verified", isError: true });
+    expect(state.escalations).toEqual([]);
+    state.picked = { lines: ["v45 Druk"], refused: [] };
+    state.askRefused = ["printer #45 was already asked for this cost request"];
+    const again = await h.request_printer_cost({ printerIds: [45], reason: "asking again" });
+    expect(again).toEqual({ content: "Not asked. printer #45 was already asked for this cost request", isError: true });
+  });
+
+  it("takes 1 to 3 distinct printers", async () => {
+    const { h, state } = fakeCtx();
+    state.spec = structuredClone(completeSpec);
+    for (const printerIds of [[1, 2, 3, 4], [1, 1], []]) {
+      expect((await h.request_printer_cost({ printerIds, reason: "asking" })).content).toMatch(/^Invalid input\. printerIds/);
+    }
+  });
+});
+
+describe("prompt", () => {
+  it("sends the agent to find printers itself, anywhere in Poland", () => {
+    expect(SYSTEM_PROMPT).toContain("events in Poland");
+    expect(SYSTEM_PROMPT).not.toContain("events in Warsaw");
+    expect(SYSTEM_PROMPT).toContain("call find_printers with the delivery city");
+    expect(SYSTEM_PROMPT).toContain("Never name a printer to the host.");
   });
 });
 

@@ -45,6 +45,9 @@ describe("quote texts", () => {
       const text = costRequestText(7, completeSpec, by, "Kolektyw3", "two colours", suggestions);
       expect(costRequestWithoutPrinters(text)).toBe(head);
     }
+    const picks = costRequestText(7, completeSpec, by, "Kolektyw3", "two colours", ["v45 Picked Print (Gdańsk; screen; 0 jobs, 0 on time)"], "Agent's picks:");
+    expect(picks).toContain("\nAgent's picks:\nv45 Picked Print");
+    expect(costRequestWithoutPrinters(picks)).toBe(head);
     // A summary without suggestions (older requests) is left as it is.
     expect(costRequestWithoutPrinters(plain)).toBe(plain);
     expect(costRequestWithoutPrinters("Printer cost again")).toBe("Printer cost again");

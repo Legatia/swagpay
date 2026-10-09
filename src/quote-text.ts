@@ -25,7 +25,9 @@ export function itemLine(item: OrderSpec["items"][number]): string {
   return parts.join(", ");
 }
 
-export function costRequestText(orderNumber: number, spec: OrderSpec, deliverBy: Date, place: string, note?: string, suggestions?: string[] | null): string {
+export function costRequestText(
+  orderNumber: number, spec: OrderSpec, deliverBy: Date, place: string, note?: string, suggestions?: string[] | null, header = "Suggested printers:",
+): string {
   return [
     `Printer cost needed for order ${orderNumber}.`,
     ...spec.items.map((i) => `- ${itemLine(i)}`),
@@ -33,13 +35,13 @@ export function costRequestText(orderNumber: number, spec: OrderSpec, deliverBy:
     ...(note ? [`Agent's note: ${oneLine(note)}`] : []),
     ...(suggestions === undefined ? [] : suggestions === null
       ? ["City not recognised from the delivery place; pick a printer yourself."]
-      : suggestions.length ? ["Suggested printers:", ...suggestions] : ["No screened printer found for this city yet."]),
+      : suggestions.length ? [header, ...suggestions] : ["No screened printer found for this city yet."]),
     "Reply /cost <this #> <amount> [PLN|EUR|GBP|USD|INR] [v<printer #>] [note]",
   ].join("\n");
 }
 
 /** Printer lines in a cost request start here: the owner reads them; the order agent never does (its reasons are public). */
-const PRINTER_LINES = /^(?:Suggested printers:|City not recognised|No screened printer)/;
+const PRINTER_LINES = /^(?:Suggested printers:|Agent's picks:|City not recognised|No screened printer)/;
 
 /** A cost request as the order agent may read it: everything from the printer suggestions on is dropped. */
 export function costRequestWithoutPrinters(summary: string): string {

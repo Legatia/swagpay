@@ -3,7 +3,9 @@ import { getOrderById, insertDecision, saveOrderSpec } from "../db";
 import { isSandbox } from "../sandbox/config";
 import { PRINTER_STEPS, nextStep, stepDelaySeconds, stepMessage, type PrinterStep } from "../sandbox/printer";
 import { REPLY_EXPIRY_SECONDS, expireQuoteRequests, replyPlan, replyToQuoteRequest, repliesEvent } from "../sandbox/quotes";
-import { recordAsked } from "../quote-requests";
+import { pickedPrinterLines, recordAsked } from "../quote-requests";
+import { FIND_PRINTERS_PER_ORDER, findPrinters } from "../discovery/discover";
+import type { FetchLike } from "../discovery/page";
 import { markPrinted } from "../telegram-webhook";
 import { createEscalation, type EscalationKind } from "../escalations";
 import { ratesFor, refreshRates } from "../fx";
@@ -74,6 +76,8 @@ export class OrderAgent extends Agent<Env, OrderState> {
   modelOverride: ModelClient | null = null;
   /** Tests set this to a fake; production uses the Bot API. */
   telegramOverride: TelegramClient | null = null;
+  /** Tests set this to a fake; discovery otherwise fetches the web. */
+  discoveryFetchOverride: FetchLike | null = null;
   private tablesReady = false;
   private turnRunning = false;
 
@@ -483,6 +487,16 @@ export class OrderAgent extends Agent<Env, OrderState> {
           }
           return lines;
         },
+        findPrinters: async (city, country) => {
+          const calls = Number(this.meta("find_printers_calls") ?? "0");
+          if (calls >= FIND_PRINTERS_PER_ORDER) return { refused: `find_printers was already used ${FIND_PRINTERS_PER_ORDER} times for this order` };
+          this.setMeta("find_printers_calls", String(calls + 1));
+          const methods = [...new Set(this.readSpec().items.map((i) => i.method).filter((m): m is string => !!m))];
+          const fetchImpl: FetchLike = this.discoveryFetchOverride ?? ((u, i) => fetch(u, i));
+          return findPrinters(this.env, { orderId, city, country, methods }, { fetch: fetchImpl, now: new Date() });
+        },
+        pickedPrinters: (vendorIds) => pickedPrinterLines(this.env.DB, vendorIds),
+        askPrinters: (escalationId, vendorIds) => this.askPrinters(escalationId, vendorIds),
         orderSummary: async () => {
           const row = await getOrderById(this.env.DB, orderId);
           if (!row) throw new Error("order row missing");

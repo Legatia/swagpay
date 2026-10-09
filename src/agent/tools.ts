@@ -10,6 +10,8 @@ import { businessDaysBetween, leadTimeCutoff } from "../time";
 import type { NewQuote, QuoteRow } from "../quotes";
 import { countPdfPages, imageSize, sniffMediaType } from "../sniff";
 import { costRequestText, priceBand, quoteText } from "../quote-text";
+import type { FindResult, PrinterInfo } from "../discovery/discover";
+import { CITY_PATTERN } from "../discovery/names";
 import { sanitize } from "./inbox";
 import type { ToolHandler, ToolOutcome } from "./loop";
 
@@ -46,6 +48,12 @@ export interface ToolContext extends DecisionLogger {
   wasPreviewed(fileId: string): Promise<boolean>;
   /** Up to 3 printer lines for the delivery city; null when the city cannot be read from the delivery place. */
   suggestPrinters(): Promise<string[] | null>;
+  /** Verified printers for `city` (find_printers); may search for new ones first. A refusal when the order used its calls. */
+  findPrinters(city: string, country: string): Promise<FindResult | { refused: string }>;
+  /** The owner's lines for printers the agent picked, or why they can't be asked; writes nothing. */
+  pickedPrinters(vendorIds: number[]): Promise<{ lines: string[]; refused: string[] }>;
+  /** Records the picks on the cost request: the sandbox asks them (simulated replies), production drafts the requests for the owner. */
+  askPrinters(escalationId: number, vendorIds: number[]): Promise<{ asked: number[]; refused: string[]; sandbox: boolean }>;
   orderSummary(): Promise<{ number: number; status: string; deliverBy: Date; deliveryPlace: string }>;
   /** PLN gross (delivery included) the owner gave for these items, or null. */
   printerCost(specKey: string): Promise<number | null>;
@@ -63,7 +71,18 @@ const AskHostInput = z.object({ message: z.string().trim().min(1).max(2000).desc
 const UpdateOrderInput = z.object({ spec: OrderSpecSchema.describe("The whole order as it now stands"), reason });
 const CheckArtworkInput = z.object({ fileId: z.string().min(1).max(64), reason });
 const EscalateInput = z.object({ summary: z.string().trim().min(3).max(500).describe("What the owner needs to decide or know"), reason });
-const RequestCostInput = z.object({ note: z.string().trim().max(500).optional().describe("Anything the printer needs to know, e.g. ink colours"), reason });
+const FindPrintersInput = z.object({
+  city: z.string().trim().regex(CITY_PATTERN, "use the city's name: 1 to 40 letters, spaces or hyphens").describe('The delivery city, in its usual Polish form, e.g. "Gdańsk"'),
+  country: z.string().trim().regex(/^[A-Za-z]{2}$/, "use a two-letter country code").describe('Two-letter country code, e.g. "PL"'),
+  reason,
+});
+const RequestCostInput = z.object({
+  note: z.string().trim().max(500).optional().describe("Anything the printer needs to know, e.g. ink colours"),
+  printerIds: z.array(z.number().int().positive()).min(1).max(3)
+    .refine((ids) => new Set(ids).size === ids.length, "list each printer once")
+    .optional().describe("Up to 3 printer numbers from find_printers to ask for a quote"),
+  reason,
+});
 
 const SendQuoteInput = z.object({
   currency: z.enum(["USD", "EUR"]).describe("USD (paid in USDC) or EUR (paid in EURC); follow the host's preference, USD if none"),
@@ -99,8 +118,13 @@ export const TOOL_DEFINITIONS: BetaTool[] = [
     input_schema: inputSchema(EscalateInput),
   },
   {
+    name: "find_printers",
+    description: "List verified printers for the delivery city, searching for new ones first when few are known (Poland only). Call it when every item has a print method.",
+    input_schema: inputSchema(FindPrintersInput),
+  },
+  {
     name: "request_printer_cost",
-    description: "Ask the owner for the printer's cost of the complete order. The cost arrives later as an event.",
+    description: "Get the printer's cost of the complete order. With printerIds, those printers are asked for a quote; without, the owner finds a printer. The cost or the printers' replies arrive later as an event.",
     input_schema: inputSchema(RequestCostInput),
   },
   {
@@ -232,7 +256,36 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         : { verdict: "allow", outcome: "done", result: { content: lines.join(" ") } };
     }),
 
-    request_printer_cost: logged(ctx, "request_printer_cost", RequestCostInput, async ({ note }) => {
+    find_printers: logged(ctx, "find_printers", FindPrintersInput, async ({ city, country: raw }) => {
+      const country = raw.toUpperCase();
+      const methods = [...new Set((await ctx.getSpec()).items.map((i) => i.method).filter((m): m is string => !!m))];
+      const blocked = (detail: string): Logged => ({ verdict: "block", outcome: "blocked", detail, result: { content: `Not searched. ${detail}`, isError: true } });
+      if (!methods.length) return blocked("no item has a print method yet; choose the methods with update_order first");
+      const r = await ctx.findPrinters(city, country);
+      if ("refused" in r) return blocked(r.refused);
+      const line = (p: PrinterInfo) => {
+        const n = methods.filter((m) => p.methods.includes(m)).length;
+        const covers = n === methods.length ? "covers all" : `covers ${n} of ${methods.length}`;
+        return `printer #${p.id} ${p.name} (${p.city}; ${p.methods.join(", ") || "methods unknown"}; ${covers}; ${p.jobs} jobs, ${p.onTime} on time${p.foundToday ? "; found today" : ""})`;
+      };
+      const lines: string[] = [];
+      if (r.inCity.length) lines.push(`In ${city}:`, ...r.inCity.map(line));
+      if (r.elsewhere.length) lines.push(`Elsewhere in ${country === "PL" ? "Poland" : country} (courier delivery):`, ...r.elsewhere.map(line));
+      if (r.searched) {
+        const how = r.searched.status === "done" ? ""
+          : r.searched.status === "rate_limited" ? " (the tax register didn't answer; unverified printers are checked again tonight)" : " (the search failed)";
+        lines.push(`Searched for new printers in ${city}: found ${r.searched.found}, verified ${r.searched.verified}${how}.`);
+      } else if (r.skipped) {
+        lines.push(`Did not search for new printers: ${r.skipped}.`);
+      }
+      lines.push(r.inCity.length || r.elsewhere.length
+        ? "Pick up to 3 printers that cover the order's methods and call request_printer_cost with their numbers in printerIds."
+        : "No verified printer found. Call request_printer_cost without printerIds; the owner will find one.");
+      const detail = r.searched ? `searched: found ${r.searched.found}, verified ${r.searched.verified}` : `${r.inCity.length + r.elsewhere.length} known`;
+      return { verdict: "none", outcome: "done", detail, result: { content: lines.join("\n") } };
+    }),
+
+    request_printer_cost: logged(ctx, "request_printer_cost", RequestCostInput, async ({ note, printerIds }) => {
       const spec = await ctx.getSpec();
       const missing = missingInfo(spec);
       if (missing.length) {
@@ -245,6 +298,22 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         return { verdict: "none", outcome: "done", result: { content: `The owner already gave the printer cost for this order: ${known.toFixed(2)} PLN gross, delivery included. Use send_quote.` } };
       }
       const order = await ctx.orderSummary();
+      if (printerIds?.length) {
+        const notAsked = (detail: string): Logged => ({ verdict: "block", outcome: "blocked", detail, result: { content: `Not asked. ${detail}`, isError: true } });
+        const picked = await ctx.pickedPrinters(printerIds);
+        if (picked.refused.length) return notAsked(picked.refused.join("; "));
+        const e = await ctx.escalateOnce(`cost:${key}`, "cost", costRequestText(order.number, spec, order.deliverBy, order.deliveryPlace, note, picked.lines, "Agent's picks:"), { specKey: key });
+        if (e.status === "rejected") {
+          return { verdict: "escalate", outcome: "escalated", detail: `#${e.id}`, result: { content: `The owner declined to price this order (#${e.id}). Tell the host a person will contact them.` } };
+        }
+        const asked = await ctx.askPrinters(e.id, printerIds);
+        if (asked.refused.length) return notAsked(asked.refused.join("; "));
+        const list = asked.asked.map((id) => `#${id}`).join(", ");
+        const content = asked.sandbox
+          ? `Asked printers ${list} for quotes (cost request #${e.id}). Their replies arrive together as one event; tell the host you are getting prices.`
+          : `Asked the owner to get quotes from printers ${list} (cost request #${e.id}). The cost arrives as an event; tell the host you are getting the price.`;
+        return { verdict: "escalate", outcome: "escalated", detail: `#${e.id}: ${list}`, result: { content } };
+      }
       // Suggestions only help the owner: when they can't be read, the request goes out as for an unknown city.
       let suggestions: string[] | null = null;
       try {

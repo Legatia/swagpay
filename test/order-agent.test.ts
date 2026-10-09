@@ -413,6 +413,54 @@ describe("OrderAgent", () => {
     expect((await ask(60))).not.toContain("far (");
   });
 
+  it("finds printers in the delivery city and asks the owner to get quotes from the agent's picks", async () => {
+    const { order, stub } = await newAgent();
+    const now = new Date().toISOString();
+    const ids: number[] = [];
+    for (const n of ["A", "B", "C"]) {
+      ids.push((await env.DB.prepare("INSERT INTO vendors (name, city, country, methods, status, source_ref, created_at, updated_at) VALUES (?, 'Gdańsk', 'PL', '[\"screen\", \"diecut\"]', 'screened', ?, ?, ?) RETURNING id")
+        .bind(`Gdansk Print ${n}`, `t:gd-${n}-${crypto.randomUUID()}`, now, now).first<{ id: number }>())!.id);
+    }
+    let model!: ReturnType<typeof scriptedModel>;
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.telegramOverride = { async send() { return 1; }, async answerCallback() {} };
+      agent.discoveryFetchOverride = async () => { throw new Error("no network in tests"); };
+      await agent.init(order.id, intake);
+      agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(completeSpec)})`;
+      model = scriptedModel([
+        msg([toolUse("find_printers", { city: "Gdańsk", country: "PL", reason: "find printers near the venue" })], "tool_use"),
+        msg([toolUse("request_printer_cost", { printerIds: [ids[0], ids[1]], reason: "two printers in the city cover the order" })], "tool_use"),
+        msg([], "end_turn"),
+      ]);
+      agent.modelOverride = model;
+      await agent.processTurn();
+    });
+    const found = JSON.stringify(model.requests[1].messages.at(-1));
+    expect(found).toContain(`printer #${ids[0]} Gdansk Print A (Gdańsk; screen, diecut; covers all; 0 jobs, 0 on time)`);
+    const summary = (await env.DB.prepare("SELECT summary FROM escalations WHERE kind = 'cost' AND order_id = ?").bind(order.id).first<{ summary: string }>())!.summary;
+    expect(summary).toContain(`Agent's picks:\nv${ids[0]} Gdansk Print A (Gdańsk; screen, diecut; 0 jobs, 0 on time)\nv${ids[1]} Gdansk Print B`);
+    const asked = (await env.DB.prepare("SELECT vendor_id, status FROM quote_requests WHERE order_id = ? ORDER BY id").bind(order.id).all()).results;
+    expect(asked).toEqual([{ vendor_id: ids[0], status: "drafted" }, { vendor_id: ids[1], status: "drafted" }]);
+  });
+
+  it("lets find_printers run 5 times per order", async () => {
+    const { order, stub } = await newAgent();
+    let model!: ReturnType<typeof scriptedModel>;
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      agent.telegramOverride = { async send() { return 1; }, async answerCallback() {} };
+      agent.discoveryFetchOverride = async () => { throw new Error("no network in tests"); };
+      await agent.init(order.id, intake);
+      agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(completeSpec)})`;
+      const call = () => toolUse("find_printers", { city: "Leeds", country: "GB", reason: "find printers" });
+      model = scriptedModel([msg([call(), call(), call(), call(), call(), call()], "tool_use"), msg([], "end_turn")]);
+      agent.modelOverride = model;
+      await agent.processTurn();
+    });
+    const results = JSON.stringify(model.requests[1].messages.at(-1));
+    expect(results.match(/Did not search for new printers/g)).toHaveLength(5);
+    expect(results).toContain("Not searched. find_printers was already used 5 times for this order");
+  });
+
   it("withdraws an open quote when update_order changes the items", async () => {
     const { order, stub } = await newAgent();
     const quote = await createQuote(env.DB, order.id, { currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, markup: 0.4757, itemsKey: "old-items" }, new Date(), new Date(Date.now() + 48 * 3_600_000));
