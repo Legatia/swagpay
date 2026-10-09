@@ -125,3 +125,25 @@ export function seenLines(payments) {
   }
   return out;
 }
+
+// One printer the order agent asked for a quote (the panel API's cost.quoteRequests). The replies are
+// simulated in the sandbox; the panel's heading says so.
+const amount2 = (n) => Number(n).toFixed(2);
+export function quoteRow(q) {
+  const title = [q?.name, q?.city].filter(Boolean).join(", ") || `Printer #${q?.vendorId}`;
+  const o = q?.offer;
+  if (q?.status === "replied" && o) {
+    const landed = Number.isFinite(Number(o.landedPln)) && o.landedPln !== null ? `, ${amount2(o.landedPln)} PLN landed` : "";
+    const timing = o.late ? "after your delivery date" : "on time";
+    const used = o.used ? " In use as the printer cost." : "";
+    return { title, detail: `Offer: ${amount2(o.amount)} ${o.currency}${landed}. Arrives ${o.arrivesAt}, ${timing}.${used}`, offerId: o.offerId, canUse: !o.used };
+  }
+  const reason = judgeText(q?.declineReason ?? "");
+  const detail = {
+    asked: "Asked. Waiting for a reply.",
+    declined: reason ? `Declined: ${reason.replace(/\.?$/, ".")}` : "Declined.",
+    expired: "No reply.",
+    drafted: "Request drafted, not sent yet.",
+  }[q?.status] ?? judgeText(String(q?.status ?? "")) ?? "";
+  return { title, detail, offerId: null, canUse: false };
+}

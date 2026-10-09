@@ -63,3 +63,12 @@ html.sbx-on .side { top: calc(var(--sbx-h) + 16px); }
 .sbx-seen { margin: 12px 0 0; padding: 10px 12px; border-left: 3px solid #1f8f5f; background: var(--payment-bubble, #e2ecfa); border-radius: 8px; }
 .sbx-seen p { margin: 0; overflow-wrap: anywhere; }
 .sbx-seen p + p { margin-top: 4px; }
+
+/* The printers the agent asked, with their simulated replies. */
+.sbx-subhead { margin: 12px 0 6px; font-size: 0.85rem; font-weight: 700; color: var(--text-muted, #4a4f72); }
+.sbx-quotes { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.sbx-quote { padding: 10px 12px; border: 1px solid var(--line, #d9dcea); border-radius: 8px; background: var(--page, #f5f6f9); }
+.sbx-quote p { margin: 0; }
+.sbx-quote-title { font-weight: 700; }
+.sbx-quote-detail { overflow-wrap: anywhere; }
+.sbx-quote .sbx-buttons { margin-top: 8px; }

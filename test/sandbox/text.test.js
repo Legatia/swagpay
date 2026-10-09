@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE, PAY_EXACT_TEXT, seenLines } from "../../public/sandbox/text.js";
+import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE, PAY_EXACT_TEXT, quoteRow, seenLines } from "../../public/sandbox/text.js";
 
 describe("isSandboxHost", () => {
   it("matches sandbox hosts and local test mode only", () => {
@@ -199,5 +199,29 @@ describe("seenLines", () => {
     expect(seenLines([{ stage: "deposit", token: "USDC", amount: "1", txHashes: ["0x123", "javascript:alert(1)"] }])).toEqual([]);
     expect(seenLines([{ stage: "deposit", token: "USDC", amount: "1" }])).toEqual([]);
     expect(seenLines(undefined)).toEqual([]);
+  });
+});
+
+describe("quoteRow", () => {
+  const base = { vendorId: 3, name: "Tee Works", city: "Warsaw", declineReason: null, offer: null };
+  it("shows a usable offer with landed cost, arrival and timing", () => {
+    const r = quoteRow({ ...base, status: "replied", offer: { offerId: 9, currency: "PLN", amount: 15.8, landedPln: 16.4, arrivesAt: "2026-10-15", late: false, used: false } });
+    expect(r).toEqual({ title: "Tee Works, Warsaw", detail: "Offer: 15.80 PLN, 16.40 PLN landed. Arrives 2026-10-15, on time.", offerId: 9, canUse: true });
+  });
+  it("flags a late offer and an offer already in use", () => {
+    expect(quoteRow({ ...base, status: "replied", offer: { offerId: 9, currency: "EUR", amount: 3.5, landedPln: null, arrivesAt: "2026-10-30", late: true, used: false } }).detail)
+      .toBe("Offer: 3.50 EUR. Arrives 2026-10-30, after your delivery date.");
+    const used = quoteRow({ ...base, status: "replied", offer: { offerId: 9, currency: "PLN", amount: 1, landedPln: 1, arrivesAt: "2026-10-15", late: false, used: true } });
+    expect(used.canUse).toBe(false);
+    expect(used.detail).toMatch(/In use as the printer cost\.$/);
+  });
+  it("describes the other states", () => {
+    expect(quoteRow({ ...base, status: "asked" }).detail).toBe("Asked. Waiting for a reply.");
+    expect(quoteRow({ ...base, status: "declined", declineReason: "Too busy this week." }).detail).toBe("Declined: Too busy this week.");
+    expect(quoteRow({ ...base, status: "declined" }).detail).toBe("Declined.");
+    expect(quoteRow({ ...base, status: "expired" }).detail).toBe("No reply.");
+    expect(quoteRow({ ...base, status: "drafted" }).detail).toBe("Request drafted, not sent yet.");
+    expect(quoteRow({ ...base, name: "", city: "", status: "asked" }).title).toBe("Printer #3");
+    for (const s of ["asked", "declined", "expired", "drafted"]) expect(quoteRow({ ...base, status: s }).canUse).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 // Testnet sandbox UI: banner, testnet pay helper, and the judge's "You are the owner" panel.
 // Loaded as a module on every page; it does nothing unless the host is a sandbox host.
 // Every server-derived string goes in with textContent / createTextNode, never innerHTML.
-import { NETWORK_LINE, NO_QUOTE_HINT, PAY_EXACT_TEXT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint, seenLines } from "./text.js";
+import { NETWORK_LINE, NO_QUOTE_HINT, PAY_EXACT_TEXT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint, quoteRow, seenLines } from "./text.js";
 
 const FAUCET = "https://faucet.circle.com";
 const EXPLORER = "https://explorer.testnet.arc.io";
@@ -253,7 +253,21 @@ function orderPage(token) {
   /* cost */
   function buildCost(node, cost) {
     const suggestions = Array.isArray(cost.suggestions) ? cost.suggestions : [];
+    const asked = Array.isArray(cost.quoteRequests) ? cost.quoteRequests : [];
     node.append(h("h3", { text: "Printer cost needed", tabindex: "-1" }));
+    // The printers the agent asked. Their replies are simulated; using an offer records its landed cost.
+    if (asked.length) {
+      node.append(h("p", { class: "sbx-subhead", text: "Quotes from the printers the agent asked (simulated replies)" }));
+      const list = h("ul", { class: "sbx-quotes" });
+      asked.forEach((q, i) => {
+        const r = quoteRow(q);
+        list.append(h("li", { class: "sbx-quote" },
+          h("p", { class: "sbx-quote-title", text: r.title }),
+          h("p", { class: "sbx-quote-detail", text: r.detail }),
+          r.canUse ? h("div", { class: "sbx-buttons" }, button("Use this offer", () => act("use_offer", { offerId: r.offerId }), false, `use-offer-${r.offerId ?? i}`)) : null));
+      });
+      node.append(list, h("p", { class: "sbx-subhead", text: "Or enter the printer cost yourself" }));
+    }
     const vendor = h("select", { id: "sbx-vendor", "data-key": "cost-vendor" });
     suggestions.forEach((s, i) => vendor.append(h("option", { value: String(s.vendorId), text: [s.name, s.city].filter(Boolean).join(", ") || `Printer ${i + 1}` })));
     const amount = h("input", { id: "sbx-amount", "data-key": "cost-amount", type: "number", inputmode: "decimal", min: "0.01", step: "0.01", required: true });
