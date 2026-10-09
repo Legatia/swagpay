@@ -24,6 +24,10 @@ describe("NIP", () => {
     expect(findNips("NIP 1234567890")).toEqual([]);
     expect(findNips("NIP 1111111111 NIP 1111111111 NIP 2222222222 NIP 3333333333")).toEqual(["1111111111", "2222222222"]);
     expect(findNips("SNIPPET 5342708006")).toEqual([]);
+    for (const t of ["NIP: PL-534-270-80-06", "NIP/VAT: 5342708006", "NIP-5342708006", "NIP nr 534 270 80 06", "NIP (VAT): 534.270.80.06", "NIP\u00a0PL5342708006"]) {
+      expect(findNips(t)).toEqual(["5342708006"]);
+    }
+    expect(findNips("NIP i REGON: 54397852100000")).toEqual([]);
   });
 });
 
@@ -92,6 +96,14 @@ describe("pages", () => {
     expect(ok?.url.toString()).toBe("https://www.druk.pl/");
     expect(ok?.html).toContain("hello");
     expect(await readPage(new URL("https://bad.pl/"), f)).toBeNull();
+    // An expired shop domain parked at a registrar is not the shop's own page.
+    routes["https://druk-expired.pl/"] = () => new Response(null, { status: 301, headers: { location: "https://parking.rejestrator.pl/" } });
+    routes["https://parking.rejestrator.pl/"] = () => page("NIP 534-270-80-06 domeny@rejestrator.pl");
+    expect(await readPage(new URL("https://druk-expired.pl/"), f)).toBeNull();
+    expect(calls).not.toContain("https://parking.rejestrator.pl/");
+    routes["http://plain.pl/"] = () => new Response(null, { status: 301, headers: { location: "https://www.plain.pl/" } });
+    routes["https://www.plain.pl/"] = () => page("ok");
+    expect((await readPage(new URL("http://plain.pl/"), f))?.url.toString()).toBe("https://www.plain.pl/");
     expect(calls).not.toContain("http://10.0.0.1/");
     expect(await readPage(new URL("https://pdf.pl/"), f)).toBeNull();
     expect(await readPage(new URL("https://gone.pl/"), f)).toBeNull();
@@ -122,6 +134,7 @@ describe("pages", () => {
 
   it("turns HTML into text", () => {
     expect(htmlText("<p>a&amp;b</p><script>x</script>&#211;&#x141; &amp;#211;")).toBe(" a&b ÓŁ &#211;");
+    expect(htmlText("bad &#9999999; and &#x110000; entities")).toBe("bad \uFFFD and \uFFFD entities");
   });
 });
 
@@ -136,6 +149,13 @@ describe("search", () => {
   it("finds the array between citation markers", () => {
     const text = `I found these [1][2]:\n${JSON.stringify([shop("Druk [Gdańsk]", "druk.pl")])}\nSources [3]`;
     expect(parseShops(text).map((s) => [s.name, s.website.toString()])).toEqual([["Druk [Gdańsk]", "https://druk.pl/"]]);
+  });
+
+  it("tries every fenced block and ignores citation markers inside the array", () => {
+    const two = "```\nnote: searched twice\n```\nThen:\n```json\n" + JSON.stringify([shop("Druk", "druk.pl")]) + "\n```";
+    expect(parseShops(two).map((s) => s.name)).toEqual(["Druk"]);
+    const cited = `[{"name": "A", "website": "a.pl", "methods": []} [1], {"name": "B [x]", "website": "b.pl", "methods": []} [2][3]]`;
+    expect(parseShops(cited).map((s) => s.name)).toEqual(["A", "B [x]"]);
   });
 
   it("drops marketplaces, repeats and bad websites, normalises NIPs and methods, keeps at most 8", () => {

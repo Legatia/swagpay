@@ -8,7 +8,7 @@ import { createEscalation, getEscalation } from "../../src/escalations";
 import { cleanupSandbox } from "../../src/sandbox/cleanup";
 import type { SandboxOwnerState } from "../../src/sandbox/owner-api";
 import { SIMULATED } from "../../src/sandbox/printer";
-import { REPLY_EXPIRY_SECONDS, arrivalDate, replyPlan } from "../../src/sandbox/quotes";
+import { REPLY_EXPIRY_SECONDS, arrivalDate, replyPlan, repliesEvent } from "../../src/sandbox/quotes";
 import type { VendorRow } from "../../src/vendors";
 import { completeSpec, intakeFor, newOrderRow } from "../fixtures";
 
@@ -164,6 +164,17 @@ describe("simulated replies", () => {
     });
     expect((await rows(costId))[0].status).toBe("expired");
   });
+});
+
+it("waits for a reply whose offer is still being written", async () => {
+  const { order } = await newOrderRow();
+  const e = await createEscalation(env.DB, { orderId: order.id, kind: "cost", summary: "x", payload: {} });
+  const v = await addVendor("Mid Reply");
+  await env.DB.prepare("INSERT INTO quote_requests (order_id, escalation_id, vendor_id, status, created_at, settled_at) VALUES (?, ?, ?, 'replied', 'x', 'x')").bind(order.id, e.id, v).run();
+  expect(await repliesEvent(sandbox, e.id)).toBeNull();
+  const offer = await env.DB.prepare("INSERT INTO printer_offers (order_id, vendor_id, currency, price_cents, delivery_cents, other_cents, arrives_at, created_at) VALUES (?, ?, 'PLN', 1500, 0, 0, '2099-01-01', 'x') RETURNING id").bind(order.id, v).first<{ id: number }>();
+  await env.DB.prepare("UPDATE quote_requests SET offer_id = ? WHERE escalation_id = ?").bind(offer!.id, e.id).run();
+  expect(await repliesEvent(sandbox, e.id)).toContain(`offer #${offer!.id} from printer #${v}: 15.00 PLN landed`);
 });
 
 describe("owner panel", () => {

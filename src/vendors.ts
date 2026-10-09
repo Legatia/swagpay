@@ -164,10 +164,22 @@ export async function knownPrinters(db: D1Database, city: string, country: strin
   const key = cityKey(city);
   const all = (await db.prepare("SELECT * FROM vendors WHERE country = ? AND status IN ('partner', 'screened')").bind(country.toUpperCase()).all<VendorRow>()).results;
   const doing = all.filter((v) => methods.length === 0 || methodsOf(v).some((m) => methods.includes(m)));
+  // A printer found by a search for this city counts as in it, even when it is registered in a nearby town.
+  const local = (v: VendorRow) => cityKey(v.city) === key || foundFor(v) === key;
   return {
-    inCity: await rankVendors(db, doing.filter((v) => cityKey(v.city) === key), methods, 3),
-    elsewhere: await rankVendors(db, doing.filter((v) => cityKey(v.city) !== key), methods, 3),
+    inCity: await rankVendors(db, doing.filter(local), methods, 3),
+    elsewhere: await rankVendors(db, doing.filter((v) => !local(v)), methods, 3),
   };
+}
+
+function foundFor(v: VendorRow): string | null {
+  if (!v.evidence) return null;
+  try {
+    const f = (JSON.parse(v.evidence) as { foundFor?: unknown }).foundFor;
+    return typeof f === "string" ? f : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Screened or partner vendors outside `city`, ranked like suggestVendors, for large orders. */

@@ -110,7 +110,8 @@ export async function repliesEvent(env: Env, escalationId: number, now: Date = n
     )
     .bind(escalationId)
     .all<ReplyRow>()).results;
-  if (!rows.length || rows.some((r) => r.status === "asked")) return null;
+  // A reply whose offer is still being written counts as waiting, so it is never reported as "didn't reply".
+  if (!rows.length || rows.some((r) => r.status === "asked" || (r.status === "replied" && r.offer_id === null))) return null;
   const fresh = rows.filter((r) => r.notified_at === null);
   if (!fresh.length) return null;
   const heard = await env.DB

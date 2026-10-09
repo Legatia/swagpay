@@ -13,6 +13,8 @@ export const CITY_CACHE_DAYS = 30;
 export const RETRY_AFTER_HOURS = 24;
 export const DISCOVERIES_PER_ORDER = 2;
 export const FIND_PRINTERS_PER_ORDER = 5;
+/** Page fetches one discovery may make (8 shops: a homepage, a contact page, a redirect), well under a Worker's subrequest limit. */
+export const PAGE_FETCHES_PER_DISCOVERY = 24;
 const DEFAULT_DAILY_MAX = 30;
 
 export interface DiscoveryDeps {
@@ -33,6 +35,15 @@ export interface DiscoveryResult {
 }
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err)).slice(0, 300);
+
+/** `fetchImpl` for at most `max` calls; later calls fail, so the page reads that make them come back empty. */
+function budgeted(fetchImpl: FetchLike, max: number): FetchLike {
+  let used = 0;
+  return async (input, init) => {
+    if (++used > max) throw new Error("page budget spent");
+    return fetchImpl(input, init);
+  };
+}
 
 /** Why a discovery won't run now, or null when it may: the city cache (30 days; 24 hours after a failure), 2 per order, the daily maximum. */
 export async function discoveryBlocked(env: Env, key: string, orderId: number | null, now: Date): Promise<string | null> {
@@ -102,17 +113,23 @@ interface ShopRecord {
   evidence: string;
 }
 
+/**
+ * Only a NIP seen on the shop's own pages becomes its tax ID: one only the search answer gave may belong to anyone, so it stays in the
+ * evidence (`modelNip`) and never becomes the key later discoveries merge on.
+ */
 function shopRecord(r: ReadShop, wl: WhitelistAnswer, date: string, links: string[], searchedCity: string): ShopRecord {
   const verified = wl.ok ? r.siteNips.map((n) => wl.found.get(n)).find((x): x is Registration => x !== undefined) ?? null : null;
   const modelNip = r.shop.nip && isValidNip(r.shop.nip) ? r.shop.nip : null;
-  const nip = verified?.nip ?? r.siteNips[0] ?? modelNip;
+  const nip = verified?.nip ?? r.siteNips[0] ?? null;
   const registration = verified ?? (wl.ok && nip ? wl.found.get(nip) ?? null : null);
   const methodsFromSite = r.methods.length > 0;
   const evidence = {
+    foundFor: cityKey(searchedCity),
     searchLinks: links.slice(0, 5),
     website: r.shop.website.origin,
     nipSeenOn: r.nipSeenOn,
-    nipFrom: r.siteNips.length ? "site" : modelNip ? "search" : null,
+    nipFrom: r.siteNips.length ? "site" : null,
+    modelNip: r.siteNips.length ? null : modelNip,
     whitelist: !wl.ok ? { error: wl.error.slice(0, 200), date } : registration ? { ...registration, date } : nip ? { notRegistered: true, date } : null,
     methodsFrom: methodsFromSite ? "site" : "search",
   };
@@ -139,14 +156,16 @@ function shopRecord(r: ReadShop, wl: WhitelistAnswer, date: string, links: strin
 async function saveShop(db: D1Database, s: ShopRecord, nowIso: string): Promise<number> {
   const existing = s.nip ? await db.prepare("SELECT id, status FROM vendors WHERE tax_id = ? ORDER BY id LIMIT 1").bind(s.nip).first<{ id: number; status: VendorStatus }>() : null;
   if (existing) {
-    const status = existing.status === "candidate" && s.status === "screened" ? "screened" : existing.status;
+    const promoted = existing.status === "candidate" && s.status === "screened";
+    // A promotion shows the checks that verified it; otherwise the first evidence stays.
     await db
       .prepare(
-        `UPDATE vendors SET registered_name = COALESCE(registered_name, ?), evidence = COALESCE(evidence, ?), email = COALESCE(email, ?),
-           website = COALESCE(website, ?), methods = CASE WHEN methods = '[]' THEN ? ELSE methods END,
+        `UPDATE vendors SET registered_name = COALESCE(registered_name, ?), evidence = CASE WHEN ? = 1 THEN ? ELSE COALESCE(evidence, ?) END,
+           email = COALESCE(email, ?), website = COALESCE(website, ?), methods = CASE WHEN methods = '[]' THEN ? ELSE methods END,
            tax_status = COALESCE(?, tax_status), tax_checked_at = COALESCE(?, tax_checked_at), status = ?, updated_at = ? WHERE id = ?`,
       )
-      .bind(s.registeredName, s.evidence, s.email, s.website, s.methods, s.taxStatus, s.taxCheckedAt, status, nowIso, existing.id)
+      .bind(s.registeredName, promoted ? 1 : 0, s.evidence, s.evidence, s.email, s.website, s.methods, s.taxStatus, s.taxCheckedAt,
+        promoted ? "screened" : existing.status, nowIso, existing.id)
       .run();
     return existing.id;
   }
@@ -190,9 +209,13 @@ export async function discoverPrinters(env: Env, p: { city: string; orderId: num
   } catch (err) {
     return await finish(failed(), errorText(err));
   }
+  if (!search.shops.length) return await finish(failed(search.searches), "no shops in the answer");
   try {
-    const read = await Promise.all(search.shops.map((shop) => readShop(shop, deps.fetch)));
-    const nips = read.flatMap((r) => (r.siteNips.length ? r.siteNips : r.shop.nip && isValidNip(r.shop.nip) ? [r.shop.nip] : []));
+    const pages = budgeted(deps.fetch, PAGE_FETCHES_PER_DISCOVERY);
+    // One page that can't be read or parsed never costs the others.
+    const read = (await Promise.allSettled(search.shops.map((shop) => readShop(shop, pages))))
+      .flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    const nips = read.flatMap((r) => r.siteNips);
     const date = warsawDate(deps.now);
     const wl = await checkWhitelist(nips, date, deps.fetch);
     const vendorIds: number[] = [];
@@ -203,7 +226,7 @@ export async function discoverPrinters(env: Env, p: { city: string; orderId: num
       if (!vendorIds.includes(vendorId)) vendorIds.push(vendorId);
       if (rec.status === "screened") verified++;
     }
-    const result: DiscoveryResult = { status: wl.ok ? "done" : "rate_limited", found: read.length, verified, searches: search.searches, vendorIds };
+    const result: DiscoveryResult = { status: wl.ok ? "done" : "rate_limited", found: search.shops.length, verified, searches: search.searches, vendorIds };
     return await finish(result, wl.ok ? null : wl.error);
   } catch (err) {
     return await finish(failed(search.searches), errorText(err));

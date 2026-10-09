@@ -34,9 +34,18 @@ export function searchPrompt(city: string): string {
   ].join("\n");
 }
 
-/** The first JSON array of objects in a text: a fenced block first, else bracket matching from the first "[{". */
-function firstJsonArray(text: string): unknown {
-  const src = /```(?:json)?\s*([\s\S]*?)```/i.exec(text)?.[1] ?? text;
+/** The first JSON array of objects in an answer: each fenced block in turn, then the whole text; citation markers ("[1]") are dropped if they break it. */
+function answerArray(text: string): unknown {
+  const sources = [...[...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((m) => m[1]), text];
+  for (const src of sources) {
+    const found = firstJsonArray(src) ?? firstJsonArray(src.replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, ""));
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/** The first JSON array of objects in `src`, by bracket matching from the first "[{"; null when it doesn't parse. */
+function firstJsonArray(src: string): unknown {
   const start = src.search(/\[\s*\{/);
   if (start < 0) return null;
   let depth = 0;
@@ -68,7 +77,7 @@ function firstJsonArray(text: string): unknown {
 
 /** The shops in a grounded answer: entries with a name and a usable website, marketplaces and social sites dropped, one per host, at most 8. */
 export function parseShops(text: string): FoundShop[] {
-  const raw = firstJsonArray(text);
+  const raw = answerArray(text);
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
   const out: FoundShop[] = [];

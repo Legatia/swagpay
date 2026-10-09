@@ -9,11 +9,14 @@ export function isValidNip(nip: string): boolean {
   return check !== 10 && check === Number(nip[9]);
 }
 
-/** Valid NIPs written after "NIP" (optionally ":" or ".", "PL", spaces or dashes between digits), in order, each once, at most `max`. */
+/**
+ * Valid NIPs written after "NIP": up to 12 characters of label first ("NIP:", "NIP/VAT:", "NIP nr", "NIP (VAT):", "PL-"), then ten digits
+ * that may be split by spaces, dots or dashes. In order, each once, at most `max`.
+ */
 export function findNips(text: string, max = 2): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(/\bNIP\s*[:.]?\s*(?:PL\s*)?(\d(?:[\s-]?\d){9})(?!\d)/gi)) {
-    const nip = m[1].replace(/[\s-]/g, "");
+  for (const m of text.matchAll(/\bNIP\b[^\d\n]{0,12}?(\d(?:[\s.\u00a0-]?\d){9})(?!\d)/gi)) {
+    const nip = m[1].replace(/[\s.\u00a0-]/g, "");
     if (isValidNip(nip) && !out.includes(nip)) out.push(nip);
     if (out.length >= max) break;
   }

@@ -48,7 +48,13 @@ async function readCapped(res: Response, max: number): Promise<string> {
   return new TextDecoder().decode(all);
 }
 
-/** GETs one page under the fetch rules: redirects followed by hand (at most 3, each re-checked), 5 s, HTML only, the first 300 KB. Null when it can't be read. */
+const bareHost = (u: URL) => u.hostname.toLowerCase().replace(/^www\./, "");
+
+/**
+ * GETs one page under the fetch rules: redirects followed by hand, at most 3, each re-checked and only within the same site (http→https and
+ * www. are fine; a parked or expired domain redirecting elsewhere is not the shop's own page), 5 s, HTML only, the first 300 KB.
+ * Null when it can't be read.
+ */
 export async function readPage(url: URL, fetchImpl: FetchLike): Promise<{ url: URL; html: string } | null> {
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -65,7 +71,7 @@ export async function readPage(url: URL, fetchImpl: FetchLike): Promise<{ url: U
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("location");
       const next = location ? safeUrl(location, current.toString()) : null;
-      if (!next) return null;
+      if (!next || bareHost(next) !== bareHost(url)) return null;
       current = next;
       continue;
     }
@@ -79,14 +85,17 @@ export async function readPage(url: URL, fetchImpl: FetchLike): Promise<{ url: U
   return null;
 }
 
+/** A numeric entity's character; U+FFFD for values no character has (beyond U+10FFFF, or a surrogate). */
+const codePoint = (n: number) => (n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) ? "\uFFFD" : String.fromCodePoint(n));
+
 /** Visible text: scripts, styles and tags dropped, common entities decoded, whitespace collapsed. */
 export function htmlText(html: string): string {
   return html
     .replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, " ")
     .replace(/<[^>]*>/g, " ")
     .replace(/&nbsp;|&#160;/gi, " ")
-    .replace(/&#(\d{1,7});/g, (_, d: string) => String.fromCodePoint(Number(d)))
-    .replace(/&#x([0-9a-f]{1,6});/gi, (_, h: string) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d{1,7});/g, (_, d: string) => codePoint(Number(d)))
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, h: string) => codePoint(parseInt(h, 16)))
     .replace(/&amp;/gi, "&")
     .replace(/\s+/g, " ");
 }

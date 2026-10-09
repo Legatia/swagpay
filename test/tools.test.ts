@@ -79,6 +79,9 @@ describe("tool definitions", () => {
       expect(t.input_schema.required).toContain("reason");
       expect(JSON.stringify(t.input_schema)).not.toContain("$schema");
     }
+    const cost = TOOL_DEFINITIONS.find((t) => t.name === "request_printer_cost")!.input_schema as { properties: Record<string, unknown>; required: string[] };
+    expect(cost.properties.printerIds).toMatchObject({ type: "array", minItems: 1, maxItems: 3, items: { type: "integer" } });
+    expect(cost.required).toEqual(["reason"]);
   });
 });
 
@@ -223,8 +226,19 @@ describe("request_printer_cost with printerIds", () => {
   it("takes 1 to 3 distinct printers", async () => {
     const { h, state } = fakeCtx();
     state.spec = structuredClone(completeSpec);
-    for (const printerIds of [[1, 2, 3, 4], [1, 1], []]) {
+    for (const printerIds of [[1, 2, 3, 4], [1, 1]]) {
       expect((await h.request_printer_cost({ printerIds, reason: "asking" })).content).toMatch(/^Invalid input\. printerIds/);
+    }
+  });
+
+  it("treats an empty or null printerIds as no printers (the unchanged owner path)", async () => {
+    for (const printerIds of [[], null]) {
+      const { h, state } = fakeCtx();
+      state.spec = structuredClone(completeSpec);
+      const r = await h.request_printer_cost({ printerIds, reason: "order complete" });
+      expect(r.isError).toBeFalsy();
+      expect(state.asked).toEqual([]);
+      expect(state.escalations[0].summary).not.toContain("Agent's picks:");
     }
   });
 });

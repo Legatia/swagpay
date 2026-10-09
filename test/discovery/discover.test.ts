@@ -69,9 +69,10 @@ describe("discoverPrinters", () => {
     const res = await discoverPrinters(live, { city: "Gdynia", orderId: null }, { fetch: r.fetch, now: NOW });
     expect(res).toMatchObject({ status: "done", found: 1, verified: 0 });
     const v = (await getVendor(env.DB, res.vendorIds[0]))!;
-    expect(v).toMatchObject({ status: "candidate", tax_id: "2222222222", found_by: "agent" });
+    // A NIP only the model gave is kept as evidence, never as the printer's tax ID (it would become the merge key).
+    expect(v).toMatchObject({ status: "candidate", tax_id: null, found_by: "agent", source_ref: "agent:host:nadruki-gdynia.pl", registered_name: null });
     expect(JSON.parse(v.methods)).toEqual(["dtg"]);
-    expect(JSON.parse(v.evidence!)).toMatchObject({ nipSeenOn: null, nipFrom: "search", methodsFrom: "search" });
+    expect(JSON.parse(v.evidence!)).toMatchObject({ nipSeenOn: null, modelNip: "2222222222", methodsFrom: "search" });
   });
 
   it("keeps a shop whose NIP isn't registered as a candidate, checked today", async () => {
@@ -84,6 +85,42 @@ describe("discoverPrinters", () => {
     const v = (await getVendor(env.DB, res.vendorIds[0]))!;
     expect(v).toMatchObject({ status: "candidate", tax_id: "3333333333", tax_checked_at: "2099-10-09", tax_status: null, city: "Sopot" });
     expect(JSON.parse(v.evidence!).whitelist).toEqual({ notRegistered: true, date: "2099-10-09" });
+
+    // Found again once registered: promoted, with the new checks shown.
+    const again = router([
+      [GEMINI, () => geminiAnswer([{ name: "Druk Sopot", website: "https://druk-sopot.pl", nip: null, methods: [] }])],
+      ["https://druk-sopot.pl/", () => page("<p>NIP 3333333333, naklejki</p>")],
+      [WL, () => whitelistAnswer({ "3333333333": { name: "DRUK SOPOT", status: "Czynny", address: "81-701 SOPOT" } })],
+    ]);
+    await discoverPrinters(live, { city: "Sopot", orderId: null }, { fetch: again.fetch, now: NOW });
+    const promoted = (await getVendor(env.DB, res.vendorIds[0]))!;
+    expect(promoted).toMatchObject({ status: "screened", tax_status: "Czynny", registered_name: "DRUK SOPOT" });
+    expect(JSON.parse(promoted.evidence!).whitelist).toMatchObject({ status: "Czynny" });
+  });
+
+  it("treats an answer with no usable shop as a failure, so the city is tried again tomorrow", async () => {
+    const r = router([[GEMINI, () => geminiAnswer([{ name: "Redirect", website: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/x" }])]]);
+    const res = await discoverPrinters(live, { city: "Puck", orderId: null }, { fetch: r.fetch, now: NOW });
+    expect(res).toMatchObject({ status: "failed", found: 0 });
+    expect(await discovery("Puck")).toMatchObject({ status: "failed", error: "no shops in the answer" });
+    expect(await discoveryBlocked(env, "puck", null, new Date(NOW.getTime() + 25 * 3_600_000))).toBeNull();
+  });
+
+  it("caps the pages one discovery reads, and one bad page doesn't stop the others", async () => {
+    const shops = Array.from({ length: 8 }, (_, i) => ({ name: `Hop ${i}`, website: `https://hop${i}.pl`, nip: null, methods: [] }));
+    const routes: Array<[string, (url: string) => Response]> = [[GEMINI, () => geminiAnswer(shops)], [WL, () => whitelistAnswer({ "8888888888": { name: "HOP ZERO", status: "Czynny", address: "84-100 PUCK" } })]];
+    routes.push(["https://hop0.pl/", () => page("<p>sitodruk &#x110000; NIP 8888888888</p>")]);
+    for (let i = 1; i < 8; i++) {
+      routes.push([`https://hop${i}.pl/c`, () => page(`<a href="/kontakt">Kontakt</a>`)]);
+      routes.push([`https://hop${i}.pl/kontakt`, () => page("<p>no number here</p>")]);
+      routes.push([`https://hop${i}.pl/b`, () => new Response(null, { status: 301, headers: { location: "/c" } })]);
+      routes.push([`https://hop${i}.pl/a`, () => new Response(null, { status: 301, headers: { location: "/b" } })]);
+      routes.push([`https://hop${i}.pl/`, () => new Response(null, { status: 301, headers: { location: "/a" } })]);
+    }
+    const r = router(routes);
+    const res = await discoverPrinters(live, { city: "Władysławowo", orderId: null }, { fetch: r.fetch, now: NOW });
+    expect(r.calls.filter((u) => !u.startsWith(GEMINI) && !u.startsWith(WL)).length).toBeLessThanOrEqual(24);
+    expect(res).toMatchObject({ status: "done", found: 8, verified: 1 });
   });
 
   it("leaves shops unverified when the whitelist doesn't answer, and the nightly re-check verifies them", async () => {
@@ -211,6 +248,16 @@ describe("findPrinters", () => {
     const res = await findPrinters(live, { orderId: 3, city: "Leeds", country: "GB", methods: ["screen"] }, { fetch: r.fetch, now: NOW });
     expect(res.skipped).toBe("searching for new printers only works in Poland");
     expect(r.calls).toEqual([]);
+  });
+
+  it("counts a printer found for a city as in that city, even when it is registered nearby", async () => {
+    const r = router([
+      [GEMINI, () => geminiAnswer([{ name: "Kartuzy Druk", website: "https://kartuzy-druk.pl", nip: null, methods: [] }])],
+      ["https://kartuzy-druk.pl/", () => page("<p>Sitodruk. NIP: 9999999999</p>")],
+      [WL, () => whitelistAnswer({ "9999999999": { name: "KARTUZY DRUK", status: "Czynny", address: "83-330 ŻUKOWO" } })],
+    ]);
+    const res = await findPrinters(live, { orderId: 5, city: "Kartuzy", country: "PL", methods: ["screen"] }, { fetch: r.fetch, now: NOW });
+    expect(res.inCity).toEqual([expect.objectContaining({ name: "KARTUZY DRUK", city: "Żukowo" })]);
   });
 
   it("searches a city with too few printers and lists the new one by its registered name", async () => {

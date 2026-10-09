@@ -78,9 +78,11 @@ const FindPrintersInput = z.object({
 });
 const RequestCostInput = z.object({
   note: z.string().trim().max(500).optional().describe("Anything the printer needs to know, e.g. ink colours"),
-  printerIds: z.array(z.number().int().positive()).min(1).max(3)
-    .refine((ids) => new Set(ids).size === ids.length, "list each printer once")
-    .optional().describe("Up to 3 printer numbers from find_printers to ask for a quote"),
+  // An empty or null list (models often send one for an optional field) means no printers: the owner path, unchanged.
+  printerIds: z.preprocess(
+    (v) => (v === null || (Array.isArray(v) && v.length === 0) ? undefined : v),
+    z.array(z.number().int().positive()).min(1).max(3).refine((ids) => new Set(ids).size === ids.length, "list each printer once").optional(),
+  ).describe("Up to 3 printer numbers from find_printers to ask for a quote"),
   reason,
 });
 
