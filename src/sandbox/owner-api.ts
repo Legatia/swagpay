@@ -11,6 +11,8 @@ import { warsawDate } from "../time";
 import { getAgentByName } from "agents";
 import { isSandbox } from "./config";
 import { plnPer } from "../fx";
+import { listOffers, useOffer } from "../offers";
+import { quoteRequestsFor } from "../quote-requests";
 import { simulatedQuote } from "./printer";
 
 export interface SandboxOwnerState {
@@ -19,7 +21,15 @@ export interface SandboxOwnerState {
    *  obligation or cash-out. `why` is the summary (it already says which rule stopped for a human). */
   pending: Array<{ id: number; kind: string; why: string; actions: Array<"approve" | "reject"> }>;
   /** The open cost request, with simulated quotes for the suggested printers (delivery city, else anywhere; screened/partner, up to 3). */
-  cost: { escalationId: number; suggestions: Array<{ vendorId: number; name: string; city: string; quote: { currency: string; amount: number; label: string } | null }> } | null;
+  cost: {
+    escalationId: number;
+    suggestions: Array<{ vendorId: number; name: string; city: string; quote: { currency: string; amount: number; label: string } | null }>;
+    /** The printers the agent asked for this cost request, with their simulated replies. `use_offer` uses one. */
+    quoteRequests: Array<{
+      vendorId: number; name: string; city: string; status: string; declineReason: string | null;
+      offer: { offerId: number; currency: string; amount: number; landedPln: number | null; arrivesAt: string; late: boolean; used: boolean } | null;
+    }>;
+  } | null;
   /** The printer payment the owner makes by hand, with the dashboard's state label and allowed actions. */
   payment: { id: number; currency: string; amountCents: number; label: string; actions: Array<"cashout" | "retry" | "paid" | "cancel"> } | null;
   cashout: { id: number; status: string; fiat: string; amount: string; withdrawalRef: string | null } | null;
@@ -73,9 +83,24 @@ async function ownerState(env: Env, order: OrderRow): Promise<SandboxOwnerState>
     const methods = [...new Set((spec?.items ?? []).map((i) => i.method).filter((m): m is string => !!m))];
     let found = city ? await suggestVendors(env.DB, city, methods, 3) : [];
     if (!found.length) found = await suggestAnyVendors(env.DB, methods, 3); // unknown city or none there: the best printers anywhere
+    const offers = await listOffers(env.DB, order.id);
+    const deadline = order.deliver_by.slice(0, 10);
+    const quoteRequests = await Promise.all((await quoteRequestsFor(env.DB, costRow.id)).map(async (q) => {
+      const o = q.offer_id === null ? null : offers.find((x) => x.id === q.offer_id) ?? null;
+      const rate = o ? await plnPer(env.DB, o.currency) : null;
+      return {
+        vendorId: q.vendor_id, name: q.vendor?.name ?? `#${q.vendor_id}`, city: q.vendor?.city ?? "", status: q.status, declineReason: q.decline_reason,
+        offer: o ? {
+          offerId: o.id, currency: o.currency, amount: o.price_cents / 100,
+          landedPln: rate === null ? null : Math.round((o.price_cents + o.delivery_cents + o.other_cents) * rate) / 100,
+          arrivesAt: o.arrives_at, late: o.arrives_at > deadline, used: o.chosen_at !== null,
+        } : null,
+      };
+    }));
     cost = {
       escalationId: costRow.id,
       suggestions: found.map(({ vendor }) => ({ vendorId: vendor.id, name: vendor.name, city: vendor.city, quote: simulatedQuote(order, spec, vendor) })),
+      quoteRequests,
     };
   }
   const row = await toPayRowForOrder(env.DB, order.id);
@@ -145,6 +170,17 @@ export async function handleSandboxOwner(request: Request, env: Env, token: stri
       if (perUnit === null || perUsd === null) return bad(`No fresh NBP rate for ${perUnit === null ? body.currency : "USD"}; try again later.`);
       if ((amount * perUnit) / perUsd > maxUsd) return bad(`The sandbox caps the printer cost at $${maxUsd} (testnet faucet).`);
       const message = await giveCost(env, open.id, amount, str(body.note, 500), { currency: body.currency as CostCurrency, vendorId: (vendorId as number | null | undefined) ?? undefined });
+      const after = await env.DB.prepare("SELECT status FROM escalations WHERE id = ?").bind(open.id).first<{ status: string }>();
+      return result({ ok: after?.status !== "open", message });
+    }
+    case "use_offer": {
+      const offerId = body.offerId;
+      if (typeof offerId !== "number" || !Number.isInteger(offerId) || offerId <= 0) return bad("offerId must be an offer number.");
+      const mine = await env.DB.prepare("SELECT id FROM printer_offers WHERE id = ? AND order_id = ?").bind(offerId, order.id).first<{ id: number }>();
+      if (!mine) return notFound();
+      const open = await env.DB.prepare("SELECT id FROM escalations WHERE order_id = ? AND kind = 'cost' AND status = 'open' ORDER BY id DESC LIMIT 1").bind(order.id).first<{ id: number }>();
+      if (!open) return bad("No open cost request.");
+      const message = await useOffer(env, offerId);
       const after = await env.DB.prepare("SELECT status FROM escalations WHERE id = ?").bind(open.id).first<{ status: string }>();
       return result({ ok: after?.status !== "open", message });
     }

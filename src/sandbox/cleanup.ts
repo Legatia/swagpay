@@ -36,6 +36,7 @@ export async function cleanupSandbox(env: Env, now: Date = new Date()): Promise<
         del(`DELETE FROM sandbox_bank_ledger WHERE cashout_id IN (SELECT id FROM cashouts WHERE supplier_payment_id IN (${sp}))`),
         del(`DELETE FROM cashouts WHERE supplier_payment_id IN (${sp})`),
         del("DELETE FROM supplier_payments WHERE order_id = ?"),
+        del("DELETE FROM quote_requests WHERE order_id = ?"),
         del("DELETE FROM printer_offers WHERE order_id = ?"),
         del(`DELETE FROM sandbox_runner_sends WHERE payout_id IN (SELECT id FROM payouts WHERE obligation_id IN (${ob}))`),
         del(`DELETE FROM payouts WHERE obligation_id IN (${ob})`),

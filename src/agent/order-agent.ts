@@ -2,6 +2,8 @@ import { Agent } from "agents";
 import { getOrderById, insertDecision, saveOrderSpec } from "../db";
 import { isSandbox } from "../sandbox/config";
 import { PRINTER_STEPS, nextStep, stepDelaySeconds, stepMessage, type PrinterStep } from "../sandbox/printer";
+import { REPLY_EXPIRY_SECONDS, expireQuoteRequests, replyPlan, replyToQuoteRequest, repliesEvent } from "../sandbox/quotes";
+import { recordAsked } from "../quote-requests";
 import { markPrinted } from "../telegram-webhook";
 import { createEscalation, type EscalationKind } from "../escalations";
 import { ratesFor, refreshRates } from "../fx";
@@ -267,6 +269,48 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.ensureTables();
     const pending = this.pendingPrinterStep();
     return { lastStep: this.meta("sandbox_last_step"), nextStep: pending?.step ?? null, nextAt: pending ? new Date(pending.time * 1000).toISOString() : null };
+  }
+
+  /**
+   * Records the printers picked for a cost request. The sandbox asks them: each reply is scheduled, with one expiry 10 minutes on.
+   * Production drafts the requests for the owner to send. Nothing is written when any printer is refused.
+   */
+  async askPrinters(escalationId: number, vendorIds: number[]): Promise<{ asked: number[]; refused: string[]; sandbox: boolean }> {
+    this.ensureTables();
+    const orderId = this.orderId();
+    const sandbox = isSandbox(this.env);
+    const { rows, refused } = await recordAsked(this.env.DB, { orderId, escalationId, vendorIds, status: sandbox ? "asked" : "drafted" });
+    if (sandbox && rows.length) {
+      for (const r of rows) await this.schedule(replyPlan(orderId, r.vendor_id).delaySeconds, "sandboxQuoteReply", { quoteRequestId: r.id });
+      await this.schedule(REPLY_EXPIRY_SECONDS, "sandboxQuoteExpiry", { escalationId });
+    }
+    return { asked: rows.map((r) => r.vendor_id), refused, sandbox };
+  }
+
+  /** Schedule callback (sandbox): one asked printer replies; the agent hears once every asked printer has answered. */
+  async sandboxQuoteReply(payload: { quoteRequestId: number }): Promise<void> {
+    this.sandboxOnly();
+    this.ensureTables();
+    this.orderId();
+    const settled = await replyToQuoteRequest(this.env, payload.quoteRequestId);
+    if (settled) await this.deliverReplies(settled.escalationId);
+  }
+
+  /** Schedule callback (sandbox): printers that haven't answered within 10 minutes expire, and the agent hears what came in. */
+  async sandboxQuoteExpiry(payload: { escalationId: number }): Promise<void> {
+    this.sandboxOnly();
+    this.ensureTables();
+    this.orderId();
+    await expireQuoteRequests(this.env, payload.escalationId);
+    await this.deliverReplies(payload.escalationId);
+  }
+
+  private async deliverReplies(escalationId: number): Promise<void> {
+    const text = await repliesEvent(this.env, escalationId);
+    if (!text) return;
+    this.addInbox({ kind: "event", text });
+    this.addThread("system", "Printers replied with quotes (simulated).");
+    await this.trigger();
   }
 
   private orderId(): number {

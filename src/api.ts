@@ -176,7 +176,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
 
   if (path === "/api/sandbox/bank" && request.method === "GET") return handleSandboxBank(request, env);
   if (path === "/api/sandbox/discover" && request.method === "POST") return handleSandboxDiscover(request, env);
-  const so = /^\/api\/o\/([A-Za-z0-9_-]{43})\/sandbox\/owner(?:\/([a-z]{1,20}))?$/.exec(path);
+  const so = /^\/api\/o\/([A-Za-z0-9_-]{43})\/sandbox\/owner(?:\/([a-z_]{1,20}))?$/.exec(path);
   if (so) return handleSandboxOwner(request, env, so[1], so[2] ?? null);
 
   const m = /^\/api\/o\/([A-Za-z0-9_-]{43})(\/messages|\/artwork|\/design|\/quote\/accept|\/received|\/payments\/(\d{1,9})\/claim)?$/.exec(path);
