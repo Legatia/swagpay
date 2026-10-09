@@ -10,6 +10,9 @@ import { listPaymentRequests, type PaymentRequestRow, type TransferRow } from ".
 import type { QuoteRow } from "./quotes";
 import { orderMargin, type ObligationRow, type PayoutRow } from "./treasury";
 import { getVendor, vendorJobFor, type VendorJobRow, type VendorRow } from "./vendors";
+import type { OrderSpec } from "./order-spec";
+import { quoteRequestEmail } from "./quote-email";
+import { quoteRequestsForOrder, type QuoteRequestRow } from "./quote-requests";
 
 export interface ToPayRow {
   payment: SupplierPaymentRow;
@@ -191,6 +194,8 @@ export interface Ledger {
   /** Printer offers, cheapest landed cost first; `vendors` names the printers they come from. */
   offers: ReturnType<typeof rankOffers>;
   offerVendors: VendorRow[];
+  /** The printers the order agent picked to ask for a quote, each with the Polish email the owner can send. */
+  asked: Array<{ request: QuoteRequestRow; vendor: VendorRow | null; email: { subject: string; body: string } | null }>;
 }
 
 export async function orderLedger(db: D1Database, id: number): Promise<Ledger | null> {
@@ -201,6 +206,17 @@ export async function orderLedger(db: D1Database, id: number): Promise<Ledger | 
   const payment = await supplierPaymentForOrder(db, id);
   const escalations = await list<EscalationRow>("SELECT * FROM escalations WHERE order_id = ? ORDER BY id DESC");
   const rawOffers = await listOffers(db, id);
+  let spec: OrderSpec | null = null;
+  try {
+    spec = order.spec_json ? (JSON.parse(order.spec_json) as OrderSpec) : null;
+  } catch {
+    spec = null;
+  }
+  const asked = (await quoteRequestsForOrder(db, id)).map(({ vendor, ...request }) => ({
+    request,
+    vendor,
+    email: spec ? quoteRequestEmail({ orderId: order.id, spec, deliverBy: order.deliver_by, deliveryPlace: order.delivery_place }) : null,
+  }));
   const rates = new Map<string, number | null>();
   for (const code of new Set(rawOffers.map((o) => o.currency))) rates.set(code, await plnPer(db, code));
   return {
@@ -221,6 +237,7 @@ export async function orderLedger(db: D1Database, id: number): Promise<Ledger | 
     escalations,
     openCost: escalations.find((e) => e.kind === "cost" && e.status === "open")?.id ?? null,
     offers: rankOffers(rawOffers, (c) => rates.get(c) ?? null, order.deliver_by),
+    asked,
     offerVendors: (await db
       .prepare("SELECT * FROM vendors WHERE status IN ('screened', 'partner') OR id IN (SELECT vendor_id FROM printer_offers WHERE order_id = ?) ORDER BY city, name")
       .bind(id).all<VendorRow>()).results,

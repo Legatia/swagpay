@@ -4,6 +4,8 @@ import { toPayState, type Ledger, type MoneySummary, type OrderListRow, type Sup
 import type { EscalationRow } from "./escalations";
 import { statusWord } from "./escalations";
 import { formatCents } from "./money";
+import { mailtoLink } from "./quote-email";
+import { methodsOf } from "./vendors";
 
 /** 257500000 → "257.50 USDC" (two decimals for reading; the ledger's detail keeps full units where it matters). */
 export const money = (units: number, token: string) => `${(units / 1_000_000).toFixed(2)} ${token}`;
@@ -107,6 +109,27 @@ export function renderOrders(rows: OrderListRow[], page: number, who: string | n
   return layout("Orders", who, msg, `<h1>Orders</h1>${table(["Order", "Event", "Customer", "Status", "Price", "Received", "Printer", "Printer cost", "Margin", "Printer paid"], trs, "No orders.")}${nav}`);
 }
 
+const outLink = (href: string, label: string) => `<a href="${esc(href)}" rel="noreferrer noopener" target="_blank">${esc(label)}</a>`;
+
+/** The printers the agent picked for a quote: who they are, how they were checked, and the email the owner sends. */
+function askedSection(l: Ledger): string {
+  if (!l.asked.length) return "";
+  const rows = l.asked.map(({ request: q, vendor: v, email }) => {
+    let ev: { nipSeenOn?: unknown; whitelist?: { status?: unknown; date?: unknown } | null } = {};
+    try {
+      ev = v?.evidence ? JSON.parse(v.evidence) : {};
+    } catch { /* no checks to show */ }
+    const checks = [
+      typeof ev.nipSeenOn === "string" && /^https?:\/\//.test(ev.nipSeenOn) ? outLink(ev.nipSeenOn, "NIP on the site") : "",
+      typeof ev.whitelist?.status === "string" ? `whitelist: ${esc(ev.whitelist.status)} (${esc(String(ev.whitelist.date ?? ""))})` : "",
+    ].filter(Boolean).join("<br>") || "—";
+    const mail = v?.email && email ? mailtoLink(v.email, email) : null;
+    const contact = mail ? `<a href="${esc(mail)}">Write email</a>` : v?.website && /^https?:\/\//.test(v.website) ? outLink(v.website, "Website") : "—";
+    return `<tr><td>${v ? `${esc(v.name)} (#${v.id})` : `#${q.vendor_id}`}</td><td>${esc(v?.registered_name ?? "—")}</td><td>${esc(v?.city ?? "")}</td><td>${esc(v ? methodsOf(v).join(", ") : "")}</td><td>${checks}</td><td>${esc(q.status)}</td><td>${contact}</td></tr>`;
+  });
+  return `<section><h2>Asked printers</h2>${table(["Printer", "Registered as", "City", "Methods", "Checks", "Status", "Contact"], rows, "")}</section>`;
+}
+
 function offersSection(l: Ledger): string {
   const back = `/admin/orders/${l.order.id}`;
   const name = (id: number) => { const v = l.offerVendors.find((x) => x.id === id); return v ? `${v.name} (${v.city})` : `#${id}`; };
@@ -175,7 +198,7 @@ export function renderLedger(l: Ledger, explorer: string, who: string | null = n
 <section><h2>Quotes</h2>${quotes}</section>
 <section><h2>Money in</h2>${moneyIn}${orphan.length ? `<p>Transfers not attached to a request: ${orphan.length}.</p>` : ""}</section>
 <section><h2>Printer</h2>${job}</section>
-${offersSection(l)}
+${askedSection(l)}${offersSection(l)}
 <section><h2>Money out</h2>${table(["Obligation", "Status", "Amount", "Chain", "Destination", "Payout"], obs, "No obligations.")}${cashouts}${sp}</section>
 <section><h2>Margin</h2>${margin}</section>
 <section><h2>History</h2>${history}</section>`;
