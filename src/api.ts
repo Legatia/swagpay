@@ -19,6 +19,7 @@ import { markJob } from "./vendors";
 import { isSandbox } from "./sandbox/config";
 import { handleSandboxOwner } from "./sandbox/owner-api";
 import { handleSandboxBank } from "./sandbox/bank";
+import { handleSandboxDiscover } from "./sandbox/discover-route";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -174,6 +175,7 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
   }
 
   if (path === "/api/sandbox/bank" && request.method === "GET") return handleSandboxBank(request, env);
+  if (path === "/api/sandbox/discover" && request.method === "POST") return handleSandboxDiscover(request, env);
   const so = /^\/api\/o\/([A-Za-z0-9_-]{43})\/sandbox\/owner(?:\/([a-z]{1,20}))?$/.exec(path);
   if (so) return handleSandboxOwner(request, env, so[1], so[2] ?? null);
 

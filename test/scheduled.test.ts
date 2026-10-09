@@ -12,6 +12,8 @@ describe("scheduled jobs", () => {
     expect(jobsDue(new Date("2026-10-01T12:17:00Z"))).toEqual(["watcher", "fx"]);
     expect(jobsDue(new Date("2026-10-01T07:00:00Z"))).toEqual(["watcher", "treasury"]);
     expect(jobsDue(new Date("2026-10-01T07:17:00Z"))).toEqual(["watcher", "fx"]);
+    expect(jobsDue(new Date("2026-10-01T03:00:00Z"))).toEqual(["watcher", "vendor-verify"]);
+    expect(jobsDue(new Date("2026-10-01T03:01:00Z"))).toEqual(["watcher"]);
   });
 
   it("keeps running the other jobs when one fails, and ignores unknown crons", async () => {

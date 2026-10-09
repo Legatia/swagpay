@@ -1,3 +1,5 @@
+import { cityKey } from "./discovery/names";
+
 export type VendorStatus = "candidate" | "screened" | "partner" | "paused";
 
 export interface VendorRow {
@@ -22,6 +24,12 @@ export interface VendorRow {
   payout_chain: string | null;
   pay_currency: string | null;
   how_to_pay: string | null;
+  /** "research" (imported) or "agent" (found by discovery). */
+  found_by: string;
+  /** The name on the VAT whitelist, when checked. */
+  registered_name: string | null;
+  /** JSON: how discovery found and checked the printer (search links, the page showing its NIP, the whitelist answer). */
+  evidence: string | null;
   source_ref: string;
   created_at: string;
   updated_at: string;
@@ -111,7 +119,7 @@ export async function vendorScore(db: D1Database, id: number): Promise<{ jobs: n
   return { jobs: r?.jobs ?? 0, onTime: r?.onTime ?? 0 };
 }
 
-function methodsOf(v: VendorRow): string[] {
+export function methodsOf(v: VendorRow): string[] {
   try {
     const m: unknown = JSON.parse(v.methods);
     return Array.isArray(m) ? m.map(String) : [];
@@ -120,10 +128,10 @@ function methodsOf(v: VendorRow): string[] {
   }
 }
 
-type Suggestion = { vendor: VendorRow; covers: boolean; score: { jobs: number; onTime: number } };
+export type Suggestion = { vendor: VendorRow; covers: boolean; score: { jobs: number; onTime: number } };
 
 /** Best first: partner, then covering every method, then on-time jobs, then name. */
-async function rankVendors(db: D1Database, vendors: VendorRow[], methods: string[], limit: number): Promise<Suggestion[]> {
+export async function rankVendors(db: D1Database, vendors: VendorRow[], methods: string[], limit: number): Promise<Suggestion[]> {
   const ranked = await Promise.all(vendors.map(async (vendor) => {
     const have = new Set(methodsOf(vendor));
     return { vendor, covers: methods.every((m) => have.has(m)), score: await vendorScore(db, vendor.id) };
@@ -146,6 +154,20 @@ export async function suggestVendors(db: D1Database, city: string, methods: stri
 export async function suggestAnyVendors(db: D1Database, methods: string[], limit = 3): Promise<Suggestion[]> {
   const vendors = (await db.prepare("SELECT * FROM vendors WHERE status IN ('partner', 'screened')").all<VendorRow>()).results;
   return rankVendors(db, vendors, methods, limit);
+}
+
+/**
+ * Verified (screened or partner) printers in `country` that do at least one of `methods`: up to 3 in the city (matched by cityKey,
+ * so "Warszawa" finds "Warsaw"), then up to 3 elsewhere, each ranked like suggestVendors. Candidates and paused printers never.
+ */
+export async function knownPrinters(db: D1Database, city: string, country: string, methods: string[]): Promise<{ inCity: Suggestion[]; elsewhere: Suggestion[] }> {
+  const key = cityKey(city);
+  const all = (await db.prepare("SELECT * FROM vendors WHERE country = ? AND status IN ('partner', 'screened')").bind(country.toUpperCase()).all<VendorRow>()).results;
+  const doing = all.filter((v) => methods.length === 0 || methodsOf(v).some((m) => methods.includes(m)));
+  return {
+    inCity: await rankVendors(db, doing.filter((v) => cityKey(v.city) === key), methods, 3),
+    elsewhere: await rankVendors(db, doing.filter((v) => cityKey(v.city) !== key), methods, 3),
+  };
 }
 
 /** Screened or partner vendors outside `city`, ranked like suggestVendors, for large orders. */

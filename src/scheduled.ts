@@ -1,6 +1,7 @@
 import { getAgentByName } from "agents";
 import { TREASURY_NAME } from "./agent/treasury-agent";
 import { createRpc } from "./arc";
+import { recheckCandidates } from "./discovery/discover";
 import { refreshRates } from "./fx";
 import { cleanupSandbox } from "./sandbox/cleanup";
 import { isSandbox } from "./sandbox/config";
@@ -14,13 +15,14 @@ import { runWatcher } from "./watcher";
  */
 export const CRON = "* * * * *";
 
-export type Job = "watcher" | "fx" | "treasury" | "sandbox-runner" | "sandbox-resend" | "sandbox-cleanup";
+export type Job = "watcher" | "fx" | "treasury" | "vendor-verify" | "sandbox-runner" | "sandbox-resend" | "sandbox-cleanup";
 
-/** The jobs due at this scheduled minute (UTC): the watcher every minute, FX rates at :17, the treasury review at 07:00. */
+/** The jobs due at this scheduled minute (UTC): the watcher every minute, FX rates at :17, the treasury review at 07:00, printer re-checks at 03:00. */
 export function jobsDue(at: Date, env?: Env): Job[] {
   const jobs: Job[] = ["watcher"];
   if (at.getUTCMinutes() === 17) jobs.push("fx");
   if (at.getUTCHours() === 7 && at.getUTCMinutes() === 0) jobs.push("treasury");
+  if (at.getUTCHours() === 3 && at.getUTCMinutes() === 0) jobs.push("vendor-verify");
   if (env && isSandbox(env)) {
     jobs.push("sandbox-runner", "sandbox-resend");
     if (at.getUTCMinutes() === 37) jobs.push("sandbox-cleanup");
@@ -62,6 +64,8 @@ async function runJob(job: Job, env: Env): Promise<void> {
     await runWatcher(env, { rpc: createRpc([env.ARC_RPC_URL, env.ARC_RPC_FALLBACK_URL].filter((u) => u)) });
   } else if (job === "fx") {
     await refreshRates(env.DB);
+  } else if (job === "vendor-verify") {
+    await recheckCandidates(env, { fetch: (u, i) => fetch(u, i), now: new Date() });
   } else if (job === "sandbox-runner") {
     await runSandboxRunner(env);
   } else if (job === "sandbox-resend") {
