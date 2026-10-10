@@ -244,5 +244,7 @@ describe("deliveries", () => {
     expect(defaultDelivery([ds[2]])).toBe(3); // nothing on time: the only one
     expect(defaultDelivery([])).toBeNull();
     expect(defaultDelivery([{ ...ds[1], arrivesAt: "2026-10-15" }, { ...ds[0], cost: 0 }])).toBe(1);
+    // All late: the earliest arrival wins, not the cheapest.
+    expect(defaultDelivery([{ ...ds[2], deliveryId: 7, cost: 0.1, arrivesAt: "2026-11-02" }, { ...ds[2], deliveryId: 8, cost: 0.9, arrivesAt: "2026-10-31" }])).toBe(8);
   });
 });

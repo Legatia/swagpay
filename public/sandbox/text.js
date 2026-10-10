@@ -162,7 +162,11 @@ export function defaultDelivery(deliveries) {
   if (!list.length) return null;
   const chosen = list.find((d) => d.chosen);
   if (chosen) return chosen.deliveryId;
-  const pool = list.some((d) => !d.late) ? list.filter((d) => !d.late) : list;
-  const best = [...pool].sort((a, b) => Number(a.cost) - Number(b.cost) || String(a.arrivesAt).localeCompare(String(b.arrivesAt)))[0];
+  // The backend's rule: the cheapest option that arrives on time (earlier arrival on a tie); when every
+  // option is late, the earliest arrival (cheaper on a tie).
+  const onTime = list.filter((d) => !d.late);
+  const byDate = (a, b) => String(a.arrivesAt).localeCompare(String(b.arrivesAt));
+  const byCost = (a, b) => Number(a.cost) - Number(b.cost);
+  const best = onTime.length ? [...onTime].sort((a, b) => byCost(a, b) || byDate(a, b))[0] : [...list].sort((a, b) => byDate(a, b) || byCost(a, b))[0];
   return best.deliveryId;
 }
