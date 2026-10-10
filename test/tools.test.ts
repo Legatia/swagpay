@@ -18,7 +18,7 @@ function fakeCtx(files: ArtworkFile[] = []) {
     findResult: null as FindResult | { refused: string } | null, findCalls: [] as string[][],
     picked: { lines: ["v45 Druk Gdańsk (Gdańsk; screen; 0 jobs, 0 on time; found by the agent)"], refused: [] as string[] },
     asked: [] as Array<{ escalationId: number; ids: number[] }>, askRefused: [] as string[], sandbox: false,
-    delivery: null as { method: string; arrivesAt: string } | null };
+    delivery: null as { method: string; arrivesAt: string } | null, deliveryFails: false };
   const statuses = new Map<string, "open" | "approved" | "rejected">();
   const previews = new Map<string, number>();
   const state2 = { loads: 0 };
@@ -45,7 +45,10 @@ function fakeCtx(files: ArtworkFile[] = []) {
       return state.findResult ?? { inCity: [], elsewhere: [], searched: null, skipped: null };
     },
     async pickedPrinters() { return state.picked; },
-    async chosenDelivery() { return state.delivery; },
+    async chosenDelivery() {
+      if (state.deliveryFails) throw new Error("D1 unavailable");
+      return state.delivery;
+    },
     async askPrinters(escalationId, ids) {
       state.asked.push({ escalationId, ids });
       return { asked: state.askRefused.length ? [] : ids, refused: state.askRefused, sandbox: state.sandbox };
@@ -615,6 +618,14 @@ describe("send_quote", () => {
     state.delivery = { method: "courier", arrivesAt: "2099-10-06" };
     await h.send_quote(ask);
     expect(state.posted[0]).toMatch(/^Here is your price for the tees and stickers\.\n\nQuote #1: 380\.00 USD for the whole order[^\n]*\nDelivery: by courier, arrives 6 Oct\.$/);
+  });
+
+  it("still sends the quote when the delivery can't be read", async () => {
+    const { h, state } = await priced();
+    state.deliveryFails = true;
+    const r = await h.send_quote(ask);
+    expect(r.isError).toBeFalsy();
+    expect(state.posted[0]).toMatch(/^Here is your price for the tees and stickers\.\n\nQuote #1: 380\.00 USD for the whole order[^\n]*$/);
   });
 
   it("blocks a price outside the band and gives the allowed range", async () => {

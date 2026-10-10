@@ -179,7 +179,7 @@ describe("simulated replies", () => {
       await agent.sandboxQuoteReply({ quoteRequestId: (await rows(costId))[0].id });
       const [event] = inbox(agent);
       expect(event).toContain(", late; 2 delivery options)");
-      expect(event).toMatch(/No offer arrives by the delivery date: ask the host whether a later date works\.$/);
+      expect(event).toMatch(/No offer arrives by the delivery date: ask the host whether a later date works\. The owner still chooses one of these offers\.$/);
     });
   });
 
@@ -209,6 +209,22 @@ it("waits for a reply whose offer is still being written", async () => {
   const offer = await env.DB.prepare("INSERT INTO printer_offers (order_id, vendor_id, currency, price_cents, delivery_cents, other_cents, arrives_at, created_at) VALUES (?, ?, 'PLN', 1500, 0, 0, '2099-01-01', 'x') RETURNING id").bind(order.id, v).first<{ id: number }>();
   await env.DB.prepare("UPDATE quote_requests SET offer_id = ? WHERE escalation_id = ?").bind(offer!.id, e.id).run();
   expect(await repliesEvent(sandbox, e.id)).toContain(`offer #${offer!.id} from printer #${v}: 15.00 PLN landed`);
+});
+
+it("says no offer arrives in time only when none of the cost request's offers does", async () => {
+  const { order } = await newOrderRow();
+  const e = await createEscalation(env.DB, { orderId: order.id, kind: "cost", summary: "x", payload: {} });
+  const deadline = order.deliver_by.slice(0, 10);
+  const offer = async (arrives: string) => (await env.DB.prepare("INSERT INTO printer_offers (order_id, vendor_id, currency, price_cents, delivery_cents, other_cents, arrives_at, created_at) VALUES (?, ?, 'PLN', 1500, 0, 0, ?, 'x') RETURNING id")
+    .bind(order.id, await addVendor("Round"), arrives).first<{ id: number }>())!.id;
+  const onTime = await offer(deadline);
+  const late = await offer("2199-01-01");
+  // Round 1 (already reported): on time. Round 2 (new): late.
+  await env.DB.prepare("INSERT INTO quote_requests (order_id, escalation_id, vendor_id, status, offer_id, notified_at, created_at, settled_at) VALUES (?, ?, (SELECT vendor_id FROM printer_offers WHERE id = ?), 'replied', ?, 'x', 'x', 'x')").bind(order.id, e.id, onTime, onTime).run();
+  await env.DB.prepare("INSERT INTO quote_requests (order_id, escalation_id, vendor_id, status, offer_id, created_at, settled_at) VALUES (?, ?, (SELECT vendor_id FROM printer_offers WHERE id = ?), 'replied', ?, 'x', 'x')").bind(order.id, e.id, late, late).run();
+  const event = await repliesEvent(sandbox, e.id);
+  expect(event).toContain(`offer #${late} from printer`);
+  expect(event).toMatch(/The owner chooses one of these offers; tell the host the price is on its way\.$/);
 });
 
 describe("owner panel", () => {

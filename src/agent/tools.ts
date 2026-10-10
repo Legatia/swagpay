@@ -410,8 +410,12 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         leadTimeCutoff(now, order.deliverBy, required).getTime(),
         order.deliverBy.getTime(),
       ));
+      // Read before the quote exists, and never fatal: a quote without its delivery line beats a quote the host never hears about.
+      const delivery = await ctx.chosenDelivery().catch((err) => {
+        console.error("delivery unavailable for the quote", err);
+        return null;
+      });
       const quote = await ctx.issueQuote({ currency, priceCents, depositCents, costPln, plnPerUnit: rates.plnPerUnit, usdPerUnit: rates.usdPerUnit, markup, itemsKey: key }, validUntil);
-      const delivery = await ctx.chosenDelivery();
       await ctx.postToHost(`${message}\n\n${quoteText(quote)}${delivery ? `\n${deliveryLine(delivery.method, delivery.arrivesAt)}` : ""}`);
       return {
         verdict: "allow", outcome: "done", detail: `quote #${quote.id}`,

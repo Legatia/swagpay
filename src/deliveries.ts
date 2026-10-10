@@ -74,12 +74,3 @@ export function deliveryLine(method: string, arrivesAt: string): string {
   if (!isDeliveryMethod(method)) return `Delivery: arrives ${dayMonth(arrivesAt)}.`;
   return method === "pickup" ? `Delivery: ${HOST_WORDS.pickup} from ${dayMonth(arrivesAt)}.` : `Delivery: ${HOST_WORDS[method]}, arrives ${dayMonth(arrivesAt)}.`;
 }
-
-/** The delivery of the offer last used for this order, for the order page. */
-export async function usedDelivery(db: D1Database, orderId: number): Promise<{ method: string; arrivesAt: string } | null> {
-  const r = await db
-    .prepare("SELECT delivery_method, arrives_at FROM printer_offers WHERE order_id = ? AND chosen_at IS NOT NULL AND delivery_method IS NOT NULL ORDER BY chosen_at DESC, id DESC LIMIT 1")
-    .bind(orderId)
-    .first<{ delivery_method: string; arrives_at: string }>();
-  return r ? { method: r.delivery_method, arrivesAt: r.arrives_at } : null;
-}

@@ -137,16 +137,12 @@ export async function repliesEvent(env: Env, escalationId: number, now: Date = n
     .run();
   if (heard.meta.changes === 0) return null; // another callback told the agent first
   const parts: string[] = [];
-  let offers = 0;
-  let late = 0;
   for (const r of fresh) {
     if (r.status === "replied" && r.offer_id !== null && r.currency) {
       const total = (r.price_cents ?? 0) + (r.delivery_cents ?? 0) + (r.other_cents ?? 0);
       const rate = await plnPer(env.DB, r.currency, now);
       const landed = rate === null ? `${(total / 100).toFixed(2)} ${r.currency}` : `${((total * rate) / 100).toFixed(2)} PLN landed`;
       const isLate = (r.arrives_at ?? "") > r.deliver_by.slice(0, 10);
-      offers++;
-      if (isLate) late++;
       if (r.delivery_method && isDeliveryMethod(r.delivery_method)) {
         const options = r.delivery_options > 1 ? `; ${r.delivery_options} delivery options` : "";
         parts.push(`offer #${r.offer_id} from printer #${r.vendor_id}: ${landed} (${DELIVERY_WORDS[r.delivery_method]}, arrives ${r.arrives_at}, ${isLate ? "late" : "on time"}${options})`);
@@ -160,9 +156,12 @@ export async function repliesEvent(env: Env, escalationId: number, now: Date = n
     }
   }
   const left = MAX_ASKED_PER_COST_REQUEST - rows.length;
-  const next = offers > 0 && late === offers
-    ? "No offer arrives by the delivery date: ask the host whether a later date works."
-    : offers > 0
+  // Over every round of this cost request: an offer already reported on time still stands.
+  const offered = rows.filter((r) => r.status === "replied" && r.offer_id !== null);
+  const allLate = offered.length > 0 && offered.every((r) => (r.arrives_at ?? "") > r.deliver_by.slice(0, 10));
+  const next = allLate
+    ? "No offer arrives by the delivery date: ask the host whether a later date works. The owner still chooses one of these offers."
+    : fresh.some((r) => r.status === "replied")
     ? "The owner chooses one of these offers; tell the host the price is on its way."
     : left > 0
       ? `No offer this time. You may ask up to ${left} other printers: call request_printer_cost with new printerIds (find_printers lists them). Otherwise tell the host a person will follow up.`

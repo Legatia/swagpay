@@ -1,11 +1,13 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import { handleApi } from "../src/api";
 import { addDeliveries, bestDelivery, deliveryLine, type DeliveryRow } from "../src/deliveries";
 import { createEscalation } from "../src/escalations";
 import { addOffer, deleteOffer, useOffer } from "../src/offers";
-import { intakeFor, newOrderRow } from "./fixtures";
+import { completeSpec, intakeFor, newOrderRow } from "./fixtures";
+import type { OrderAgent } from "../src/agent/order-agent";
+import { itemsKey } from "../src/order-spec";
 
 const row = (id: number, method: string, cost: number, arrives: string): DeliveryRow =>
   ({ id, offer_id: 1, method, cost_cents: cost, arrives_at: arrives, note: null, created_at: "x" }) as DeliveryRow;
@@ -69,15 +71,41 @@ describe("using an offer with a delivery", () => {
   });
 });
 
-describe("the order API", () => {
-  it("adds the delivery only once an offer with one is used", async () => {
-    const { order, token } = await newOrderRow();
-    await (await getAgentByName(env.OrderAgent, order.instance)).init(order.id, intakeFor());
+type Escalator = { escalateOnce(orderId: number, key: string, kind: string, summary: string, payload: unknown): Promise<{ id: number }> };
+
+/** An order whose agent asked for the cost of completeSpec, as the agent does (the cost request is keyed on the items). */
+async function costRequested() {
+  const { order, token } = await newOrderRow();
+  const stub = await getAgentByName(env.OrderAgent, order.instance);
+  await stub.init(order.id, intakeFor());
+  await runInDurableObject(stub, async (agent: OrderAgent) => {
+    agent.telegramOverride = { async send() { return null; }, async answerCallback() {} };
+    agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(completeSpec)})`;
+    await (agent as unknown as Escalator).escalateOnce(order.id, `cost:${await itemsKey(completeSpec)}`, "cost", "Printer cost needed", { specKey: "x" });
+  });
+  return { order, token, stub, ...(await offerWithDeliveries(order.id)) };
+}
+
+describe("the delivery the host is told about", () => {
+  it("is the used offer's delivery, for the items the cost was given for", async () => {
+    const { stub, offer, locker } = await costRequested();
+    await useOffer(env, offer.id, new Date(), locker.id);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      expect(await agent.chosenDelivery()).toEqual({ method: "parcel_locker", arrivesAt: "2099-10-07" });
+    });
+  });
+
+  it("appears in the order API only while it matches the order's items", async () => {
+    const { token, stub, offer, locker } = await costRequested();
     const get = async () => (await handleApi(new Request(`https://swagpay.test/api/o/${token}`), env)).json<{ delivery?: unknown }>();
     expect("delivery" in (await get())).toBe(false);
-    await createEscalation(env.DB, { orderId: order.id, kind: "cost", summary: "Printer cost needed", payload: {} });
-    const { offer, locker } = await offerWithDeliveries(order.id);
     await useOffer(env, offer.id, new Date(), locker.id);
     expect((await get()).delivery).toEqual({ method: "parcel_locker", arrivesAt: "2099-10-07" });
+    // The host changes the items: that cost (and its delivery) no longer applies.
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      const changed = { ...completeSpec, items: [{ ...completeSpec.items[0], quantity: 61, sizes: { S: 11, M: 20, L: 20, XL: 10 } }, completeSpec.items[1]] };
+      agent.sql`INSERT OR REPLACE INTO spec (id, json) VALUES (1, ${JSON.stringify(changed)})`;
+    });
+    expect("delivery" in (await get())).toBe(false);
   });
 });

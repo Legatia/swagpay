@@ -346,6 +346,24 @@ export class OrderAgent extends Agent<Env, OrderState> {
     this.setMeta("budget_notice_day", day);
   }
 
+  /**
+   * How the swag travels: the delivery of the used offer whose cost the order's items, as they stand, are priced on. useOffer's cost note
+   * ends in "offer #N" ("printer #3; offer #12"). Null for a hand-entered cost, an offer without a delivery, or items that changed since.
+   */
+  async chosenDelivery(): Promise<{ method: string; arrivesAt: string } | null> {
+    this.ensureTables();
+    const orderId = this.orderId();
+    const key = await itemsKey(this.readSpec());
+    const note = this.sql<{ note: string | null }>`SELECT note FROM printer_costs WHERE spec_key = ${key}`[0]?.note ?? "";
+    const m = /(?:^|; )offer #(\d+)$/.exec(note);
+    if (!m) return null;
+    const o = await this.env.DB
+      .prepare("SELECT delivery_method, arrives_at FROM printer_offers WHERE id = ? AND order_id = ? AND chosen_at IS NOT NULL AND delivery_method IS NOT NULL")
+      .bind(Number(m[1]), orderId)
+      .first<{ delivery_method: string; arrives_at: string }>();
+    return o ? { method: o.delivery_method, arrivesAt: o.arrives_at } : null;
+  }
+
   private orderId(): number {
     const id = this.state.orderId;
     if (id === null) throw new Error("order not initialised");
@@ -542,16 +560,7 @@ export class OrderAgent extends Agent<Env, OrderState> {
           return findPrinters(this.env, { orderId, city, country, methods }, { fetch: fetchImpl, now: new Date(), allowModelCall: () => takeModelCall(this.env) });
         },
         pickedPrinters: (vendorIds) => pickedPrinterLines(this.env.DB, vendorIds),
-        chosenDelivery: async () => {
-          // The delivery of the offer whose cost the order's items are priced on (useOffer notes it as "offer #N").
-          const key = await itemsKey(this.readSpec());
-          const note = this.sql<{ note: string | null }>`SELECT note FROM printer_costs WHERE spec_key = ${key}`[0]?.note ?? "";
-          const m = /^offer #(\d+)$/.exec(note);
-          if (!m) return null;
-          const o = await this.env.DB.prepare("SELECT delivery_method, arrives_at FROM printer_offers WHERE id = ? AND order_id = ? AND delivery_method IS NOT NULL")
-            .bind(Number(m[1]), orderId).first<{ delivery_method: string; arrives_at: string }>();
-          return o ? { method: o.delivery_method, arrivesAt: o.arrives_at } : null;
-        },
+        chosenDelivery: () => this.chosenDelivery(),
         askPrinters: (escalationId, vendorIds) => this.askPrinters(escalationId, vendorIds),
         orderSummary: async () => {
           const row = await getOrderById(this.env.DB, orderId);

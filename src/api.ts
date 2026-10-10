@@ -21,7 +21,6 @@ import { handleSandboxOwner } from "./sandbox/owner-api";
 import { handleSandboxBank } from "./sandbox/bank";
 import { handleSandboxDiscover } from "./sandbox/discover-route";
 import { clientKey, clientOrdersToday, countClientOrder, envNumber } from "./limits";
-import { usedDelivery } from "./deliveries";
 
 export const MAX_UPLOAD_BYTES = 10_000_000;
 export const MAX_FILES_PER_ORDER = 10;
@@ -204,8 +203,8 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     const [view, quote, payments] = await Promise.all([agent.getView(), latestQuote(env.DB, order.id), listPaymentRequests(env.DB, order.id)]);
     const hashes = isSandbox(env) ? await creditedTxHashes(env.DB, payments.map((p) => p.id)) : null;
     const shown = payments.map((p) => (hashes ? { ...publicPayment(p), txHashes: hashes.get(p.id) ?? [] } : publicPayment(p)));
-    // The delivery appears only once the printer cost came from an offer with one.
-    const delivery = await usedDelivery(env.DB, order.id);
+    // The delivery appears only while the order's items are priced on a used offer with one (as in the quote).
+    const delivery = await agent.chosenDelivery().catch(() => null);
     return json(200, { order: publicOrder(order), view, quote: publicQuote(quote), payments: shown, payTo: payTo(env), ...(delivery ? { delivery } : {}) }, NO_STORE);
   }
 
