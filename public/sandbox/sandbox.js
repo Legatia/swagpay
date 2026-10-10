@@ -1,7 +1,7 @@
 // Testnet sandbox UI: banner, testnet pay helper, and the judge's "You are the owner" panel.
 // Loaded as a module on every page; it does nothing unless the host is a sandbox host.
 // Every server-derived string goes in with textContent / createTextNode, never innerHTML.
-import { NETWORK_LINE, NO_QUOTE_HINT, PAY_EXACT_TEXT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint, quoteRow, seenLines } from "./text.js";
+import { NETWORK_LINE, NO_QUOTE_HINT, PAY_EXACT_TEXT, actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, PAY_GAS_NOTE, judgeText, money, payFaucetText, payToken, paymentHint, quoteRow, seenLines, deliveryLabel, defaultDelivery } from "./text.js";
 
 const FAUCET = "https://faucet.circle.com";
 const EXPLORER = "https://explorer.testnet.arc.io";
@@ -111,6 +111,7 @@ function orderPage(token) {
   let paymentId = null;
   let actionSeq = 0; // counts actions started, so a poll that began before one is dropped
   let timer = null;
+  const deliveryPick = new Map(); // offerId -> the delivery option the judge picked, kept across polls
   let seen = []; // "payment seen" lines from the order API's sandbox-only txHashes
   let seenKey = "";
 
@@ -261,10 +262,32 @@ function orderPage(token) {
       const list = h("ul", { class: "sbx-quotes" });
       asked.forEach((q, i) => {
         const r = quoteRow(q);
+        const deliveries = Array.isArray(q?.offer?.deliveries) ? q.offer.deliveries : [];
+        let choices = null;
+        if (r.canUse && deliveries.length) {
+          if (!deliveries.some((d) => d.deliveryId === deliveryPick.get(r.offerId))) deliveryPick.set(r.offerId, defaultDelivery(deliveries));
+          choices = h("fieldset", { class: "sbx-deliveries" }, h("legend", { text: "Delivery (simulated options)" }));
+          deliveries.forEach((d) => {
+            const radio = h("input", { type: "radio", name: `sbx-delivery-${r.offerId}`, value: String(d.deliveryId), "data-key": `delivery-${r.offerId}-${d.deliveryId}` });
+            radio.checked = deliveryPick.get(r.offerId) === d.deliveryId;
+            radio.addEventListener("change", () => { if (radio.checked) deliveryPick.set(r.offerId, d.deliveryId); });
+            choices.append(h("label", { class: "sbx-delivery" }, radio, deliveryLabel(d)));
+          });
+        } else if (deliveries.length) {
+          const chosen = deliveries.find((d) => d.chosen);
+          if (chosen) choices = h("p", { class: "sbx-quote-detail", text: `Delivery: ${deliveryLabel(chosen)}` });
+        }
+        const use = () => {
+          const body = { offerId: r.offerId };
+          const pick = deliveryPick.get(r.offerId);
+          if (deliveries.length && pick !== null && pick !== undefined) body.deliveryId = pick;
+          act("use_offer", body);
+        };
         list.append(h("li", { class: "sbx-quote" },
           h("p", { class: "sbx-quote-title", text: r.title }),
           h("p", { class: "sbx-quote-detail", text: r.detail }),
-          r.canUse ? h("div", { class: "sbx-buttons" }, button("Use this offer", () => act("use_offer", { offerId: r.offerId }), false, `use-offer-${r.offerId ?? i}`)) : null));
+          choices,
+          r.canUse ? h("div", { class: "sbx-buttons" }, button("Use this offer", use, false, `use-offer-${r.offerId ?? i}`)) : null));
       });
       node.append(list, h("p", { class: "sbx-subhead", text: "Or enter the printer cost yourself" }));
     }

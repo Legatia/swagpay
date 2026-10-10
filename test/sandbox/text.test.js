@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE, PAY_EXACT_TEXT, quoteRow, seenLines } from "../../public/sandbox/text.js";
+import { actionOutcome, actionsFor, costCeiling, costCeilingMessage, isSandboxHost, judgeText, money, paymentHint, payToken, payFaucetText, PAY_GAS_NOTE, NETWORK_LINE, PAY_EXACT_TEXT, deliveryLabel, defaultDelivery, quoteRow, seenLines } from "../../public/sandbox/text.js";
 
 describe("isSandboxHost", () => {
   it("matches sandbox hosts and local test mode only", () => {
@@ -223,5 +223,26 @@ describe("quoteRow", () => {
     expect(quoteRow({ ...base, status: "drafted" }).detail).toBe("Request drafted, not sent yet.");
     expect(quoteRow({ ...base, name: "", city: "", status: "asked" }).title).toBe("Printer #3");
     for (const s of ["asked", "declined", "expired", "drafted"]) expect(quoteRow({ ...base, status: s }).canUse).toBe(false);
+  });
+});
+
+describe("deliveries", () => {
+  const ds = [
+    { deliveryId: 1, method: "same_day", cost: 0.6, currency: "PLN", arrivesAt: "2026-10-14", late: false, chosen: false },
+    { deliveryId: 2, method: "pickup", cost: 0, currency: "PLN", arrivesAt: "2026-10-14", late: false, chosen: false },
+    { deliveryId: 3, method: "courier", cost: 0.1, currency: "PLN", arrivesAt: "2026-10-30", late: true, chosen: false },
+  ];
+  it("labels each option in plain words", () => {
+    expect(deliveryLabel(ds[0])).toBe("Same-day courier: 0.60 PLN, arrives 2026-10-14, on time");
+    expect(deliveryLabel(ds[1])).toBe("Pickup at the printer: free, from 2026-10-14, on time");
+    expect(deliveryLabel(ds[2])).toBe("Courier: 0.10 PLN, arrives 2026-10-30, after your delivery date");
+    expect(deliveryLabel({ ...ds[2], chosen: true })).toMatch(/ \(chosen\)$/);
+  });
+  it("defaults to the chosen option, else the cheapest on time, earlier arrival first", () => {
+    expect(defaultDelivery(ds)).toBe(2);
+    expect(defaultDelivery([{ ...ds[0], chosen: true }, ds[1]])).toBe(1);
+    expect(defaultDelivery([ds[2]])).toBe(3); // nothing on time: the only one
+    expect(defaultDelivery([])).toBeNull();
+    expect(defaultDelivery([{ ...ds[1], arrivesAt: "2026-10-15" }, { ...ds[0], cost: 0 }])).toBe(1);
   });
 });

@@ -72,3 +72,9 @@ html.sbx-on .side { top: calc(var(--sbx-h) + 16px); }
 .sbx-quote-title { font-weight: 700; }
 .sbx-quote-detail { overflow-wrap: anywhere; }
 .sbx-quote .sbx-buttons { margin-top: 8px; }
+
+/* Delivery options on an offer. */
+.sbx-deliveries { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--line, #d9dcea); border-radius: 8px; display: grid; gap: 4px; }
+.sbx-deliveries legend { padding: 0 4px; font-size: 0.82rem; font-weight: 700; color: var(--text-muted, #4a4f72); }
+.sbx-delivery { display: flex; align-items: flex-start; gap: 8px; min-height: 44px; padding: 4px 0; font-weight: 400; cursor: pointer; overflow-wrap: anywhere; }
+.sbx-delivery input { margin-top: 3px; flex: none; width: 18px; height: 18px; }

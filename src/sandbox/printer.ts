@@ -2,6 +2,7 @@
 import type { OrderRow } from "../db";
 import type { OrderSpec } from "../order-spec";
 import type { VendorRow } from "../vendors";
+import { cityKey } from "../discovery/names";
 
 export const SIMULATED = "simulated: this printer has not been contacted";
 
@@ -82,4 +83,42 @@ export function stepMessage(step: PrinterStep, order: OrderRow, vendor: VendorRo
 /** Seconds until a step fires, on the sandbox's fast clock. */
 export function stepDelaySeconds(step: PrinterStep): number {
   return { accepted: 30, proof: 60, printed: 90, shipped: 60 }[step];
+}
+
+// Delivery options for a simulated offer. Base costs are estimates for Poland in PLN (a same-day
+// courier in town, a 1–2 day courier, a parcel locker, an international courier), scaled to 1% like
+// simulatedQuote so a quote plus its dearest option stays inside the testnet faucet budget.
+export type DeliveryMethod = "pickup" | "printer_courier" | "courier" | "same_day" | "parcel_locker";
+const DELIVERY_SCALE = 0.01;
+
+function addWorkingDays(ymd: string, days: number): string {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  let left = days;
+  while (left > 0) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    const wd = d.getUTCDay();
+    if (wd !== 0 && wd !== 6) left -= 1;
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+/** 2 options per printer: same city, elsewhere in Poland, or abroad (by city key and country). */
+export function simulatedDeliveries(
+  vendor: VendorRow | null, deliveryCityKey: string | null, readyBy: string,
+): Array<{ method: DeliveryMethod; costPln: number; arrivesAt: string; note?: string }> {
+  const opt = (method: DeliveryMethod, basePln: number, workingDays: number, what: string) => ({
+    method,
+    costPln: Math.round(basePln * DELIVERY_SCALE * 100) / 100,
+    arrivesAt: addWorkingDays(readyBy, workingDays),
+    note: `${what}, scaled to 1% for the testnet faucet (${SIMULATED})`,
+  });
+  const abroad = vendor?.country ? vendor.country.toUpperCase() !== "PL" : false;
+  if (abroad) {
+    return [opt("courier", 90, 5, "International courier, about 5 working days"), opt("printer_courier", 150, 3, "The printer's express courier, about 3 working days")];
+  }
+  const sameCity = !!vendor?.city && !!deliveryCityKey && cityKey(vendor.city) === cityKey(deliveryCityKey);
+  if (sameCity) {
+    return [opt("pickup", 0, 0, "Pickup at the printer"), opt("same_day", 60, 0, "Same-day courier in town")];
+  }
+  return [opt("courier", 25, 2, "Courier, 1–2 working days"), opt("parcel_locker", 15, 2, "Parcel locker, about 2 working days")];
 }

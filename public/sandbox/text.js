@@ -147,3 +147,22 @@ export function quoteRow(q) {
   }[q?.status] ?? judgeText(String(q?.status ?? "")) ?? "";
   return { title, detail, offerId: null, canUse: false };
 }
+
+// Delivery options on a printer offer (quoteRequests[].offer.deliveries).
+const DELIVERY_NAMES = { pickup: "Pickup at the printer", printer_courier: "The printer's courier", courier: "Courier", same_day: "Same-day courier", parcel_locker: "Parcel locker" };
+export function deliveryLabel(d) {
+  const name = DELIVERY_NAMES[d?.method] ?? judgeText(String(d?.method ?? "Delivery"));
+  const cost = Number(d?.cost) > 0 ? `${amount2(d.cost)} ${d.currency}` : "free";
+  const when = d?.method === "pickup" ? `from ${d.arrivesAt}` : `arrives ${d?.arrivesAt}`;
+  const timing = d?.late ? "after your delivery date" : "on time";
+  return `${name}: ${cost}, ${when}, ${timing}${d?.chosen ? " (chosen)" : ""}`;
+}
+export function defaultDelivery(deliveries) {
+  const list = Array.isArray(deliveries) ? deliveries : [];
+  if (!list.length) return null;
+  const chosen = list.find((d) => d.chosen);
+  if (chosen) return chosen.deliveryId;
+  const pool = list.some((d) => !d.late) ? list.filter((d) => !d.late) : list;
+  const best = [...pool].sort((a, b) => Number(a.cost) - Number(b.cost) || String(a.arrivesAt).localeCompare(String(b.arrivesAt)))[0];
+  return best.deliveryId;
+}
