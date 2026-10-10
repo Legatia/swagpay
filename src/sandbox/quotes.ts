@@ -7,7 +7,8 @@ import type { OrderSpec } from "../order-spec";
 import { MAX_ASKED_PER_COST_REQUEST, type QuoteRequestRow } from "../quote-requests";
 import { isPolishBusinessDay, warsawDate } from "../time";
 import { getVendor, type VendorRow } from "../vendors";
-import { SIMULATED, simulatedQuote } from "./printer";
+import { SIMULATED, simulatedDeliveries, simulatedQuote } from "./printer";
+import { DELIVERY_WORDS, addDeliveries, bestDelivery, isDeliveryMethod, setOfferDelivery } from "../deliveries";
 
 export const REPLY_EXPIRY_SECONDS = 600;
 const DEFAULT_LEAD_DAYS = 5;
@@ -45,8 +46,11 @@ export function arrivalDate(now: Date, vendor: Pick<VendorRow, "lead_days"> | nu
   return new Date(t).toISOString().slice(0, 10);
 }
 
-/** Settles one asked printer: a decline, or an offer (simulatedQuote, delivery included). Null when there was nothing to settle. */
-export async function replyToQuoteRequest(env: Env, id: number, now: Date = new Date()): Promise<{ escalationId: number } | null> {
+/**
+ * Settles one asked printer: a decline, or an offer (simulatedQuote) ready on the printer's lead time, with its simulated delivery
+ * options to `deliveryCityKey` and the cheapest on-time one in use. Null when there was nothing to settle.
+ */
+export async function replyToQuoteRequest(env: Env, id: number, now: Date = new Date(), deliveryCityKey: string | null = null): Promise<{ escalationId: number } | null> {
   const row = await env.DB.prepare("SELECT * FROM quote_requests WHERE id = ?").bind(id).first<QuoteRequestRow>();
   if (!row || row.status !== "asked") return null;
   const order = await getOrderById(env.DB, row.order_id);
@@ -70,10 +74,21 @@ export async function replyToQuoteRequest(env: Env, id: number, now: Date = new 
   if (claimed.meta.changes !== 1) return null;
   try {
     const methods = [...new Set((spec?.items ?? []).map((i) => i.method).filter((m): m is string => !!m))];
+    const readyBy = arrivalDate(now, vendor, methods);
     const offer = await addOffer(env.DB, {
       orderId: row.order_id, vendorId: row.vendor_id, currency: quote.currency, priceCents: Math.round(quote.amount * 100), deliveryCents: 0, otherCents: 0,
-      arrivesAt: arrivalDate(now, vendor, methods), note: `quote request #${row.id} (${SIMULATED})`,
+      arrivesAt: readyBy, note: `quote request #${row.id} (${SIMULATED})`,
     }, now);
+    // Delivery options are priced in PLN; stored in the offer's currency.
+    const rate = await plnPer(env.DB, quote.currency, now);
+    if (rate !== null) {
+      const options = await addDeliveries(env.DB, offer.id, simulatedDeliveries(vendor, deliveryCityKey, readyBy).map((o) => ({
+        method: o.method, costCents: Math.round((o.costPln / rate) * 100), arrivesAt: o.arrivesAt, note: o.note ?? null,
+      })), now);
+      const best = bestDelivery(options, order!.deliver_by.slice(0, 10));
+      if (best) await setOfferDelivery(env.DB, offer.id, best.id);
+    }
+    // Last, so the agent hears only once the offer and its delivery are complete.
     await env.DB.prepare("UPDATE quote_requests SET offer_id = ? WHERE id = ?").bind(offer.id, id).run();
   } catch (err) {
     await env.DB.prepare("UPDATE quote_requests SET status = 'asked', settled_at = NULL WHERE id = ?").bind(id).run();
@@ -94,6 +109,7 @@ export async function expireQuoteRequests(env: Env, escalationId: number, now: D
 
 type ReplyRow = Pick<QuoteRequestRow, "id" | "vendor_id" | "status" | "offer_id" | "decline_reason" | "notified_at"> & {
   currency: string | null; price_cents: number | null; delivery_cents: number | null; other_cents: number | null; arrives_at: string | null; deliver_by: string;
+  delivery_method: string | null; delivery_options: number;
 };
 
 /**
@@ -104,7 +120,8 @@ export async function repliesEvent(env: Env, escalationId: number, now: Date = n
   const rows = (await env.DB
     .prepare(
       `SELECT qr.id, qr.vendor_id, qr.status, qr.offer_id, qr.decline_reason, qr.notified_at,
-              po.currency, po.price_cents, po.delivery_cents, po.other_cents, po.arrives_at, o.deliver_by
+              po.currency, po.price_cents, po.delivery_cents, po.other_cents, po.arrives_at, po.delivery_method, o.deliver_by,
+              (SELECT COUNT(*) FROM offer_deliveries d WHERE d.offer_id = qr.offer_id) AS delivery_options
        FROM quote_requests qr JOIN orders o ON o.id = qr.order_id LEFT JOIN printer_offers po ON po.id = qr.offer_id
        WHERE qr.escalation_id = ? AND qr.status != 'drafted' ORDER BY qr.id`,
     )
@@ -120,13 +137,22 @@ export async function repliesEvent(env: Env, escalationId: number, now: Date = n
     .run();
   if (heard.meta.changes === 0) return null; // another callback told the agent first
   const parts: string[] = [];
+  let offers = 0;
+  let late = 0;
   for (const r of fresh) {
     if (r.status === "replied" && r.offer_id !== null && r.currency) {
       const total = (r.price_cents ?? 0) + (r.delivery_cents ?? 0) + (r.other_cents ?? 0);
       const rate = await plnPer(env.DB, r.currency, now);
       const landed = rate === null ? `${(total / 100).toFixed(2)} ${r.currency}` : `${((total * rate) / 100).toFixed(2)} PLN landed`;
-      const late = (r.arrives_at ?? "") > r.deliver_by.slice(0, 10);
-      parts.push(`offer #${r.offer_id} from printer #${r.vendor_id}: ${landed}, arrives ${r.arrives_at} (${late ? "late" : "on time"})`);
+      const isLate = (r.arrives_at ?? "") > r.deliver_by.slice(0, 10);
+      offers++;
+      if (isLate) late++;
+      if (r.delivery_method && isDeliveryMethod(r.delivery_method)) {
+        const options = r.delivery_options > 1 ? `; ${r.delivery_options} delivery options` : "";
+        parts.push(`offer #${r.offer_id} from printer #${r.vendor_id}: ${landed} (${DELIVERY_WORDS[r.delivery_method]}, arrives ${r.arrives_at}, ${isLate ? "late" : "on time"}${options})`);
+      } else {
+        parts.push(`offer #${r.offer_id} from printer #${r.vendor_id}: ${landed}, arrives ${r.arrives_at} (${isLate ? "late" : "on time"})`);
+      }
     } else if (r.status === "declined") {
       parts.push(`printer #${r.vendor_id} declined: ${r.decline_reason ?? "no reason given"}`);
     } else {
@@ -134,7 +160,9 @@ export async function repliesEvent(env: Env, escalationId: number, now: Date = n
     }
   }
   const left = MAX_ASKED_PER_COST_REQUEST - rows.length;
-  const next = fresh.some((r) => r.status === "replied")
+  const next = offers > 0 && late === offers
+    ? "No offer arrives by the delivery date: ask the host whether a later date works."
+    : offers > 0
     ? "The owner chooses one of these offers; tell the host the price is on its way."
     : left > 0
       ? `No offer this time. You may ask up to ${left} other printers: call request_printer_cost with new printerIds (find_printers lists them). Otherwise tell the host a person will follow up.`

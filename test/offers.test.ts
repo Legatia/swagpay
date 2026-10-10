@@ -12,7 +12,7 @@ const vendor = async (city = "Warsaw", status = "screened") =>
 
 describe("printer offers", () => {
   it("ranks by landed PLN cost, late offers last, unknown rates unranked", () => {
-    const base = { id: 0, order_id: 1, vendor_id: 1, delivery_cents: 0, other_cents: 0, note: null, chosen_at: null, created_at: "x" };
+    const base = { id: 0, order_id: 1, vendor_id: 1, delivery_cents: 0, other_cents: 0, note: null, chosen_at: null, created_at: "x", delivery_method: null, delivery_id: null };
     const plnPer = (c: string) => ({ PLN: 1, EUR: 4.3 } as Record<string, number>)[c] ?? null;
     const ranked = rankOffers([
       { ...base, id: 1, currency: "PLN", price_cents: 120_000, arrives_at: "2099-10-07" },

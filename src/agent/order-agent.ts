@@ -12,7 +12,7 @@ import { createEscalation, type EscalationKind } from "../escalations";
 import { ratesFor, refreshRates } from "../fx";
 import type { Intake } from "../intake";
 import { designSummary, type DesignSpec, type FileRole } from "../design-spec";
-import { EMPTY_SPEC, missingInfo, type OrderSpec } from "../order-spec";
+import { EMPTY_SPEC, itemsKey, missingInfo, type OrderSpec } from "../order-spec";
 import { loadPolicy } from "../policy";
 import { formatUnits } from "../money";
 import { getPaymentRequest } from "../payments";
@@ -25,6 +25,7 @@ import { previewsIn } from "./previews";
 import { createModel, type ModelClient } from "./model";
 import { SYSTEM_PROMPT } from "./prompt";
 import { cityFromPlace, getVendor, suggestFarVendors, suggestVendors, vendorJobFor } from "../vendors";
+import { cityKey } from "../discovery/names";
 import { createTelegram, notifyOwner, type TelegramClient } from "../telegram";
 import { TOOL_DEFINITIONS, makeHandlers, type ArtworkFile } from "./tools";
 
@@ -292,18 +293,22 @@ export class OrderAgent extends Agent<Env, OrderState> {
     const sandbox = isSandbox(this.env);
     const { rows, refused } = await recordAsked(this.env.DB, { orderId, escalationId, vendorIds, status: sandbox ? "asked" : "drafted" });
     if (sandbox && rows.length) {
-      for (const r of rows) await this.schedule(replyPlan(orderId, r.vendor_id).delaySeconds, "sandboxQuoteReply", { quoteRequestId: r.id });
+      // Deliveries are priced to the city the agent searched, else the one read from the delivery place.
+      const order = await getOrderById(this.env.DB, orderId);
+      const place = order ? cityFromPlace(order.delivery_place) : null;
+      const deliveryCityKey = this.meta("delivery_city_key") ?? (place ? cityKey(place) : null);
+      for (const r of rows) await this.schedule(replyPlan(orderId, r.vendor_id).delaySeconds, "sandboxQuoteReply", { quoteRequestId: r.id, cityKey: deliveryCityKey });
       await this.schedule(REPLY_EXPIRY_SECONDS, "sandboxQuoteExpiry", { escalationId });
     }
     return { asked: rows.map((r) => r.vendor_id), refused, sandbox };
   }
 
   /** Schedule callback (sandbox): one asked printer replies; the agent hears once every asked printer has answered. */
-  async sandboxQuoteReply(payload: { quoteRequestId: number }): Promise<void> {
+  async sandboxQuoteReply(payload: { quoteRequestId: number; cityKey?: string | null }): Promise<void> {
     this.sandboxOnly();
     this.ensureTables();
     this.orderId();
-    const settled = await replyToQuoteRequest(this.env, payload.quoteRequestId);
+    const settled = await replyToQuoteRequest(this.env, payload.quoteRequestId, new Date(), payload.cityKey ?? null);
     if (settled) await this.deliverReplies(settled.escalationId);
   }
 
@@ -531,11 +536,22 @@ export class OrderAgent extends Agent<Env, OrderState> {
           const calls = Number(this.meta("find_printers_calls") ?? "0");
           if (calls >= FIND_PRINTERS_PER_ORDER) return { refused: `find_printers was already used ${FIND_PRINTERS_PER_ORDER} times for this order` };
           this.setMeta("find_printers_calls", String(calls + 1));
+          this.setMeta("delivery_city_key", cityKey(city));
           const methods = [...new Set(this.readSpec().items.map((i) => i.method).filter((m): m is string => !!m))];
           const fetchImpl: FetchLike = this.discoveryFetchOverride ?? ((u, i) => fetch(u, i));
           return findPrinters(this.env, { orderId, city, country, methods }, { fetch: fetchImpl, now: new Date(), allowModelCall: () => takeModelCall(this.env) });
         },
         pickedPrinters: (vendorIds) => pickedPrinterLines(this.env.DB, vendorIds),
+        chosenDelivery: async () => {
+          // The delivery of the offer whose cost the order's items are priced on (useOffer notes it as "offer #N").
+          const key = await itemsKey(this.readSpec());
+          const note = this.sql<{ note: string | null }>`SELECT note FROM printer_costs WHERE spec_key = ${key}`[0]?.note ?? "";
+          const m = /^offer #(\d+)$/.exec(note);
+          if (!m) return null;
+          const o = await this.env.DB.prepare("SELECT delivery_method, arrives_at FROM printer_offers WHERE id = ? AND order_id = ? AND delivery_method IS NOT NULL")
+            .bind(Number(m[1]), orderId).first<{ delivery_method: string; arrives_at: string }>();
+          return o ? { method: o.delivery_method, arrivesAt: o.arrives_at } : null;
+        },
         askPrinters: (escalationId, vendorIds) => this.askPrinters(escalationId, vendorIds),
         orderSummary: async () => {
           const row = await getOrderById(this.env.DB, orderId);

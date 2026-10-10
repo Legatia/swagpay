@@ -21,7 +21,7 @@ describe("quoteRequestEmail", () => {
       "- naklejki: 500 szt., wycinane po obrysie, 5 × 5 cm",
       "",
       "Termin dostawy: do 2099-10-08, adres: Kolektyw3, Koszykowa 54, Warszawa.",
-      "Prosimy o cenę brutto z dostawą oraz czas realizacji.",
+      "Prosimy o cenę brutto z dostawą (kurier, paczkomat lub odbiór osobisty) oraz czas realizacji.",
       "Pliki z grafiką w załączniku.",
       "",
       "Pozdrawiamy,",

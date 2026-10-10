@@ -87,7 +87,9 @@ describe("asking printers", () => {
       expect(bad).toEqual({ asked: [], refused: [`printer #${cand} isn't verified`, `printer #${paused} is paused`, "printer #999999 doesn't exist"], sandbox: true });
       expect(await agent.askPrinters(costId, [a, b])).toEqual({ asked: [a, b], refused: [], sandbox: true });
       const s = agent.getSchedules();
-      expect(s.filter((x) => x.callback === "sandboxQuoteReply")).toHaveLength(2);
+      const replies = s.filter((x) => x.callback === "sandboxQuoteReply");
+      expect(replies).toHaveLength(2);
+      expect(replies[0].payload).toMatchObject({ cityKey: "warszawa" }); // from the delivery place (no find_printers city yet)
       const expiry = s.filter((x) => x.callback === "sandboxQuoteExpiry");
       expect(expiry).toHaveLength(1);
       expect(expiry[0].payload).toEqual({ escalationId: costId });
@@ -136,7 +138,7 @@ describe("simulated replies", () => {
       const events = inbox(agent);
       expect(events).toHaveLength(1);
       expect(events[0]).toMatch(new RegExp(
-        `^Printer replies for cost request #${costId} \\(simulated\\): offer #\\d+ from printer #${replier}: \\d+\\.\\d{2} PLN landed, arrives \\d{4}-\\d{2}-\\d{2} \\(on time\\); printer #${decliner} declined: [a-z' ]+\\. The owner chooses one of these offers; tell the host the price is on its way\\.$`,
+        `^Printer replies for cost request #${costId} \\(simulated\\): offer #\\d+ from printer #${replier}: \\d+\\.\\d{2} PLN landed \\(parcel locker, arrives \\d{4}-\\d{2}-\\d{2}, on time; 2 delivery options\\); printer #${decliner} declined: [a-z' ]+\\. The owner chooses one of these offers; tell the host the price is on its way\\.$`,
       ));
       expect(events[0]).not.toContain("Reply Vendor");
       expect(agent.sql<{ text: string }>`SELECT text FROM thread`.map((r) => r.text)).toContain("Printers replied with quotes (simulated).");
@@ -145,8 +147,40 @@ describe("simulated replies", () => {
     expect(r1).toMatchObject({ status: "replied" });
     expect(r2).toMatchObject({ status: "declined" });
     const offer = await env.DB.prepare("SELECT * FROM printer_offers WHERE id = ?").bind(r1.offer_id).first<{ vendor_id: number; currency: string; note: string; delivery_cents: number }>();
-    expect(offer).toMatchObject({ vendor_id: replier, currency: "PLN", delivery_cents: 0 });
+    // Gdańsk printer, Warsaw delivery: courier or parcel locker; the cheapest on time is the default.
+    expect(offer).toMatchObject({ vendor_id: replier, currency: "PLN", delivery_cents: 15 });
     expect(offer!.note).toContain(SIMULATED);
+    const opts = (await env.DB.prepare("SELECT id, method, cost_cents, arrives_at FROM offer_deliveries WHERE offer_id = ? ORDER BY id").bind(r1.offer_id).all<{ id: number; method: string; cost_cents: number; arrives_at: string }>()).results;
+    expect(opts.map((o) => [o.method, o.cost_cents])).toEqual([["courier", 25], ["parcel_locker", 15]]);
+    expect(await env.DB.prepare("SELECT delivery_method, delivery_id, arrives_at FROM printer_offers WHERE id = ?").bind(r1.offer_id).first())
+      .toEqual({ delivery_method: "parcel_locker", delivery_id: opts[1].id, arrives_at: opts[1].arrives_at });
+  });
+
+  it("offers pickup and same-day for a printer in the delivery city", async () => {
+    const { order, stub, costId } = await costOrder();
+    const replier = await vendorWhere(order.id, (p) => !p.declines);
+    await env.DB.prepare("UPDATE vendors SET city = 'Warsaw' WHERE id = ?").bind(replier).run();
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.askPrinters(costId, [replier]);
+      await agent.sandboxQuoteReply({ quoteRequestId: (await rows(costId))[0].id, cityKey: "warszawa" });
+    });
+    const offerId = (await rows(costId))[0].offer_id;
+    const methods = (await env.DB.prepare("SELECT method FROM offer_deliveries WHERE offer_id = ? ORDER BY id").bind(offerId).all<{ method: string }>()).results.map((r) => r.method);
+    expect(methods).toEqual(["pickup", "same_day"]);
+    expect((await env.DB.prepare("SELECT delivery_method FROM printer_offers WHERE id = ?").bind(offerId).first<{ delivery_method: string }>())?.delivery_method).toBe("pickup");
+  });
+
+  it("asks the agent to check the date with the host when no offer arrives in time", async () => {
+    const { order, stub, costId } = await costOrder();
+    await env.DB.prepare("UPDATE orders SET deliver_by = ? WHERE id = ?").bind(new Date(Date.now() + 86_400_000).toISOString(), order.id).run();
+    const replier = await vendorWhere(order.id, (p) => !p.declines);
+    await runInDurableObject(stub, async (agent: OrderAgent) => {
+      await agent.askPrinters(costId, [replier]);
+      await agent.sandboxQuoteReply({ quoteRequestId: (await rows(costId))[0].id });
+      const [event] = inbox(agent);
+      expect(event).toContain(", late; 2 delivery options)");
+      expect(event).toMatch(/No offer arrives by the delivery date: ask the host whether a later date works\.$/);
+    });
   });
 
   it("expires printers that haven't answered after 10 minutes and invites a second ask", async () => {
@@ -193,11 +227,21 @@ describe("owner panel", () => {
     expect(st.cost?.escalationId).toBe(costId);
     expect(st.cost?.quoteRequests).toEqual([{
       vendorId: replier, name: expect.stringContaining("Reply Vendor"), city: "Gdańsk", status: "replied", declineReason: null,
-      offer: { offerId: expect.any(Number), currency: "PLN", amount: expect.any(Number), landedPln: expect.any(Number), arrivesAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), late: false, used: false },
+      offer: {
+        offerId: expect.any(Number), currency: "PLN", amount: expect.any(Number), landedPln: expect.any(Number), arrivesAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), late: false, used: false,
+        deliveries: [
+          { deliveryId: expect.any(Number), method: "courier", cost: 0.25, currency: "PLN", arrivesAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), late: false, chosen: false },
+          { deliveryId: expect.any(Number), method: "parcel_locker", cost: 0.15, currency: "PLN", arrivesAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), late: false, chosen: false },
+        ],
+      },
     }]);
     const offerId = st.cost!.quoteRequests[0].offer!.offerId;
-    const res = await (await post(token, "use_offer", { offerId })).json<{ ok: boolean; message: string }>();
+    const courier = st.cost!.quoteRequests[0].offer!.deliveries[0].deliveryId;
+    const res = await (await post(token, "use_offer", { offerId, deliveryId: courier })).json<{ ok: boolean; message: string }>();
     expect(res.ok).toBe(true);
+    const used = (await (await get(token)).json<SandboxOwnerState>());
+    expect(used.cost).toBeNull(); // decided
+    expect(await env.DB.prepare("SELECT delivery_method FROM printer_offers WHERE id = ?").bind(offerId).first()).toEqual({ delivery_method: "courier" });
     expect((await getEscalation(env.DB, costId))?.status).not.toBe("open");
     expect((await env.DB.prepare("SELECT chosen_at FROM printer_offers WHERE id = ?").bind(offerId).first<{ chosen_at: string | null }>())?.chosen_at).not.toBeNull();
   });
@@ -213,6 +257,7 @@ describe("owner panel", () => {
     const offerId = (await rows(other.costId))[0].offer_id;
     expect((await post(mine.token, "use_offer", { offerId })).status).toBe(404);
     expect((await post(mine.token, "use_offer", { offerId: "1" })).status).toBe(400);
+    expect((await post(other.token, "use_offer", { offerId, deliveryId: "x" })).status).toBe(400);
   });
 });
 
@@ -221,6 +266,9 @@ it("sandbox cleanup deletes an order's quote requests", async () => {
   const e = await createEscalation(env.DB, { orderId: order.id, kind: "cost", summary: "x", payload: {} });
   const v = await addVendor("Old");
   await env.DB.prepare("INSERT INTO quote_requests (order_id, escalation_id, vendor_id, status, created_at) VALUES (?, ?, ?, 'asked', 'x')").bind(order.id, e.id, v).run();
+  const offer = await env.DB.prepare("INSERT INTO printer_offers (order_id, vendor_id, currency, price_cents, delivery_cents, other_cents, arrives_at, created_at) VALUES (?, ?, 'PLN', 100, 0, 0, '2099-01-01', 'x') RETURNING id").bind(order.id, v).first<{ id: number }>();
+  await env.DB.prepare("INSERT INTO offer_deliveries (offer_id, method, cost_cents, arrives_at, created_at) VALUES (?, 'courier', 25, '2099-01-03', 'x')").bind(offer!.id).run();
   await cleanupSandbox(sandbox);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM offer_deliveries WHERE offer_id = ?").bind(offer!.id).first<{ n: number }>())?.n).toBe(0);
   expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM quote_requests WHERE order_id = ?").bind(order.id).first<{ n: number }>())?.n).toBe(0);
 });

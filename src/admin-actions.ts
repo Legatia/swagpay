@@ -4,6 +4,7 @@ import { createEscalation } from "./escalations";
 import { cancelSupplierPayment, cashOut, decideAsOwner, markSupplierPaid, retryCashoutWithdrawal, type ActionResult } from "./owner-actions";
 import { createTelegram, notifyOwner } from "./telegram";
 import { addOffer, deleteOffer, useOffer } from "./offers";
+import { isDeliveryMethod } from "./deliveries";
 import { getVendor, setVendorPayDetails } from "./vendors";
 
 const AMOUNT = /^\d{1,7}(?:[.,]\d{1,2})?$/;
@@ -82,9 +83,11 @@ export async function handleAdminPost(request: Request, env: Env, who: { email: 
     const delivery = field("delivery") ? toCents(field("delivery")) : 0;
     const other = field("other") ? toCents(field("other")) : 0;
     if (price === null || price <= 0 || delivery === null || other === null) return redirect(back, "Give the price (above 0), delivery and other as amounts like 120 or 12.50.");
+    const method = field("delivery_method");
+    if (method && !isDeliveryMethod(method)) return redirect(back, "Choose a delivery method from the list.");
     const arrives = field("arrives_at");
     if (!/^\d{4}-\d{2}-\d{2}$/.test(arrives) || Number.isNaN(Date.parse(`${arrives}T12:00:00.000Z`))) return redirect(back, "Give the arrival date as YYYY-MM-DD.");
-    const offer = await addOffer(env.DB, { orderId, vendorId: vendor.id, currency, priceCents: price, deliveryCents: delivery, otherCents: other, arrivesAt: arrives, note: field("note").replace(/\s+/g, " ").slice(0, 200) || null });
+    const offer = await addOffer(env.DB, { orderId, vendorId: vendor.id, currency, priceCents: price, deliveryCents: delivery, otherCents: other, arrivesAt: arrives, note: field("note").replace(/\s+/g, " ").slice(0, 200) || null, deliveryMethod: method || null });
     await log("offer_add", `order:${orderId}`, { offer: offer.id, vendor: vendor.id, currency, price, delivery, other, arrives });
     return redirect(back, `Offer #${offer.id} added.`);
   }

@@ -6,6 +6,7 @@ import { statusWord } from "./escalations";
 import { formatCents } from "./money";
 import { mailtoLink } from "./quote-email";
 import { methodsOf } from "./vendors";
+import { DELIVERY_LABELS, DELIVERY_METHODS, isDeliveryMethod } from "./deliveries";
 
 /** 257500000 → "257.50 USDC" (two decimals for reading; the ledger's detail keeps full units where it matters). */
 export const money = (units: number, token: string) => `${(units / 1_000_000).toFixed(2)} ${token}`;
@@ -138,14 +139,15 @@ function offersSection(l: Ledger): string {
       l.openCost !== null && !o.chosen_at ? postButton(`/admin/offers/${o.id}/use`, "Use this offer", back) : "",
       !o.chosen_at ? postButton(`/admin/offers/${o.id}/delete`, "Delete", back, {}, "secondary") : "",
     ].join(" ");
-    return `<tr><td>${esc(name(o.vendor_id))}${o.note ? `<br><small>${esc(o.note)}</small>` : ""}</td><td>${esc(cents(o.price_cents, o.currency))}</td><td>${esc(cents(o.delivery_cents, o.currency))}</td><td>${esc(cents(o.other_cents, o.currency))}</td><td>${landedGrosze === null ? "no rate" : esc(cents(landedGrosze, "PLN"))}</td><td>${esc(o.arrives_at)}${late ? " <strong>late</strong>" : ""}</td><td>${o.chosen_at ? `used ${when(o.chosen_at)}` : "—"}</td><td>${actions}</td></tr>`;
+    return `<tr><td>${esc(name(o.vendor_id))}${o.note ? `<br><small>${esc(o.note)}</small>` : ""}</td><td>${esc(cents(o.price_cents, o.currency))}</td><td>${esc(cents(o.delivery_cents, o.currency))}${o.delivery_method && isDeliveryMethod(o.delivery_method) ? `<br><small>${esc(DELIVERY_LABELS[o.delivery_method])}</small>` : ""}</td><td>${esc(cents(o.other_cents, o.currency))}</td><td>${landedGrosze === null ? "no rate" : esc(cents(landedGrosze, "PLN"))}</td><td>${esc(o.arrives_at)}${late ? " <strong>late</strong>" : ""}</td><td>${o.chosen_at ? `used ${when(o.chosen_at)}` : "—"}</td><td>${actions}</td></tr>`;
   });
   const byCity = [...new Set(l.offerVendors.map((v) => v.city))].map((city) =>
     `<optgroup label="${esc(city)}">${l.offerVendors.filter((v) => v.city === city).map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join("")}</optgroup>`).join("");
   const add = `<form method="post" action="/admin/orders/${l.order.id}/offers" class="inline"><input type="hidden" name="back" value="${esc(back)}">
 <select name="vendor_id" aria-label="Printer">${byCity}</select>
 <select name="currency" aria-label="Currency">${PAY_CURRENCIES.map((c) => `<option>${c}</option>`).join("")}</select>
-${field("price", "Price", ' inputmode="decimal" size="8"')}${field("delivery", "Delivery", ' inputmode="decimal" size="8"')}${field("other", "Other", ' inputmode="decimal" size="8"')}
+${field("price", "Price", ' inputmode="decimal" size="8"')}${field("delivery", "Delivery", ' inputmode="decimal" size="8"')}
+<select name="delivery_method" aria-label="Delivery method"><option value="">Delivery method</option>${DELIVERY_METHODS.map((m) => `<option value="${m}">${esc(DELIVERY_LABELS[m])}</option>`).join("")}</select>${field("other", "Other", ' inputmode="decimal" size="8"')}
 <input type="date" name="arrives_at" aria-label="Arrives">${field("note", "Note", ' maxlength="200"')}<button>Add offer</button></form>`;
   return `<section><h2>Offers</h2>${table(["Printer", "Price", "Delivery", "Other", "Landed PLN", "Arrives", "Used", ""], rows, "No offers yet.")}${l.openCost === null ? "<p>Using an offer needs an open cost request.</p>" : ""}${add}</section>`;
 }

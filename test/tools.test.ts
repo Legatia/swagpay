@@ -17,7 +17,8 @@ function fakeCtx(files: ArtworkFile[] = []) {
     withdrawn: null as number | null, withdrawCalls: [] as string[],
     findResult: null as FindResult | { refused: string } | null, findCalls: [] as string[][],
     picked: { lines: ["v45 Druk Gdańsk (Gdańsk; screen; 0 jobs, 0 on time; found by the agent)"], refused: [] as string[] },
-    asked: [] as Array<{ escalationId: number; ids: number[] }>, askRefused: [] as string[], sandbox: false };
+    asked: [] as Array<{ escalationId: number; ids: number[] }>, askRefused: [] as string[], sandbox: false,
+    delivery: null as { method: string; arrivesAt: string } | null };
   const statuses = new Map<string, "open" | "approved" | "rejected">();
   const previews = new Map<string, number>();
   const state2 = { loads: 0 };
@@ -44,6 +45,7 @@ function fakeCtx(files: ArtworkFile[] = []) {
       return state.findResult ?? { inCity: [], elsewhere: [], searched: null, skipped: null };
     },
     async pickedPrinters() { return state.picked; },
+    async chosenDelivery() { return state.delivery; },
     async askPrinters(escalationId, ids) {
       state.asked.push({ escalationId, ids });
       return { asked: state.askRefused.length ? [] : ids, refused: state.askRefused, sandbox: state.sandbox };
@@ -119,6 +121,7 @@ describe("ask_host", () => {
       async suggestPrinters() { return null; },
       async findPrinters() { return { inCity: [], elsewhere: [], searched: null, skipped: null }; },
       async pickedPrinters() { return { lines: [], refused: [] }; },
+      async chosenDelivery() { return null; },
       async askPrinters() { return { asked: [], refused: [], sandbox: false }; },
       async orderSummary() { return { number: 7, status: "draft", deliverBy: new Date("2099-10-08T15:00:00Z"), deliveryPlace: "Kolektyw3" }; },
       async printerCost() { return null; },
@@ -605,6 +608,13 @@ describe("send_quote", () => {
     expect(state.quotes[0]).toMatchObject({ currency: "USD", priceCents: 38000, depositCents: 25750, costPln: 1000, plnPerUnit: 4, usdPerUnit: 1, itemsKey: await itemsKey(completeSpec) });
     expect(state.posted[0]).toMatch(/^Here is your price for the tees and stickers\.\n\nQuote #1: 380\.00 USD for the whole order/);
     expect(state.decisions[0]).toMatchObject({ tool: "send_quote", verdict: "allow", outcome: "done", detail: "quote #1" });
+  });
+
+  it("tells the host how the swag is delivered when the cost came with a delivery", async () => {
+    const { h, state } = await priced();
+    state.delivery = { method: "courier", arrivesAt: "2099-10-06" };
+    await h.send_quote(ask);
+    expect(state.posted[0]).toMatch(/^Here is your price for the tees and stickers\.\n\nQuote #1: 380\.00 USD for the whole order[^\n]*\nDelivery: by courier, arrives 6 Oct\.$/);
   });
 
   it("blocks a price outside the band and gives the allowed range", async () => {

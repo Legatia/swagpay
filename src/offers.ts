@@ -1,19 +1,24 @@
 import { plnPer } from "./fx";
 import { giveCost } from "./telegram-webhook";
 import { vendorJobFor } from "./vendors";
+import { setOfferDelivery } from "./deliveries";
 
 export interface OfferRow {
   id: number; order_id: number; vendor_id: number; currency: string; price_cents: number; delivery_cents: number; other_cents: number;
   arrives_at: string; note: string | null; chosen_at: string | null; created_at: string;
+  /** The delivery option in use (offer_deliveries), when the offer has options or a stated method. */
+  delivery_method: string | null; delivery_id: number | null;
 }
 
 export async function addOffer(
-  db: D1Database, o: { orderId: number; vendorId: number; currency: string; priceCents: number; deliveryCents: number; otherCents: number; arrivesAt: string; note?: string | null }, now: Date = new Date(),
+  db: D1Database,
+  o: { orderId: number; vendorId: number; currency: string; priceCents: number; deliveryCents: number; otherCents: number; arrivesAt: string; note?: string | null; deliveryMethod?: string | null },
+  now: Date = new Date(),
 ): Promise<OfferRow> {
   return (await db
-    .prepare(`INSERT INTO printer_offers (order_id, vendor_id, currency, price_cents, delivery_cents, other_cents, arrives_at, note, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`)
-    .bind(o.orderId, o.vendorId, o.currency, o.priceCents, o.deliveryCents, o.otherCents, o.arrivesAt, o.note ?? null, now.toISOString())
+    .prepare(`INSERT INTO printer_offers (order_id, vendor_id, currency, price_cents, delivery_cents, other_cents, arrives_at, note, delivery_method, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`)
+    .bind(o.orderId, o.vendorId, o.currency, o.priceCents, o.deliveryCents, o.otherCents, o.arrivesAt, o.note ?? null, o.deliveryMethod ?? null, now.toISOString())
     .first<OfferRow>())!;
 }
 
@@ -21,8 +26,13 @@ export async function listOffers(db: D1Database, orderId: number): Promise<Offer
   return (await db.prepare("SELECT * FROM printer_offers WHERE order_id = ? ORDER BY id").bind(orderId).all<OfferRow>()).results;
 }
 
+/** Deletes an unused offer with its delivery options. */
 export async function deleteOffer(db: D1Database, id: number): Promise<boolean> {
-  return (await db.prepare("DELETE FROM printer_offers WHERE id = ? AND chosen_at IS NULL").bind(id).run()).meta.changes === 1;
+  const [, removed] = await db.batch([
+    db.prepare("DELETE FROM offer_deliveries WHERE offer_id = ? AND offer_id IN (SELECT id FROM printer_offers WHERE id = ? AND chosen_at IS NULL)").bind(id, id),
+    db.prepare("DELETE FROM printer_offers WHERE id = ? AND chosen_at IS NULL").bind(id),
+  ]);
+  return removed.meta.changes === 1;
 }
 
 /** Landed cost in grosze (price + delivery + other, at NBP); offers arriving after the deadline rank after on-time ones; no rate, no rank. */
@@ -40,11 +50,18 @@ export function rankOffers(offers: OfferRow[], rate: (code: string) => number | 
     || a.offer.id - b.offer.id);
 }
 
-/** Records the offer's landed cost through giveCost() (as /cost does), then owes the printer the offer's price plus delivery. */
-export async function useOffer(env: Env, offerId: number, now: Date = new Date()): Promise<string> {
-  const offer = await env.DB.prepare("SELECT * FROM printer_offers WHERE id = ?").bind(offerId).first<OfferRow>();
+/**
+ * Records the offer's landed cost through giveCost() (as /cost does), then owes the printer the offer's price plus delivery.
+ * With `deliveryId` the offer first switches to that delivery option (it must be one of this offer's).
+ */
+export async function useOffer(env: Env, offerId: number, now: Date = new Date(), deliveryId?: number): Promise<string> {
+  let offer = await env.DB.prepare("SELECT * FROM printer_offers WHERE id = ?").bind(offerId).first<OfferRow>();
   if (!offer) return "No such offer.";
   if (offer.chosen_at) return "This offer was already used.";
+  if (deliveryId !== undefined) {
+    if (!(await setOfferDelivery(env.DB, offerId, deliveryId))) return "That delivery option isn't on this offer.";
+    offer = (await env.DB.prepare("SELECT * FROM printer_offers WHERE id = ?").bind(offerId).first<OfferRow>())!;
+  }
   const cost = await env.DB.prepare("SELECT id FROM escalations WHERE order_id = ? AND kind = 'cost' AND status = 'open' ORDER BY id DESC LIMIT 1").bind(offer.order_id).first<{ id: number }>();
   if (!cost) return "This order has no open cost request.";
   const r = await plnPer(env.DB, offer.currency, now);

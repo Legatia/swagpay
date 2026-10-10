@@ -12,6 +12,7 @@ import { countPdfPages, imageSize, sniffMediaType } from "../sniff";
 import { costRequestText, priceBand, quoteText } from "../quote-text";
 import type { FindResult, PrinterInfo } from "../discovery/discover";
 import { CITY_PATTERN } from "../discovery/names";
+import { deliveryLine } from "../deliveries";
 import { sanitize } from "./inbox";
 import type { ToolHandler, ToolOutcome } from "./loop";
 
@@ -52,6 +53,8 @@ export interface ToolContext extends DecisionLogger {
   findPrinters(city: string, country: string): Promise<FindResult | { refused: string }>;
   /** The owner's lines for printers the agent picked, or why they can't be asked; writes nothing. */
   pickedPrinters(vendorIds: number[]): Promise<{ lines: string[]; refused: string[] }>;
+  /** How the swag travels, when the cost for the items as they stand came from an offer with a delivery method. */
+  chosenDelivery(): Promise<{ method: string; arrivesAt: string } | null>;
   /** Records the picks on the cost request: the sandbox asks them (simulated replies), production drafts the requests for the owner. */
   askPrinters(escalationId: number, vendorIds: number[]): Promise<{ asked: number[]; refused: string[]; sandbox: boolean }>;
   orderSummary(): Promise<{ number: number; status: string; deliverBy: Date; deliveryPlace: string }>;
@@ -408,7 +411,8 @@ export function makeHandlers(ctx: ToolContext): Record<string, ToolHandler> {
         order.deliverBy.getTime(),
       ));
       const quote = await ctx.issueQuote({ currency, priceCents, depositCents, costPln, plnPerUnit: rates.plnPerUnit, usdPerUnit: rates.usdPerUnit, markup, itemsKey: key }, validUntil);
-      await ctx.postToHost(`${message}\n\n${quoteText(quote)}`);
+      const delivery = await ctx.chosenDelivery();
+      await ctx.postToHost(`${message}\n\n${quoteText(quote)}${delivery ? `\n${deliveryLine(delivery.method, delivery.arrivesAt)}` : ""}`);
       return {
         verdict: "allow", outcome: "done", detail: `quote #${quote.id}`,
         result: { content: `Quote #${quote.id} sent: ${formatCents(priceCents)} ${currency}, deposit ${formatCents(depositCents)} ${currency}.` },

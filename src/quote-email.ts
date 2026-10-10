@@ -28,7 +28,7 @@ export function quoteRequestEmail(p: { orderId: number; spec: OrderSpec; deliver
   const tail = [
     "",
     `Termin dostawy: do ${warsawDate(new Date(p.deliverBy))}, adres: ${oneLine(p.deliveryPlace, 120)}.`,
-    "Prosimy o cenę brutto z dostawą oraz czas realizacji.",
+    "Prosimy o cenę brutto z dostawą (kurier, paczkomat lub odbiór osobisty) oraz czas realizacji.",
     "Pliki z grafiką w załączniku.",
     "",
     "Pozdrawiamy,",

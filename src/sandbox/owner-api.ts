@@ -13,6 +13,7 @@ import { isSandbox } from "./config";
 import { plnPer } from "../fx";
 import { listOffers, useOffer } from "../offers";
 import { quoteRequestsFor } from "../quote-requests";
+import { deliveriesFor } from "../deliveries";
 import { simulatedQuote } from "./printer";
 
 export interface SandboxOwnerState {
@@ -27,7 +28,11 @@ export interface SandboxOwnerState {
     /** The printers the agent asked for this cost request, with their simulated replies. `use_offer` uses one. */
     quoteRequests: Array<{
       vendorId: number; name: string; city: string; status: string; declineReason: string | null;
-      offer: { offerId: number; currency: string; amount: number; landedPln: number | null; arrivesAt: string; late: boolean; used: boolean } | null;
+      offer: {
+        offerId: number; currency: string; amount: number; landedPln: number | null; arrivesAt: string; late: boolean; used: boolean;
+        /** Delivery options; `chosen` marks the one in use once the offer is used. use_offer takes a deliveryId. */
+        deliveries: Array<{ deliveryId: number; method: string; cost: number; currency: string; arrivesAt: string; late: boolean; chosen: boolean }>;
+      } | null;
     }>;
   } | null;
   /** The printer payment the owner makes by hand, with the dashboard's state label and allowed actions. */
@@ -84,6 +89,7 @@ async function ownerState(env: Env, order: OrderRow): Promise<SandboxOwnerState>
     let found = city ? await suggestVendors(env.DB, city, methods, 3) : [];
     if (!found.length) found = await suggestAnyVendors(env.DB, methods, 3); // unknown city or none there: the best printers anywhere
     const offers = await listOffers(env.DB, order.id);
+    const deliveries = await deliveriesFor(env.DB, offers.map((o) => o.id));
     const deadline = order.deliver_by.slice(0, 10);
     const quoteRequests = await Promise.all((await quoteRequestsFor(env.DB, costRow.id)).map(async (q) => {
       const o = q.offer_id === null ? null : offers.find((x) => x.id === q.offer_id) ?? null;
@@ -94,6 +100,10 @@ async function ownerState(env: Env, order: OrderRow): Promise<SandboxOwnerState>
           offerId: o.id, currency: o.currency, amount: o.price_cents / 100,
           landedPln: rate === null ? null : Math.round((o.price_cents + o.delivery_cents + o.other_cents) * rate) / 100,
           arrivesAt: o.arrives_at, late: o.arrives_at > deadline, used: o.chosen_at !== null,
+          deliveries: deliveries.filter((d) => d.offer_id === o.id).map((d) => ({
+            deliveryId: d.id, method: d.method, cost: d.cost_cents / 100, currency: o.currency, arrivesAt: d.arrives_at, late: d.arrives_at > deadline,
+            chosen: o.chosen_at !== null && o.delivery_id === d.id,
+          })),
         } : null,
       };
     }));
@@ -176,11 +186,15 @@ export async function handleSandboxOwner(request: Request, env: Env, token: stri
     case "use_offer": {
       const offerId = body.offerId;
       if (typeof offerId !== "number" || !Number.isInteger(offerId) || offerId <= 0) return bad("offerId must be an offer number.");
+      const deliveryId = body.deliveryId;
+      if (deliveryId !== undefined && deliveryId !== null && !(typeof deliveryId === "number" && Number.isInteger(deliveryId) && deliveryId > 0)) {
+        return bad("deliveryId must be a delivery option number.");
+      }
       const mine = await env.DB.prepare("SELECT id FROM printer_offers WHERE id = ? AND order_id = ?").bind(offerId, order.id).first<{ id: number }>();
       if (!mine) return notFound();
       const open = await env.DB.prepare("SELECT id FROM escalations WHERE order_id = ? AND kind = 'cost' AND status = 'open' ORDER BY id DESC LIMIT 1").bind(order.id).first<{ id: number }>();
       if (!open) return bad("No open cost request.");
-      const message = await useOffer(env, offerId);
+      const message = await useOffer(env, offerId, new Date(), (deliveryId as number | null | undefined) ?? undefined);
       const after = await env.DB.prepare("SELECT status FROM escalations WHERE id = ?").bind(open.id).first<{ status: string }>();
       return result({ ok: after?.status !== "open", message });
     }

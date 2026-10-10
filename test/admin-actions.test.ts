@@ -148,6 +148,15 @@ describe("admin actions", () => {
       expect(html).toContain("991.15 PLN");
     });
 
+    it("records how an added offer is delivered", async () => {
+      const { order } = await newOrderRow();
+      const v = await newVendor();
+      await post(`/admin/orders/${order.id}/offers`, offerFields(v, { delivery_method: "parcel_locker" }));
+      expect((await env.DB.prepare("SELECT delivery_method FROM printer_offers WHERE order_id = ?").bind(order.id).first())).toEqual({ delivery_method: "parcel_locker" });
+      expect(await ledgerHtml(order.id)).toContain("Parcel locker");
+      expect(msgOf(await post(`/admin/orders/${order.id}/offers`, offerFields(v, { delivery_method: "drone" })))).toBe("Choose a delivery method from the list.");
+    });
+
     it("refuses a bad amount, a date, a currency or an unscreened printer with a message", async () => {
       const { order } = await newOrderRow();
       const v = await newVendor();

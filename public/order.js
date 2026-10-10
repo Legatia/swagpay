@@ -178,13 +178,21 @@ function renderPayments(payments, payTo) {
   }
 }
 
+// How the swag travels, once the printer cost came from an offer with a delivery method.
+const DELIVERY_WORDS = { pickup: "Pickup at the printer", printer_courier: "The printer's courier", courier: "Courier", same_day: "Same-day courier", parcel_locker: "Parcel locker" };
+function deliveryNote(d) {
+  if (!d || !DELIVERY_WORDS[d.method] || !/^\d{4}-\d{2}-\d{2}$/.test(String(d.arrivesAt))) return "";
+  const day = new Date(`${d.arrivesAt}T12:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+  return d.method === "pickup" ? `. ${DELIVERY_WORDS.pickup} from ${day}` : `. ${DELIVERY_WORDS[d.method]}, arrives ${day}`;
+}
+
 async function refresh() {
   const res = await fetch(`/api/o/${token}`);
   if (res.status === 404) { $("event").textContent = "Order not found"; return; }
-  const { order, view, quote, payments, payTo } = await res.json();
+  const { order, view, quote, payments, payTo, delivery } = await res.json();
   $("job").textContent = `Order ${String(order.number).padStart(4, "0")}`;
   $("event").textContent = order.eventName;
-  $("delivery").textContent = `Deliver to ${order.deliveryPlace} by ${warsaw(order.deliverBy)} (Warsaw time)`;
+  $("delivery").textContent = `Deliver to ${order.deliveryPlace} by ${warsaw(order.deliverBy)} (Warsaw time)${deliveryNote(delivery)}`;
   renderStatus(order, quote, view.missing);
   const firstVisit = seenReplies === null;
   renderSpec(view.spec, view.missing);
